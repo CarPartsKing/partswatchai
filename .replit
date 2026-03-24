@@ -3,7 +3,7 @@ modules = ["python-3.11"]
 
 [nix]
 channel = "stable-25_05"
-packages = ["glibcLocales"]
+packages = ["glibcLocales", "ocl-icd", "opencl-headers", "gcc", "patchelf", "libgcc"]
 
 [unitTest]
 language = "python3"

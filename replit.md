@@ -81,7 +81,8 @@ partswatch-ai/
 ├── ml/
 │   ├── __init__.py
 │   ├── anomaly.py                   # Isolation Forest — flags anomalous sales days
-│   └── forecast_rolling.py          # 13-week rolling avg — C-class SKU forecasts
+│   ├── forecast_rolling.py          # 13-week rolling avg — C-class SKU forecasts
+│   └── forecast_lgbm.py             # LightGBM gradient-boosted demand forecast — B-class SKUs
 └── models/                          # ML model wrappers (to be built)
 ```
 
@@ -127,6 +128,30 @@ All DDL is idempotent (IF NOT EXISTS) — safe to re-run.
 | `weather_log` | log_date, consecutive_freeze_days, freeze_thaw_cycle |
 | `forecast_results` | sku_id, forecast_date, model_type (prophet/lightgbm/rolling_avg) |
 | `supplier_scores` | supplier_id, score_date, composite_score |
+
+## Nightly Pipeline Execution Order
+Run stages in this order — each depends on the output of the prior stage:
+```
+python -m extract.partswatch_pull   # Load raw PartsWatch data → 4 tables
+python -m transform.clean            # Null-fill, type coerce, range-clamp
+python -m transform.derive           # Lost sales, ABC class, supplier scores, weather sensitivity, SKU metrics
+python -m ml.anomaly                 # Isolation Forest → is_anomaly flag on sales_transactions
+python -m ml.forecast_rolling        # 13-week rolling avg for C-class SKUs → forecast_results
+python -m ml.forecast_lgbm           # LightGBM gradient-boosted forecast for B-class SKUs → forecast_results
+```
+
+## NixOS / LightGBM libgomp Fix
+LightGBM 4.6.0's shared library (`lib_lightgbm.so`) requires `libgomp.so.1` (GCC OpenMP).
+On NixOS the linker path is not automatically configured. Two things were done to resolve this:
+
+1. **patchelf** (`patchelf` added to system deps) — adds the correct GCC lib rpath permanently into `lib_lightgbm.so`:
+   ```
+   patchelf --add-rpath /nix/store/bmi5znnqk4kg2grkrhk6py0irc8phf6l-gcc-14.2.1.20250322-lib/lib \
+       .pythonlibs/lib/python3.11/site-packages/lightgbm/lib/lib_lightgbm.so
+   ```
+2. **ctypes pre-load guard** in `ml/forecast_lgbm.py` — as a belt-and-suspenders fallback that re-loads the correct `libgomp.so.1` before importing LightGBM, using the path in `_GOMP_DIR` (overridable via `GOMP_LIB_DIR` env var if the GCC hash changes after a `nix-env -u`).
+
+If the nix store hash changes (after a NixOS update), re-run the patchelf command and update `_GOMP_DIR` in `ml/forecast_lgbm.py`.
 
 ## Coding Standards
 - Full docstrings on every function

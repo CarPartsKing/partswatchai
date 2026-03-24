@@ -57,26 +57,53 @@ Acts as shared foundation code (config, DB connection, logging utilities) and sy
 ## Project Structure
 ```
 partswatch-ai/
-├── main.py                  # System health check entry point
-├── db_setup.py              # One-time DDL: creates all 7 tables + indexes
-├── config.py                # All env-var config in one place
-├── .env.example             # Secret template (copy → .env)
+├── main.py                          # System health check entry point
+├── config.py                        # All env-var config in one place
+├── .env.example                     # Secret template (copy → .env)
+├── config/
+│   └── partswatch_column_map.json   # Maps schema fields → PartsWatch export names
 ├── db/
 │   ├── __init__.py
-│   └── connection.py        # Supabase singleton + retry helpers
+│   └── connection.py                # Supabase singleton + retry helpers
+├── extract/
+│   ├── __init__.py
+│   ├── weather_pull.py              # Open-Meteo → weather_log (1,110 rows live)
+│   └── partswatch_pull.py          # PartsWatch → 4 Supabase tables
+├── sample_data/                     # Realistic test CSVs (15 SKUs, 5 locations)
+│   ├── sku_master.csv
+│   ├── sales_transactions.csv       # 55 transactions Jan–Mar 2026
+│   ├── inventory_snapshots.csv      # 45 rows (15 SKUs × 3 locations, Mar 23)
+│   └── purchase_orders.csv          # 20 PO lines, 5 POs, mix of statuses
 ├── utils/
 │   ├── __init__.py
-│   └── logging_config.py    # Shared timestamped logger
-└── models/                  # ML model wrappers (to be built)
+│   └── logging_config.py            # Shared timestamped logger
+└── models/                          # ML model wrappers (to be built)
 ```
+
+## PartsWatch Pipeline — Switching Data Sources
+Change ONE environment variable — nothing else in the codebase changes:
+| `PARTSWATCH_SOURCE` | What it does |
+|---------------------|-------------|
+| `csv` (default) | Reads CSV/Excel files from `PARTSWATCH_CSV_PATH` folder |
+| `odbc` | ODBC connection (stub — ready to implement when Autologue provides DSN) |
+| `api` | REST API (stub — ready to implement when Autologue provides credentials) |
+
+When real PartsWatch exports arrive from Autologue:
+1. Update column values in `config/partswatch_column_map.json`
+2. Drop real export files into `PARTSWATCH_CSV_PATH`
+3. Run `python -m extract.partswatch_pull`
 
 ## Environment Variables (.env)
 | Variable | Required | Description |
 |----------|----------|-------------|
 | `SUPABASE_URL` | Yes | Supabase project URL |
 | `SUPABASE_KEY` | Yes | Supabase service role key |
-| `SUPABASE_DB_URL` | Yes | PostgreSQL URI (Project Settings → Database → URI) |
 | `ANTHROPIC_API_KEY` | Yes | Claude API key |
+| `PARTSWATCH_SOURCE` | No | csv \| odbc \| api (default: csv) |
+| `PARTSWATCH_CSV_PATH` | No | Folder with export files (default: sample_data) |
+| `PARTSWATCH_ODBC_DSN` | No | ODBC connection string (only if SOURCE=odbc) |
+| `PARTSWATCH_API_URL` | No | API base URL (only if SOURCE=api) |
+| `PARTSWATCH_API_KEY` | No | API key (only if SOURCE=api) |
 | `WEATHER_LAT` | No | NE Ohio latitude (default: 41.4993) |
 | `WEATHER_LON` | No | NE Ohio longitude (default: -81.6944) |
 | `LOG_LEVEL` | No | INFO / DEBUG / WARNING (default: INFO) |

@@ -78,6 +78,28 @@ ABC_CLASS_B_TOP_N: int = 40_000    # Next 30K SKUs → LightGBM
 
 ROLLING_AVERAGE_WEEKS: int = 13    # C-class rolling window
 
+# ---------------------------------------------------------------------------
+# PartsWatch data extraction
+# ---------------------------------------------------------------------------
+
+# Which data source to use: csv | odbc | api
+# Switching sources = change this one variable. Nothing else changes.
+PARTSWATCH_SOURCE: str = _optional("PARTSWATCH_SOURCE", "csv").lower()
+
+# Path to the folder containing PartsWatch CSV / Excel export files
+# Defaults to sample_data/ so the pipeline works out of the box for testing
+PARTSWATCH_CSV_PATH: str = _optional("PARTSWATCH_CSV_PATH", "sample_data")
+
+# ODBC connection string — only required when PARTSWATCH_SOURCE=odbc
+PARTSWATCH_ODBC_DSN: str = _optional("PARTSWATCH_ODBC_DSN", "")
+
+# REST API credentials — only required when PARTSWATCH_SOURCE=api
+PARTSWATCH_API_URL: str = _optional("PARTSWATCH_API_URL", "")
+PARTSWATCH_API_KEY: str = _optional("PARTSWATCH_API_KEY", "")
+
+# Column map config file — maps our schema names to PartsWatch export names
+PARTSWATCH_COLUMN_MAP_PATH: str = "config/partswatch_column_map.json"
+
 # Expected database tables
 EXPECTED_TABLES: list[str] = [
     "sales_transactions",

@@ -1,0 +1,49 @@
+{
+  "_comment": "Maps our schema field names (keys) to whatever PartsWatch calls them in the export (values). Update the values when you get real export files from Autologue. Never change the keys — those are our database column names.",
+
+  "sku_master": {
+    "sku_id":                    "PartNumber",
+    "description":               "Description",
+    "brand":                     "Brand",
+    "part_category":             "Category",
+    "sub_category":              "SubCategory",
+    "unit_of_measure":           "UnitOfMeasure"
+  },
+
+  "sales_transactions": {
+    "transaction_id":            "TransactionID",
+    "sku_id":                    "PartNumber",
+    "location_id":               "StoreID",
+    "transaction_date":          "SaleDate",
+    "qty_sold":                  "QtySold",
+    "unit_price":                "UnitPrice",
+    "total_revenue":             "TotalRevenue",
+    "is_stockout":               "IsStockout",
+    "lost_sales_imputation":     "LostSalesEstimate"
+  },
+
+  "inventory_snapshots": {
+    "sku_id":                    "PartNumber",
+    "location_id":               "StoreID",
+    "snapshot_date":             "SnapshotDate",
+    "qty_on_hand":               "QtyOnHand",
+    "qty_on_order":              "QtyOnOrder",
+    "reorder_point":             "ReorderPoint",
+    "reorder_qty":               "ReorderQty"
+  },
+
+  "purchase_orders": {
+    "po_number":                 "PONumber",
+    "line_number":               "LineNumber",
+    "sku_id":                    "PartNumber",
+    "supplier_id":               "SupplierID",
+    "location_id":               "StoreID",
+    "po_date":                   "PODate",
+    "expected_delivery_date":    "ExpectedDelivery",
+    "actual_delivery_date":      "ActualDelivery",
+    "qty_ordered":               "QtyOrdered",
+    "qty_received":              "QtyReceived",
+    "unit_cost":                 "UnitCost",
+    "status":                    "Status"
+  }
+}

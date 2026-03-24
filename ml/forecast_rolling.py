@@ -95,6 +95,12 @@ _PAGE_SIZE: int = 1000
 # Upsert batch size
 BATCH_SIZE: int = 500
 
+# Tier 3 blending — when a location is Tier 3 AND demand_quality_score is
+# below LOW_QUALITY_THRESHOLD, the forecast is blended toward the Tier 1+2
+# regional average to reduce third-call / residual-demand signal bias.
+TIER3_BLEND_WEIGHT:    float = 0.40   # weight on regional average (0=none, 1=full regional)
+LOW_QUALITY_THRESHOLD: float = 0.50   # demand_quality_score below this triggers blending
+
 
 # ---------------------------------------------------------------------------
 # Shared fetch helper
@@ -176,6 +182,7 @@ def _fetch_transactions(client: Any, cutoff: str) -> list[dict]:
             .select(select)
             .gte("transaction_date", cutoff)
             .eq("is_anomaly", False)
+            .eq("is_residual_demand", False)
             .range(offset, offset + _PAGE_SIZE - 1)
             .execute()
             .data
@@ -322,6 +329,69 @@ def _compute_forecast(
 
 
 # ---------------------------------------------------------------------------
+# Location tier and demand quality helpers
+# ---------------------------------------------------------------------------
+
+def _fetch_location_tiers(client: Any) -> dict[str, int]:
+    """Return location_tier keyed by location_id from the locations table.
+
+    Falls back gracefully — callers receive Tier 2 (neutral) for any
+    location not yet classified by transform/location_classify.py.
+
+    Returns:
+        {location_id: tier (1/2/3)}
+    """
+    rows: list[dict] = []
+    offset = 0
+    while True:
+        page = (
+            client.table("locations")
+            .select("location_id,location_tier")
+            .range(offset, offset + _PAGE_SIZE - 1)
+            .execute().data or []
+        )
+        rows.extend(page)
+        if len(page) < _PAGE_SIZE:
+            break
+        offset += _PAGE_SIZE
+    return {
+        r["location_id"]: int(r["location_tier"])
+        for r in rows
+        if r.get("location_id") and r.get("location_tier") is not None
+    }
+
+
+def _fetch_demand_quality(client: Any) -> dict[tuple[str, str], float]:
+    """Return demand_quality_score keyed by (sku_id, location_id).
+
+    Falls back gracefully — callers receive 1.0 (fully organic) for pairs
+    not yet scored by transform/location_classify.py.
+
+    Returns:
+        {(sku_id, location_id): demand_quality_score (0.0–1.0)}
+    """
+    rows: list[dict] = []
+    offset = 0
+    while True:
+        page = (
+            client.table("sku_location_demand_quality")
+            .select("sku_id,location_id,demand_quality_score")
+            .range(offset, offset + _PAGE_SIZE - 1)
+            .execute().data or []
+        )
+        rows.extend(page)
+        if len(page) < _PAGE_SIZE:
+            break
+        offset += _PAGE_SIZE
+    return {
+        (r["sku_id"], r["location_id"]): float(r["demand_quality_score"])
+        for r in rows
+        if r.get("sku_id") and r.get("location_id")
+        and r.get("demand_quality_score") is not None
+    }
+
+
+# ---------------------------------------------------------------------------
 # Orchestrator
 # ---------------------------------------------------------------------------
 
@@ -393,6 +463,39 @@ def run_forecast(dry_run: bool = False) -> int:
 
     log.info("-" * 60)
 
+    # ── 3b. Fetch location tiers + demand quality for Tier 3 blending ─────
+    log.info("Fetching location tiers and demand quality scores …")
+    location_tiers = _fetch_location_tiers(client)
+    demand_quality = _fetch_demand_quality(client)
+    log.info(
+        "  Location tiers loaded: %d  Demand quality pairs: %d",
+        len(location_tiers), len(demand_quality),
+    )
+
+    # Pre-compute per-(SKU, location) mean demand so we can build regional
+    # baselines for Tier 1+2 locations without a second DB round-trip.
+    loc_mean_demand: dict[tuple[str, str], float] = {}
+    for (sku, loc), loc_rows in groups.items():
+        s, _ = _build_demand_series(loc_rows, cutoff, today)
+        loc_mean_demand[(sku, loc)] = float(np.mean(s))
+
+    # Regional mean demand per SKU: average of Tier 1+2 locations only.
+    from collections import defaultdict as _dd
+    sku_tier12_sums: dict[str, list[float]] = _dd(list)
+    for (sku, loc), mean_d in loc_mean_demand.items():
+        if location_tiers.get(loc, 2) <= 2:
+            sku_tier12_sums[sku].append(mean_d)
+    sku_regional_mean: dict[str, float] = {
+        sku: sum(vals) / len(vals)
+        for sku, vals in sku_tier12_sums.items()
+        if vals
+    }
+    log.info(
+        "  Regional baselines available for %d C-class SKU(s).",
+        len(sku_regional_mean),
+    )
+    log.info("-" * 60)
+
     # ── 4. Process each (SKU, location) ──────────────────────────────────
     processed_pairs = 0
     skipped_pairs   = 0
@@ -415,6 +518,28 @@ def run_forecast(dry_run: bool = False) -> int:
         )
         mean_d = float(np.mean(series))
         std_d  = float(np.std(series))
+
+        # Tier 3 blending: weight predictions toward regional (Tier 1+2) mean
+        # when demand quality is below the threshold.
+        loc_tier = location_tiers.get(location_id, 2)
+        dq_score = float(demand_quality.get((sku_id, location_id), 1.0))
+        if loc_tier == 3 and dq_score < LOW_QUALITY_THRESHOLD:
+            regional = sku_regional_mean.get(sku_id, mean_d)
+            blended_pred = round(
+                TIER3_BLEND_WEIGHT * regional
+                + (1.0 - TIER3_BLEND_WEIGHT) * mean_d,
+                4,
+            )
+            fc_rows = [
+                {**r, "predicted_qty": blended_pred}
+                for r in fc_rows
+            ]
+            log.debug(
+                "  BLEND %-12s  %-10s  Tier 3  dq=%.2f  local=%.2f  "
+                "regional=%.2f  blended=%.2f",
+                sku_id, location_id, dq_score, mean_d, regional, blended_pred,
+            )
+
         log.info(
             "  OK    %-12s  %-10s  %d sale day(s)  "
             "mean=%.2f  std=%.2f  → %d forecast row(s)",

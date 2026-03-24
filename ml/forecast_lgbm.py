@@ -118,6 +118,12 @@ _PAGE_SIZE: int = 1000
 # Upsert batch size
 BATCH_SIZE: int = 500
 
+# Tier 3 blending — when a location is Tier 3 AND demand_quality_score is
+# below LOW_QUALITY_THRESHOLD, predictions are blended toward the Tier 1+2
+# regional baseline to reduce third-call / residual-demand signal bias.
+TIER3_BLEND_WEIGHT:    float = 0.40   # weight on regional average (0=none, 1=full regional)
+LOW_QUALITY_THRESHOLD: float = 0.50   # demand_quality_score below this triggers blending
+
 # LightGBM hyperparameters — tuned for speed on 60–730-row histories
 LGBM_PARAMS: dict = {
     "objective":        "regression",
@@ -147,6 +153,7 @@ FEATURE_NAMES: list[str] = [
     "freeze_thaw_cycle",
     "snowfall_in",
     "consecutive_freeze_days",
+    "demand_quality_score",   # 13th feature: 0.0 (residual) → 1.0 (organic)
 ]
 
 
@@ -204,6 +211,7 @@ def _fetch_transactions(client: Any, cutoff: str) -> list[dict]:
             .select(select)
             .gte("transaction_date", cutoff)
             .eq("is_anomaly", False)
+            .eq("is_residual_demand", False)
             .range(offset, offset + _PAGE_SIZE - 1)
             .execute()
             .data
@@ -337,8 +345,9 @@ def _build_feature_row(
     fallback_weather: dict,
     fallback_demand: float,
     today: date,
+    demand_quality_score: float = 1.0,
 ) -> list[float]:
-    """Compute the 12 feature values for one (SKU, location, date) observation.
+    """Compute the 13 feature values for one (SKU, location, date) observation.
 
     For lag dates that fall inside the forecast horizon (i.e. after today),
     fallback_demand (rolling_mean_28 of the training series) is used instead
@@ -346,15 +355,17 @@ def _build_feature_row(
     while still capturing the SKU's typical demand level.
 
     Args:
-        target:          The date being featurised.
-        demand_by_date:  Historical demand dict {date_str: demand}.
-        weather_by_date: Weather lookup dict {date_str: weather_dict}.
-        fallback_weather: Climate-mean values for out-of-window dates.
-        fallback_demand: Substitute demand for lag dates in the future.
-        today:           The run date (first day of the forecast horizon).
+        target:               The date being featurised.
+        demand_by_date:       Historical demand dict {date_str: demand}.
+        weather_by_date:      Weather lookup dict {date_str: weather_dict}.
+        fallback_weather:     Climate-mean values for out-of-window dates.
+        fallback_demand:      Substitute demand for lag dates in the future.
+        today:                The run date (first day of the forecast horizon).
+        demand_quality_score: Per-(SKU, location) organic demand ratio (0.0–1.0).
+                              Constant across all dates for a given pair.
 
     Returns:
-        List of 12 floats in FEATURE_NAMES order.
+        List of 13 floats in FEATURE_NAMES order.
     """
     def get_demand(d: date) -> float:
         if d >= today:
@@ -389,6 +400,7 @@ def _build_feature_row(
         lag_7, lag_14, lag_28,
         rolling_mean_7, rolling_mean_28,
         float(temp), float(freeze), float(snow), float(cfd),
+        float(demand_quality_score),
     ]
 
 
@@ -399,19 +411,21 @@ def _build_matrices(
     fallback_weather: dict,
     fallback_demand: float,
     today: date,
+    demand_quality_score: float = 1.0,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Build feature matrix X and target vector y for a list of history dates.
 
     Args:
-        history_dates:  Sorted list of calendar dates to featurise.
-        demand_by_date: Historical demand dict.
-        weather_by_date: Weather lookup.
-        fallback_weather: Out-of-window weather fallback.
-        fallback_demand: Fallback demand for future lag lookups.
-        today:          Run date.
+        history_dates:        Sorted list of calendar dates to featurise.
+        demand_by_date:       Historical demand dict.
+        weather_by_date:      Weather lookup.
+        fallback_weather:     Out-of-window weather fallback.
+        fallback_demand:      Fallback demand for future lag lookups.
+        today:                Run date.
+        demand_quality_score: Organic demand ratio for this (SKU, location) pair.
 
     Returns:
-        (X, y) where X has shape (n, 12) and y has shape (n,).
+        (X, y) where X has shape (n, 13) and y has shape (n,).
     """
     rows = []
     targets = []
@@ -420,6 +434,7 @@ def _build_matrices(
             _build_feature_row(
                 d, demand_by_date, weather_by_date,
                 fallback_weather, fallback_demand, today,
+                demand_quality_score=demand_quality_score,
             )
         )
         targets.append(demand_by_date.get(d.isoformat(), 0.0))
@@ -485,6 +500,7 @@ def _generate_forecast(
     val_rmse: float,
     today: date,
     run_date_str: str,
+    demand_quality_score: float = 1.0,
 ) -> list[dict]:
     """Generate FORECAST_HORIZON rows of predictions with uncertainty bounds.
 
@@ -492,15 +508,16 @@ def _generate_forecast(
     Lower bound is floored at 0 (demand cannot be negative).
 
     Args:
-        sku_id, location_id: Identifiers.
-        model:               Fitted LightGBM booster.
-        demand_by_date:      Historical demand dict for lag lookups.
-        weather_by_date:     Weather lookup.
-        fallback_weather:    Out-of-window weather fallback.
-        fallback_demand:     Fallback for future lag lookups.
-        val_rmse:            Validation RMSE used as uncertainty measure.
-        today:               First forecast date.
-        run_date_str:        ISO run date string.
+        sku_id, location_id:  Identifiers.
+        model:                Fitted LightGBM booster.
+        demand_by_date:       Historical demand dict for lag lookups.
+        weather_by_date:      Weather lookup.
+        fallback_weather:     Out-of-window weather fallback.
+        fallback_demand:      Fallback for future lag lookups.
+        val_rmse:             Validation RMSE used as uncertainty measure.
+        today:                First forecast date.
+        run_date_str:         ISO run date string.
+        demand_quality_score: Organic demand ratio; passed as a constant feature.
 
     Returns:
         List of FORECAST_HORIZON forecast row dicts.
@@ -510,6 +527,7 @@ def _generate_forecast(
         _build_feature_row(
             d, demand_by_date, weather_by_date,
             fallback_weather, fallback_demand, today,
+            demand_quality_score=demand_quality_score,
         )
         for d in forecast_dates
     ]
@@ -533,6 +551,69 @@ def _generate_forecast(
             "run_date":      run_date_str,
         })
     return result
+
+
+# ---------------------------------------------------------------------------
+# Location tier and demand quality helpers
+# ---------------------------------------------------------------------------
+
+def _fetch_location_tiers(client: Any) -> dict[str, int]:
+    """Return location_tier keyed by location_id from the locations table.
+
+    Falls back gracefully — callers receive Tier 2 (neutral) for any
+    location not yet classified by transform/location_classify.py.
+
+    Returns:
+        {location_id: tier (1/2/3)}
+    """
+    rows: list[dict] = []
+    offset = 0
+    while True:
+        page = (
+            client.table("locations")
+            .select("location_id,location_tier")
+            .range(offset, offset + _PAGE_SIZE - 1)
+            .execute().data or []
+        )
+        rows.extend(page)
+        if len(page) < _PAGE_SIZE:
+            break
+        offset += _PAGE_SIZE
+    return {
+        r["location_id"]: int(r["location_tier"])
+        for r in rows
+        if r.get("location_id") and r.get("location_tier") is not None
+    }
+
+
+def _fetch_demand_quality(client: Any) -> dict[tuple[str, str], float]:
+    """Return demand_quality_score keyed by (sku_id, location_id).
+
+    Falls back gracefully — callers receive 1.0 (fully organic) for pairs
+    not yet scored by transform/location_classify.py.
+
+    Returns:
+        {(sku_id, location_id): demand_quality_score (0.0–1.0)}
+    """
+    rows: list[dict] = []
+    offset = 0
+    while True:
+        page = (
+            client.table("sku_location_demand_quality")
+            .select("sku_id,location_id,demand_quality_score")
+            .range(offset, offset + _PAGE_SIZE - 1)
+            .execute().data or []
+        )
+        rows.extend(page)
+        if len(page) < _PAGE_SIZE:
+            break
+        offset += _PAGE_SIZE
+    return {
+        (r["sku_id"], r["location_id"]): float(r["demand_quality_score"])
+        for r in rows
+        if r.get("sku_id") and r.get("location_id")
+        and r.get("demand_quality_score") is not None
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -604,6 +685,33 @@ def run_forecast(dry_run: bool = False) -> int:
         log.info("  %d B-class SKU(s) had no sales in the 2-year window.", skus_no_sales)
     log.info("-" * 60)
 
+    # ── 4b. Fetch location tiers + demand quality for blending ────────────
+    log.info("Fetching location tiers and demand quality scores …")
+    location_tiers = _fetch_location_tiers(client)
+    demand_quality = _fetch_demand_quality(client)
+    log.info(
+        "  Location tiers loaded: %d  Demand quality pairs: %d",
+        len(location_tiers), len(demand_quality),
+    )
+
+    # Regional baseline demand per SKU: mean of Tier 1+2 location histories.
+    # Used to blend Tier 3 forecasts away from residual-demand-inflated signals.
+    from collections import defaultdict as _dd
+    sku_tier12_means: dict[str, list[float]] = _dd(list)
+    for (sku, loc), daily in demand_map.items():
+        if location_tiers.get(loc, 2) <= 2 and daily:
+            sku_tier12_means[sku].append(sum(daily.values()) / len(daily))
+    sku_regional_baseline: dict[str, float] = {
+        sku: sum(vals) / len(vals)
+        for sku, vals in sku_tier12_means.items()
+        if vals
+    }
+    log.info(
+        "  Regional baselines computed for %d B-class SKU(s) with Tier 1/2 history.",
+        len(sku_regional_baseline),
+    )
+    log.info("-" * 60)
+
     # ── 5. Train one model per (SKU, location) ────────────────────────────
     processed   = 0
     skipped     = 0
@@ -613,6 +721,10 @@ def run_forecast(dry_run: bool = False) -> int:
 
     for sku_id, location_id in active_pairs:
         demand_by_date = demand_map[(sku_id, location_id)]
+
+        # Look up demand quality and location tier for this pair
+        dq_score = float(demand_quality.get((sku_id, location_id), 1.0))
+        loc_tier = location_tiers.get(location_id, 2)
 
         # Determine calendar span from first sale to yesterday
         all_dates_str = sorted(demand_by_date.keys())
@@ -656,10 +768,12 @@ def run_forecast(dry_run: bool = False) -> int:
         X_train, y_train = _build_matrices(
             train_dates, demand_by_date, weather_by_date,
             fallback_weather, fallback_demand, today,
+            demand_quality_score=dq_score,
         )
         X_val, y_val = _build_matrices(
             val_dates, demand_by_date, weather_by_date,
             fallback_weather, fallback_demand, today,
+            demand_quality_score=dq_score,
         )
 
         try:
@@ -679,7 +793,30 @@ def run_forecast(dry_run: bool = False) -> int:
             sku_id, location_id, model,
             demand_by_date, weather_by_date, fallback_weather,
             fallback_demand, val_rmse, today, run_date_str,
+            demand_quality_score=dq_score,
         )
+
+        # Tier 3 blending: if this location has low demand quality, weight
+        # predictions toward the regional (Tier 1+2) baseline mean to reduce
+        # the influence of third-call / residual-demand-inflated history.
+        if loc_tier == 3 and dq_score < LOW_QUALITY_THRESHOLD:
+            regional = sku_regional_baseline.get(sku_id, fallback_demand)
+            fc_rows = [
+                {
+                    **r,
+                    "predicted_qty": round(
+                        TIER3_BLEND_WEIGHT * regional
+                        + (1.0 - TIER3_BLEND_WEIGHT) * r["predicted_qty"],
+                        4,
+                    ),
+                }
+                for r in fc_rows
+            ]
+            log.debug(
+                "  BLEND %-12s  %-10s  Tier 3  dq=%.2f  regional=%.2f  "
+                "blend_wt=%.0f%%",
+                sku_id, location_id, dq_score, regional, TIER3_BLEND_WEIGHT * 100,
+            )
 
         mean_pred = sum(r["predicted_qty"] for r in fc_rows) / len(fc_rows)
         log.info(

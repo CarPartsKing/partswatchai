@@ -1,0 +1,76 @@
+New business requirement from ownership — critical 
+for forecast accuracy.
+
+Our company has locations that are "third call" stores. 
+These locations only get orders for certain SKUs when 
+other distributors are stocked out. Their sales history 
+for those SKUs is artificially inflated — it represents 
+residual market demand, not true organic demand for 
+that location.
+
+If we forecast based on this distorted history, we will 
+overstock bad SKUs at underperforming locations and make 
+poor purchasing decisions.
+
+We need to add location performance classification 
+to the system. Build this in two parts:
+
+PART 1 — transform/location_classify.py
+
+Classify each location on two dimensions:
+
+1. Overall performance tier (1/2/3):
+   - Tier 1: first-call locations — high fill rate, 
+     high revenue, low returns, broad SKU coverage
+   - Tier 2: second-call locations — solid performers, 
+     moderate breadth
+   - Tier 3: third-call locations — low fill rate, 
+     narrow SKU coverage, high dependency on specific 
+     categories that nobody else stocks
+
+2. Per SKU + location demand quality score (0.0 to 1.0):
+   - 1.0 = this location is consistently selling this 
+     SKU in all market conditions — true organic demand
+   - 0.5 = mixed signal — sometimes organic, sometimes 
+     residual
+   - 0.0 = this location only sells this SKU when 
+     correlated stockouts exist at other locations 
+     in the same market — pure residual demand
+
+To detect residual demand:
+   - When multiple locations in the same region 
+     show simultaneous stockouts on a SKU, and a 
+     third-call location shows a sales spike at the 
+     same time — that spike is residual, not organic
+   - Flag those sales events in sales_transactions 
+     as is_residual_demand = TRUE
+   - These flagged sales should be EXCLUDED from 
+     forecast training data just like anomalies
+
+Add is_residual_demand BOOLEAN DEFAULT FALSE 
+to sales_transactions via migration 009.
+
+Add to sku_master:
+   - demand_quality_score per location (new table: 
+     sku_location_demand_quality)
+   - location_tier (1/2/3) to a new locations table
+
+PART 2 — update forecast_lgbm.py and forecast_rolling.py
+
+Add demand_quality_score as a feature in LightGBM.
+Exclude is_residual_demand = TRUE records from 
+all model training — same pattern as is_anomaly.
+
+When generating forecasts for a Tier 3 location 
+on a low demand_quality SKU, weight the forecast 
+toward the regional average rather than that 
+location's own history.
+
+This makes the system understand not just what 
+sells, but why it sells and whether that signal 
+should be trusted.
+
+New capability = new files. 
+location_classify.py only classifies locations 
+and demand quality. Nothing else changes except 
+the exclusion filter in the forecasting models.

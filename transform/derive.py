@@ -227,7 +227,13 @@ def derive_lost_sales_imputation(client: Any) -> dict:
             "lost_sales_imputation": imputed,
         })
 
-    _upsert(client, "sales_transactions", updates, on_conflict="transaction_id")
+    # Use UPDATE (not upsert) — we are patching one field on an existing row.
+    # Upsert would try to INSERT a new row with nulls for all other NOT NULL
+    # columns when the conflict key is not found, which fails the constraint.
+    for row in updates:
+        client.table("sales_transactions").update(
+            {"lost_sales_imputation": row["lost_sales_imputation"]}
+        ).eq("transaction_id", row["transaction_id"]).execute()
 
     log.info(
         "  Updated lost_sales_imputation for %d stockout transaction(s).",

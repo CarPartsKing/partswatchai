@@ -83,6 +83,10 @@ partswatch-ai/
 │   ├── anomaly.py                   # Isolation Forest — flags anomalous sales days
 │   ├── forecast_rolling.py          # 13-week rolling avg — C-class SKU forecasts
 │   └── forecast_lgbm.py             # LightGBM gradient-boosted demand forecast — B-class SKUs
+├── engine/
+│   ├── __init__.py
+│   ├── transfer.py                  # Pure-computation inter-location excess detector (no DB I/O)
+│   └── reorder.py                   # Recommendation engine → reorder_recommendations table
 └── models/                          # ML model wrappers (to be built)
 ```
 
@@ -127,7 +131,8 @@ All DDL is idempotent (IF NOT EXISTS) — safe to re-run.
 | `purchase_orders` | po_number, sku_id, supplier_id, lead_time_variance (generated), fill_rate_pct (generated) |
 | `weather_log` | log_date, consecutive_freeze_days, freeze_thaw_cycle |
 | `forecast_results` | sku_id, forecast_date, model_type (prophet/lightgbm/rolling_avg) |
-| `supplier_scores` | supplier_id, score_date, composite_score |
+| `supplier_scores` | supplier_id, score_date, composite_score, risk_flag |
+| `reorder_recommendations` | sku_id, location_id, recommendation_date, qty_to_order, recommendation_type (po/transfer), urgency, is_approved |
 
 ## Nightly Pipeline Execution Order
 Run stages in this order — each depends on the output of the prior stage:
@@ -138,6 +143,7 @@ python -m transform.derive           # Lost sales, ABC class, supplier scores, w
 python -m ml.anomaly                 # Isolation Forest → is_anomaly flag on sales_transactions
 python -m ml.forecast_rolling        # 13-week rolling avg for C-class SKUs → forecast_results
 python -m ml.forecast_lgbm           # LightGBM gradient-boosted forecast for B-class SKUs → forecast_results
+python -m engine.reorder             # Convert forecasts → reorder_recommendations (transfers + POs)
 ```
 
 ## NixOS / LightGBM libgomp Fix

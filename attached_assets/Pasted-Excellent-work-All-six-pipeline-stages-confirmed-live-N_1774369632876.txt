@@ -1,0 +1,58 @@
+Excellent work. All six pipeline stages confirmed live.
+
+Next: engine/reorder.py
+
+This is the file that converts forecasts into actual 
+purchase order recommendations. This is the core 
+output the purchasing team will act on every morning.
+
+Build it to:
+1. Pull all forecast_results for the next 30 days 
+   where model_type IN ('lightgbm', 'rolling_avg')
+   — Prophet results will be added later when 
+   that model runs weekly
+2. Pull current inventory from the most recent 
+   inventory_snapshots per SKU per location
+3. Pull supplier data from supplier_scores — 
+   use avg_lead_time_days to determine how many 
+   days of stock we need to cover before the 
+   order arrives
+4. For each SKU + location calculate:
+   - days_of_supply_remaining = qty_on_hand / 
+     avg_daily_forecast
+   - order_needed = TRUE if days_of_supply_remaining 
+     is less than (avg_lead_time_days + 7 day buffer)
+   - qty_to_order = forecasted demand over lead time 
+     + buffer minus qty_on_hand minus qty_on_order
+5. BEFORE generating any outside PO recommendation,
+   check engine/transfer.py logic — if another 
+   location has excess stock of the same SKU, 
+   recommend a transfer instead of a PO. 
+   Transfers always take priority over outside POs.
+6. Route each recommendation to the right supplier
+   using primary_supplier_id from sku_master.
+   If supplier risk_flag = 'red', flag the 
+   recommendation and suggest alternate sourcing.
+7. Write all recommendations to a new table:
+   reorder_recommendations with columns:
+   - sku_id, location_id, recommendation_date
+   - qty_to_order, supplier_id
+   - recommendation_type (transfer vs po)
+   - transfer_from_location (if transfer)
+   - days_of_supply_remaining
+   - urgency (critical < 3 days, warning 3-7 days, 
+     normal 7+ days)
+   - forecast_model_used
+   - is_approved (BOOLEAN DEFAULT FALSE)
+   - approved_by, approved_at
+8. Log: total recommendations generated, split 
+   between transfers vs POs, critical vs warning 
+   vs normal urgency
+
+Also create migration 007 for the 
+reorder_recommendations table.
+
+Never hardcode SKU counts, lead times, or 
+location lists. Everything read from database.
+New capability = new file. reorder.py only 
+generates recommendations. Nothing else.

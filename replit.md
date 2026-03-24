@@ -9,6 +9,9 @@ Acts as shared foundation code (config, DB connection, logging utilities) and sy
 - ~200,000 active SKUs across A/B/C tiers
 - PartsWatch (Autologue) management system + RockAuto fulfillment partnership
 
+## Phase 2 Enhancements (Planned — Not Yet Built)
+- **VIO Data Integration**: Vehicle-In-Operation data to enrich demand forecasting with local fleet composition signals (e.g., aging vehicle mix driving filter/brake demand). Deferred until core pipeline is complete and stable.
+
 ## System Architecture — 6 Repls, 1 Supabase DB
 | Repl | Role |
 |------|------|

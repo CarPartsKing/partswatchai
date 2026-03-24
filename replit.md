@@ -53,6 +53,7 @@ Acts as shared foundation code (config, DB connection, logging utilities) and sy
 | `consecutive_freeze_days` | NE Ohio weather signal |
 | `freeze_thaw_cycle` | Pothole season predictor |
 | `weather_sensitivity_score` | Per-SKU category sensitivity |
+| `is_anomaly` | Isolation Forest outlier flag — excluded from forecast training |
 
 ## Project Structure
 ```
@@ -77,6 +78,9 @@ partswatch-ai/
 ├── utils/
 │   ├── __init__.py
 │   └── logging_config.py            # Shared timestamped logger
+├── ml/
+│   ├── __init__.py
+│   └── anomaly.py                   # Isolation Forest — flags anomalous sales days
 └── models/                          # ML model wrappers (to be built)
 ```
 
@@ -116,7 +120,7 @@ All DDL is idempotent (IF NOT EXISTS) — safe to re-run.
 | Table | Key fields |
 |-------|-----------|
 | `sku_master` | sku_id, abc_class, weather_sensitivity_score |
-| `sales_transactions` | sku_id, location_id, transaction_date, is_stockout (computed), lost_sales_imputation |
+| `sales_transactions` | sku_id, location_id, transaction_date, is_stockout (computed), lost_sales_imputation, is_anomaly |
 | `inventory_snapshots` | sku_id, location_id, snapshot_date, qty_on_hand, is_stockout (generated) |
 | `purchase_orders` | po_number, sku_id, supplier_id, lead_time_variance (generated), fill_rate_pct (generated) |
 | `weather_log` | log_date, consecutive_freeze_days, freeze_thaw_cycle |

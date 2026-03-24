@@ -74,3 +74,6 @@ COMMENT ON COLUMN alerts.alert_key IS
     'Pipe-delimited composite string encoding the uniqueness of each alert. '
     'Format: {ALERT_TYPE}|{field1}|{field2}... — prevents duplicate alerts '
     'on the same day for the same underlying issue.';
+
+-- Disable RLS (consistent with all other tables in this project)
+ALTER TABLE alerts DISABLE ROW LEVEL SECURITY;

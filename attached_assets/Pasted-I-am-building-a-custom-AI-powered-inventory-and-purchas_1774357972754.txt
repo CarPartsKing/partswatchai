@@ -1,0 +1,74 @@
+I am building a custom AI-powered inventory and purchasing intelligence 
+system for an automotive aftermarket parts distributor based in 
+Northeast Ohio. Here is the full context:
+
+BUSINESS:
+- Two-step automotive aftermarket distributor
+- ~$100M annual revenue
+- 23 store/warehouse locations across Northeast Ohio
+- ~200,000 active SKUs
+- Currently implementing PartsWatch (by Autologue) as our management system
+- Fulfillment partnership with RockAuto
+
+WHAT WE ARE BUILDING:
+A system that extracts data from PartsWatch nightly, runs machine 
+learning forecasting, and generates daily purchasing recommendations. 
+The system has 6 Repls working together:
+
+1. partswatch-pipeline — nightly data extraction from PartsWatch CSVs
+2. partswatch-ml-nightly — LightGBM forecasting on B/C class SKUs
+3. partswatch-reorder — converts forecasts into PO recommendations
+4. partswatch-basket — weekly basket analysis and accuracy tracking
+5. partswatch-assistant — Claude API purchasing chat (always-on)
+6. partswatch-dashboard — daily brief and alerts UI (always-on)
+
+All Repls share a single Supabase PostgreSQL database.
+
+TECH STACK:
+- Python
+- Prophet (A-class SKUs, weekly on laptop)
+- LightGBM (B-class SKUs, nightly)
+- 13-week rolling average (C-class SKUs)
+- Isolation Forest (anomaly detection)
+- mlxtend (basket analysis)
+- scikit-learn (dead stock classifier, churn predictor)
+- Supabase (shared database)
+- Claude API (purchasing assistant)
+- Open-Meteo API (NE Ohio weather, free)
+- GitHub Actions (nightly scheduler)
+
+SKU TIERS:
+- A-class: top 10K SKUs — Prophet + weather regressors
+- B-class: next 30K SKUs — LightGBM
+- C-class: remaining 160K SKUs — rolling average + de-list classifier
+
+DATABASE TABLES:
+- sales_transactions
+- inventory_snapshots  
+- purchase_orders
+- sku_master
+- weather_log
+- forecast_results
+- supplier_scores
+
+KEY DERIVED FIELDS TO CALCULATE:
+- is_stockout (qty_on_hand = 0)
+- lost_sales_imputation (estimated demand during stockout)
+- lead_time_variance (days late per PO line)
+- fill_rate_pct (qty_received / qty_ordered)
+- abc_class (A/B/C based on sales velocity)
+- consecutive_freeze_days (NE Ohio weather signal)
+- freeze_thaw_cycle (pothole season predictor)
+- weather_sensitivity_score (per SKU category)
+
+CURRENT REPL: partswatch-ai (this is the main project)
+
+Always write production-quality Python with:
+- proper error handling (try/except)
+- logging to console with timestamps
+- docstrings on every function
+- .env file for all secrets (never hardcode keys)
+- comments explaining non-obvious logic
+
+When I ask you to build a file, build the complete file — 
+not a skeleton or placeholder. I want working code every time.

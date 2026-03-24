@@ -1,0 +1,14 @@
+[project]
+name = "python-template"
+version = "0.1.0"
+description = ""
+authors = ["Your Name <you@example.com>"]
+requires-python = ">=3.11"
+dependencies = [
+    "anthropic>=0.86.0",
+    "python-dotenv>=1.2.2",
+    "requests>=2.32.5",
+    "rich>=14.3.3",
+    "supabase>=2.28.3",
+    "tenacity>=9.1.4",
+]

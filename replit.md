@@ -80,7 +80,8 @@ partswatch-ai/
 │   └── logging_config.py            # Shared timestamped logger
 ├── ml/
 │   ├── __init__.py
-│   └── anomaly.py                   # Isolation Forest — flags anomalous sales days
+│   ├── anomaly.py                   # Isolation Forest — flags anomalous sales days
+│   └── forecast_rolling.py          # 13-week rolling avg — C-class SKU forecasts
 └── models/                          # ML model wrappers (to be built)
 ```
 

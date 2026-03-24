@@ -104,7 +104,7 @@ def check_weather_api() -> dict:
 
     try:
         import requests
-        from config import OPEN_METEO_URL, WEATHER_LAT, WEATHER_LON
+        from config import OPEN_METEO_FORECAST_URL, WEATHER_LAT, WEATHER_LON
 
         params = {
             "latitude": WEATHER_LAT,
@@ -112,7 +112,7 @@ def check_weather_api() -> dict:
             "daily": "temperature_2m_max",
             "forecast_days": 1,
         }
-        resp = requests.get(OPEN_METEO_URL, params=params, timeout=10)
+        resp = requests.get(OPEN_METEO_FORECAST_URL, params=params, timeout=10)
         resp.raise_for_status()
         results.append(("[green]✓[/green]", "Open-Meteo", f"HTTP {resp.status_code} — NE Ohio feed reachable"))
 

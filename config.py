@@ -46,10 +46,21 @@ SUPABASE_KEY: str = _require("SUPABASE_KEY")
 ANTHROPIC_API_KEY: str = _require("ANTHROPIC_API_KEY")
 
 # ---------------------------------------------------------------------------
-# Open-Meteo weather (NE Ohio / Cleveland defaults)
+# Open-Meteo weather — Strongsville, OH (headquarters / central NE Ohio)
 # ---------------------------------------------------------------------------
-WEATHER_LAT: float = float(_optional("WEATHER_LAT", "41.4993"))
-WEATHER_LON: float = float(_optional("WEATHER_LON", "-81.6944"))
+WEATHER_LAT: float = float(_optional("WEATHER_LAT", "41.3145"))
+WEATHER_LON: float = float(_optional("WEATHER_LON", "-81.8360"))
+WEATHER_TIMEZONE: str = _optional("WEATHER_TIMEZONE", "America/New_York")
+
+# Open-Meteo endpoints (free, no key required)
+OPEN_METEO_FORECAST_URL: str = "https://api.open-meteo.com/v1/forecast"
+OPEN_METEO_ARCHIVE_URL: str = "https://archive-api.open-meteo.com/v1/archive"
+
+# How many years of history to pull on initial load
+WEATHER_HISTORY_YEARS: int = 3
+
+# How many days of forecast to pull nightly
+WEATHER_FORECAST_DAYS: int = 14
 
 # ---------------------------------------------------------------------------
 # Application
@@ -66,9 +77,6 @@ ABC_CLASS_B_TOP_N: int = 40_000    # Next 30K SKUs → LightGBM
 # Remaining 160K → rolling average + de-list classifier
 
 ROLLING_AVERAGE_WEEKS: int = 13    # C-class rolling window
-
-# Open-Meteo endpoint
-OPEN_METEO_URL: str = "https://api.open-meteo.com/v1/forecast"
 
 # Expected database tables
 EXPECTED_TABLES: list[str] = [

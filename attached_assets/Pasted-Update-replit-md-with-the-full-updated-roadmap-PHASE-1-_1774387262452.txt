@@ -1,0 +1,79 @@
+Update replit.md with the full updated roadmap.
+
+PHASE 1 — Complete (core pipeline):
+- Datatron data extraction (current system pre-PartsWatch)
+- PartsWatch extraction ready (switches via PARTSWATCH_SOURCE env var)
+- Weather pipeline — 3 years NE Ohio data
+- Data cleaning — 7 checks + data_quality_issues table
+- Derived fields — supplier scores, ABC class, weather sensitivity
+- Anomaly detection — Isolation Forest
+- LightGBM forecasting — B-class SKUs
+- Rolling average forecasting — C-class SKUs
+- Reorder engine — transfers + PO recommendations
+- Alerts engine — in progress
+
+PHASE 2 — Next priorities (confirmed by ownership):
+
+1. Location demand quality classification
+   - Third-call store problem
+   - is_residual_demand flag on sales_transactions
+   - sku_location_demand_quality table
+   - Location tier 1/2/3 classification
+   - Exclude residual demand from forecast training
+
+2. Prophet A-class forecasting
+   - Runs weekly on laptop Sunday nights
+   - Weather regressors: temp_min_f, snowfall_in,
+     consecutive_freeze_days, freeze_thaw_cycle
+   - XGBoost ensemble for top accuracy
+
+3. Ohio VIO data
+   - Vehicle registrations by county and model year
+   - 6-county NE Ohio market
+   - Cuyahoga, Summit, Lorain, Medina, Lake, Geauga
+
+4. ACES/PIES fitment data
+   - Maps every SKU to vehicle applications
+   - Cross-reference with VIO for active vehicle 
+     population per SKU in our market
+   - Highest ROI Phase 2 addition
+
+5. PartsTech search data
+   - Leading demand signal — searches before orders
+   - Need to confirm API access via seller account
+   - If accessible: primary demand indicator
+
+6. Additional ML models
+   - Basket analysis (mlxtend) — co-purchase signals
+   - Customer churn predictor
+   - Dead stock classifier
+   - What-if scenario engine
+
+PHASE 3 — Strategy layer (months 6-12):
+   - Dynamic pricing recommendations
+   - Supplier negotiation briefs (Claude API)
+   - Workforce scheduling integration
+   - Full forecast accuracy feedback loop
+   - Year-one KPI review: fill rate, inventory turns,
+     excess inventory reduction
+
+YEAR 1 REVEAL PLAN:
+   - Q1-Q2: Build and validate quietly
+   - Q3: Polish, compile ROI data, soft intro to
+     1-2 trusted senior buyers
+   - Q4: Full purchasing team rollout — framed as
+     tool that makes team more powerful, not replacement
+
+DATA SOURCE SWITCHING:
+   - Currently: PARTSWATCH_SOURCE=datatron
+   - When PartsWatch live: PARTSWATCH_SOURCE=csv
+   - Future API: PARTSWATCH_SOURCE=api
+   - One env var change, nothing else
+
+OWNERSHIP REQUIREMENTS (from pitch meeting):
+   - Forecasting must understand location performance tiers
+   - Third-call stores distort demand signals
+   - System needs more indicators beyond sales data
+   - ACES/PIES fitment catalog integration required
+   - PartsTech search catalog as leading indicator
+   - VIO fleet aging data for predictive demand

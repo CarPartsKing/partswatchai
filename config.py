@@ -40,6 +40,11 @@ def _optional(key: str, default: str = "") -> str:
 SUPABASE_URL: str = _require("SUPABASE_URL")
 SUPABASE_KEY: str = _require("SUPABASE_KEY")
 
+# Direct PostgreSQL connection string — required for DDL (CREATE TABLE/INDEX).
+# Format: postgresql://postgres:[password]@[host]:5432/postgres
+# Find this in Supabase → Project Settings → Database → Connection string (URI).
+SUPABASE_DB_URL: str = _require("SUPABASE_DB_URL")
+
 # ---------------------------------------------------------------------------
 # Anthropic
 # ---------------------------------------------------------------------------

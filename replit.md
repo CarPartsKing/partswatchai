@@ -58,6 +58,7 @@ Acts as shared foundation code (config, DB connection, logging utilities) and sy
 ```
 partswatch-ai/
 ├── main.py                  # System health check entry point
+├── db_setup.py              # One-time DDL: creates all 7 tables + indexes
 ├── config.py                # All env-var config in one place
 ├── .env.example             # Secret template (copy → .env)
 ├── db/
@@ -74,11 +75,26 @@ partswatch-ai/
 |----------|----------|-------------|
 | `SUPABASE_URL` | Yes | Supabase project URL |
 | `SUPABASE_KEY` | Yes | Supabase service role key |
+| `SUPABASE_DB_URL` | Yes | PostgreSQL URI (Project Settings → Database → URI) |
 | `ANTHROPIC_API_KEY` | Yes | Claude API key |
 | `WEATHER_LAT` | No | NE Ohio latitude (default: 41.4993) |
 | `WEATHER_LON` | No | NE Ohio longitude (default: -81.6944) |
 | `LOG_LEVEL` | No | INFO / DEBUG / WARNING (default: INFO) |
 | `ENVIRONMENT` | No | development / production (default: development) |
+
+## Database Tables (created by db_setup.py)
+Run `python db_setup.py` once after adding secrets to create all tables.
+All DDL is idempotent (IF NOT EXISTS) — safe to re-run.
+
+| Table | Key fields |
+|-------|-----------|
+| `sku_master` | sku_id, abc_class, weather_sensitivity_score |
+| `sales_transactions` | sku_id, location_id, transaction_date, is_stockout (computed), lost_sales_imputation |
+| `inventory_snapshots` | sku_id, location_id, snapshot_date, qty_on_hand, is_stockout (generated) |
+| `purchase_orders` | po_number, sku_id, supplier_id, lead_time_variance (generated), fill_rate_pct (generated) |
+| `weather_log` | log_date, consecutive_freeze_days, freeze_thaw_cycle |
+| `forecast_results` | sku_id, forecast_date, model_type (prophet/lightgbm/rolling_avg) |
+| `supplier_scores` | supplier_id, score_date, composite_score |
 
 ## Coding Standards
 - Full docstrings on every function

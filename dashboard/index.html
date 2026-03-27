@@ -861,9 +861,9 @@ function renderForecastAccuracy(items) {
 function renderLocations(data) {
   document.getElementById('location-updated').textContent = `Updated ${nowStr()}`;
   const tiers = [
-    { num: 1, key: 'tier1', label: 'Tier 1 — First-Call', cls: 't1' },
-    { num: 2, key: 'tier2', label: 'Tier 2 — Second-Call', cls: 't2' },
-    { num: 3, key: 'tier3', label: 'Tier 3 — Third-Call', cls: 't3' },
+    { num: 1, key: 'tier1', label: 'Tier 1', cls: 't1' },
+    { num: 2, key: 'tier2', label: 'Tier 2', cls: 't2' },
+    { num: 3, key: 'tier3', label: 'Tier 3', cls: 't3' },
   ];
   const critSet = new Set(data.tier3_critical || []);
 

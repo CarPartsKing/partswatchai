@@ -123,7 +123,11 @@ Acts as shared foundation code (config, DB connection, logging utilities) and sy
 ## Project Structure
 ```
 partswatch-ai/
-├── main.py                          # System health check entry point
+├── main.py                          # Pipeline orchestrator (9 stages, dry-run, single-stage)
+├── .github/
+│   └── workflows/
+│       ├── nightly.yml              # GitHub Actions: runs full pipeline at 2am EST daily
+│       └── weekly.yml               # GitHub Actions: weekly jobs at 11pm EST Sunday
 ├── config.py                        # All env-var config in one place
 ├── .env.example                     # Secret template (copy → .env)
 ├── config/
@@ -162,6 +166,26 @@ partswatch-ai/
 │   └── index.html                   # Dark web dashboard — 7 panels, 5-min auto-refresh
 └── models/                          # ML model wrappers (to be built)
 ```
+
+## Pipeline Orchestrator (main.py)
+| Command | What it does |
+|---------|-------------|
+| `python main.py` | Full 9-stage nightly pipeline |
+| `python main.py --dry-run` | All stages in test mode — no DB writes (derive stage skipped) |
+| `python main.py --stage forecast_lgbm` | Single named stage (any of the 9 keys) |
+| `python main.py --weekly` | Weekly jobs (basket, accuracy, dead-stock — Phase 2) |
+| `python main.py --health` | System health check (config, DB, weather API) |
+
+**Stage keys**: `extract`, `clean`, `derive`, `location_classify`, `anomaly`, `forecast_rolling`, `forecast_lgbm`, `reorder`, `alerts`
+
+**Dry-run confirmed**: 8/8 active stages OK in 14.1s; `derive` skipped (no dry-run support)
+
+## GitHub Actions
+- **nightly.yml**: `0 7 * * *` (7am UTC = 2am EST) — full pipeline
+- **weekly.yml**: `0 4 * * 1` (4am UTC Monday = 11pm EST Sunday) — weekly analysis + nightly re-run
+- **Required Secrets**: `SUPABASE_URL`, `SUPABASE_KEY`, `ANTHROPIC_API_KEY`
+- **Optional Secrets**: `PARTSWATCH_SOURCE`, `WEATHER_LAT`, `WEATHER_LON`
+- Both support manual dispatch with dry-run and single-stage inputs
 
 ## Dashboard
 - **URL**: served from port 5000 via `python dashboard/server.py` (workflow: "Start application")

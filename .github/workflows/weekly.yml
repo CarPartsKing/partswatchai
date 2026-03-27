@@ -1,0 +1,74 @@
+name: Weekly Analysis
+
+# Runs Sunday at 11pm EST (Monday 4am UTC).
+# For EDT (UTC-4) adjust the cron to '0 3 * * 1'.
+on:
+  schedule:
+    - cron: '0 4 * * 1'   # 4:00 UTC Monday = 11:00 PM EST Sunday
+  workflow_dispatch:        # allow manual trigger from GitHub UI
+    inputs:
+      dry_run:
+        description: 'Dry run — no DB writes'
+        required: false
+        type: boolean
+        default: false
+
+jobs:
+  weekly-pipeline:
+    name: PartsWatch AI — Weekly Analysis
+    runs-on: ubuntu-latest
+    timeout-minutes: 120   # weekly jobs are heavier
+
+    env:
+      # ── Required secrets ────────────────────────────────────────────
+      SUPABASE_URL:       ${{ secrets.SUPABASE_URL }}
+      SUPABASE_KEY:       ${{ secrets.SUPABASE_KEY }}
+      ANTHROPIC_API_KEY:  ${{ secrets.ANTHROPIC_API_KEY }}
+      # ── Optional secrets ────────────────────────────────────────────
+      PARTSWATCH_SOURCE:  ${{ secrets.PARTSWATCH_SOURCE }}
+      ENVIRONMENT:        production
+      LOG_LEVEL:          INFO
+      WEATHER_LAT:        ${{ secrets.WEATHER_LAT }}
+      WEATHER_LON:        ${{ secrets.WEATHER_LON }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install .
+
+      - name: Validate environment
+        run: python -c "import config; print('Config OK — ENVIRONMENT:', config.ENVIRONMENT)"
+
+      # ── Weekly analysis jobs ─────────────────────────────────────────
+      # Includes: basket analysis, forecast accuracy report, dead-stock classification.
+      # These stages are registered in WEEKLY_STAGES in main.py.
+      # When not yet implemented, main.py logs a helpful message and exits 0.
+      - name: Run weekly analysis pipeline
+        if: ${{ !fromJSON(github.event.inputs.dry_run || 'false') }}
+        run: python main.py --weekly
+
+      - name: Run weekly analysis pipeline (dry run)
+        if: ${{ fromJSON(github.event.inputs.dry_run || 'false') }}
+        run: python main.py --weekly --dry-run
+
+      # ── Also run nightly pipeline on Sunday (catch-up safety net) ────
+      # The nightly job already ran earlier that day, but running it again
+      # after the weekly jobs ensures reorder + alerts reflect any weekly
+      # updates (e.g. new dead-stock flags suppressing reorder suggestions).
+      - name: Re-run nightly pipeline post-weekly
+        if: ${{ github.event_name == 'schedule' }}
+        run: python main.py
+
+      - name: Output pipeline date
+        if: always()
+        run: echo "Weekly pipeline run date $(date -u '+%Y-%m-%d %H:%M UTC')"

@@ -1,0 +1,76 @@
+name: Nightly Pipeline
+
+# Runs every night at 2am EST (7am UTC).
+# For EDT (UTC-4) adjust the cron to '0 6 * * *'.
+on:
+  schedule:
+    - cron: '0 7 * * *'   # 7:00 UTC = 2:00 AM EST
+  workflow_dispatch:        # allow manual trigger from GitHub UI
+    inputs:
+      dry_run:
+        description: 'Dry run — no DB writes'
+        required: false
+        type: boolean
+        default: false
+      stage:
+        description: 'Single stage key to run (leave blank for full pipeline)'
+        required: false
+        type: string
+        default: ''
+
+jobs:
+  nightly-pipeline:
+    name: PartsWatch AI — Nightly Pipeline
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    env:
+      # ── Required secrets ────────────────────────────────────────────
+      SUPABASE_URL:       ${{ secrets.SUPABASE_URL }}
+      SUPABASE_KEY:       ${{ secrets.SUPABASE_KEY }}
+      ANTHROPIC_API_KEY:  ${{ secrets.ANTHROPIC_API_KEY }}
+      # ── Optional secrets (have defaults in config.py) ───────────────
+      PARTSWATCH_SOURCE:  ${{ secrets.PARTSWATCH_SOURCE }}
+      ENVIRONMENT:        production
+      LOG_LEVEL:          INFO
+      # ── Open-Meteo NE Ohio coordinates (no API key needed) ──────────
+      WEATHER_LAT:        ${{ secrets.WEATHER_LAT }}
+      WEATHER_LON:        ${{ secrets.WEATHER_LON }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install .
+
+      - name: Validate environment
+        run: python -c "import config; print('Config OK — ENVIRONMENT:', config.ENVIRONMENT)"
+
+      # ── Full pipeline (default) ──────────────────────────────────────
+      - name: Run nightly pipeline
+        if: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.event.inputs.stage == '' && !fromJSON(github.event.inputs.dry_run || 'false')) }}
+        run: python main.py
+
+      # ── Dry run (manual trigger) ─────────────────────────────────────
+      - name: Run nightly pipeline (dry run)
+        if: ${{ github.event_name == 'workflow_dispatch' && fromJSON(github.event.inputs.dry_run || 'false') && github.event.inputs.stage == '' }}
+        run: python main.py --dry-run
+
+      # ── Single stage (manual trigger) ────────────────────────────────
+      - name: Run single stage
+        if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.stage != '' }}
+        run: python main.py --stage ${{ github.event.inputs.stage }}
+
+      # ── Post-run summary ─────────────────────────────────────────────
+      - name: Output pipeline date
+        if: always()
+        run: echo "Pipeline run date $(date -u '+%Y-%m-%d %H:%M UTC')"

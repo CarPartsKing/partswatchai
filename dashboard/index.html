@@ -1,0 +1,937 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PartsWatch AI — Morning Dashboard</title>
+<style>
+  :root {
+    --bg:        #0d1117;
+    --surface:   #161b22;
+    --surface2:  #1c2128;
+    --border:    #30363d;
+    --border2:   #21262d;
+    --text:      #e6edf3;
+    --muted:     #8b949e;
+    --critical:  #f85149;
+    --critical-bg: rgba(248,81,73,0.12);
+    --warning:   #d29922;
+    --warning-bg: rgba(210,153,34,0.12);
+    --info:      #388bfd;
+    --info-bg:   rgba(56,139,253,0.12);
+    --success:   #3fb950;
+    --success-bg: rgba(63,185,80,0.12);
+    --amber:     #e3b341;
+    --blue:      #58a6ff;
+    --radius:    8px;
+    --radius-lg: 12px;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    font-size: 14px;
+    line-height: 1.5;
+    min-height: 100vh;
+  }
+
+  /* ── Header ──────────────────────────────────────────────────────── */
+  .header {
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    padding: 14px 24px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    position: sticky;
+    top: 0;
+    z-index: 100;
+  }
+  .header-left { display: flex; align-items: center; gap: 14px; }
+  .logo {
+    font-size: 18px;
+    font-weight: 700;
+    color: var(--blue);
+    letter-spacing: -0.3px;
+  }
+  .logo span { color: var(--muted); font-weight: 400; }
+  .header-date {
+    font-size: 13px;
+    color: var(--muted);
+    border-left: 1px solid var(--border);
+    padding-left: 14px;
+  }
+  .header-right { display: flex; align-items: center; gap: 16px; }
+  .conn-status {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    color: var(--muted);
+  }
+  .conn-dot {
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    background: var(--muted);
+    flex-shrink: 0;
+  }
+  .conn-dot.live  { background: var(--success); box-shadow: 0 0 6px var(--success); }
+  .conn-dot.error { background: var(--critical); }
+  .conn-dot.loading { background: var(--warning); animation: pulse 1s infinite; }
+  .last-updated { font-size: 12px; color: var(--muted); }
+  .refresh-btn {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 5px 12px;
+    border-radius: var(--radius);
+    cursor: pointer;
+    font-size: 12px;
+    transition: background 0.15s;
+  }
+  .refresh-btn:hover { background: var(--border2); }
+  .refresh-countdown { font-size: 11px; color: var(--muted); }
+
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.4; }
+  }
+
+  /* ── Main layout ──────────────────────────────────────────────────── */
+  .main { max-width: 1400px; margin: 0 auto; padding: 20px 24px 48px; }
+
+  /* ── Card ────────────────────────────────────────────────────────── */
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    overflow: hidden;
+  }
+  .card-header {
+    padding: 14px 18px;
+    border-bottom: 1px solid var(--border2);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+  .card-title {
+    font-size: 13px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--muted);
+  }
+  .card-body { padding: 16px 18px; }
+  .card-updated { font-size: 11px; color: var(--muted); }
+
+  /* ── Weather Banner ───────────────────────────────────────────────── */
+  .weather-banner {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    padding: 16px 20px;
+    margin-bottom: 20px;
+    display: flex;
+    align-items: center;
+    gap: 20px;
+    flex-wrap: wrap;
+  }
+  .weather-banner.freeze-warning {
+    border-color: var(--critical);
+    background: var(--critical-bg);
+  }
+  .weather-icon { font-size: 28px; line-height: 1; }
+  .weather-main .temp {
+    font-size: 22px;
+    font-weight: 700;
+    color: var(--text);
+  }
+  .weather-main .temp-range {
+    font-size: 13px;
+    color: var(--muted);
+  }
+  .weather-details {
+    display: flex;
+    gap: 20px;
+    flex-wrap: wrap;
+  }
+  .weather-detail {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+  .weather-detail .label { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.4px; }
+  .weather-detail .value { font-size: 14px; font-weight: 500; }
+  .freeze-alert-text {
+    margin-left: auto;
+    background: var(--critical);
+    color: #fff;
+    padding: 6px 14px;
+    border-radius: var(--radius);
+    font-size: 12px;
+    font-weight: 600;
+    white-space: nowrap;
+  }
+  .forecast-strip {
+    display: flex;
+    gap: 8px;
+    overflow-x: auto;
+    padding: 10px 0 4px;
+    border-top: 1px solid var(--border2);
+    margin-top: 12px;
+    scrollbar-width: thin;
+    scrollbar-color: var(--border) transparent;
+  }
+  .forecast-day {
+    flex-shrink: 0;
+    background: var(--surface2);
+    border: 1px solid var(--border2);
+    border-radius: var(--radius);
+    padding: 6px 10px;
+    text-align: center;
+    min-width: 60px;
+  }
+  .forecast-day.freeze { border-color: var(--critical); background: var(--critical-bg); }
+  .forecast-day .day-label { font-size: 11px; color: var(--muted); }
+  .forecast-day .day-hi { font-size: 13px; font-weight: 600; }
+  .forecast-day .day-lo { font-size: 11px; color: var(--muted); }
+
+  /* ── Alert Summary Row ────────────────────────────────────────────── */
+  .alert-summary-row {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 12px;
+    margin-bottom: 20px;
+  }
+  .alert-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    padding: 16px 20px;
+    cursor: pointer;
+    transition: border-color 0.15s, background 0.15s;
+    display: flex;
+    align-items: center;
+    gap: 16px;
+  }
+  .alert-card:hover { background: var(--surface2); }
+  .alert-card.critical { border-left: 3px solid var(--critical); }
+  .alert-card.warning  { border-left: 3px solid var(--warning); }
+  .alert-card.info     { border-left: 3px solid var(--info); }
+  .alert-card.critical:hover { border-color: var(--critical); }
+  .alert-card.warning:hover  { border-color: var(--warning); }
+  .alert-card.info:hover     { border-color: var(--info); }
+  .alert-count {
+    font-size: 32px;
+    font-weight: 700;
+    line-height: 1;
+  }
+  .alert-card.critical .alert-count { color: var(--critical); }
+  .alert-card.warning  .alert-count { color: var(--warning); }
+  .alert-card.info     .alert-count { color: var(--info); }
+  .alert-label {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.4px;
+  }
+  .alert-sublabel { font-size: 11px; color: var(--muted); margin-top: 2px; }
+
+  /* ── Sections grid ────────────────────────────────────────────────── */
+  .section { margin-bottom: 20px; }
+
+  /* ── Badges ──────────────────────────────────────────────────────── */
+  .badge {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 12px;
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.3px;
+  }
+  .badge-critical { background: var(--critical-bg); color: var(--critical); border: 1px solid rgba(248,81,73,0.3); }
+  .badge-warning  { background: var(--warning-bg);  color: var(--warning);  border: 1px solid rgba(210,153,34,0.3); }
+  .badge-info     { background: var(--info-bg);     color: var(--info);     border: 1px solid rgba(56,139,253,0.3); }
+  .badge-success  { background: var(--success-bg);  color: var(--success);  border: 1px solid rgba(63,185,80,0.3); }
+  .badge-high     { background: rgba(248,81,73,0.08); color: #ff7b72; border: 1px solid rgba(255,123,114,0.25); }
+  .badge-medium   { background: rgba(210,153,34,0.08); color: var(--amber); border: 1px solid rgba(227,179,65,0.25); }
+  .badge-low      { background: var(--surface2); color: var(--muted); border: 1px solid var(--border); }
+  .badge-po       { background: rgba(56,139,253,0.1); color: var(--blue); border: 1px solid rgba(88,166,255,0.25); }
+  .badge-transfer { background: rgba(63,185,80,0.1); color: var(--success); border: 1px solid rgba(63,185,80,0.25); }
+
+  /* ── Table ────────────────────────────────────────────────────────── */
+  .data-table { width: 100%; border-collapse: collapse; }
+  .data-table th {
+    text-align: left;
+    padding: 8px 12px;
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.4px;
+    color: var(--muted);
+    border-bottom: 1px solid var(--border2);
+  }
+  .data-table td {
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--border2);
+    font-size: 13px;
+  }
+  .data-table tr:last-child td { border-bottom: none; }
+  .data-table tr:hover td { background: var(--surface2); }
+  .sku-id { font-family: "SF Mono", "Fira Code", monospace; font-size: 12px; color: var(--blue); }
+  .loc-id { font-family: "SF Mono", "Fira Code", monospace; font-size: 12px; color: var(--muted); }
+  .msg-text { color: var(--muted); font-size: 12px; }
+
+  /* ── Bottom panels grid ───────────────────────────────────────────── */
+  .panels-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 16px;
+    margin-bottom: 20px;
+  }
+
+  /* ── Stat block ──────────────────────────────────────────────────── */
+  .stat-block { display: flex; flex-direction: column; gap: 14px; }
+  .stat-row { display: flex; justify-content: space-between; align-items: center; }
+  .stat-label { font-size: 13px; color: var(--muted); }
+  .stat-value { font-size: 20px; font-weight: 700; }
+  .stat-divider { height: 1px; background: var(--border2); }
+
+  /* ── Supplier dots ───────────────────────────────────────────────── */
+  .supplier-bar { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 12px; }
+  .supplier-segment {
+    height: 6px; border-radius: 3px;
+    min-width: 12px;
+    transition: width 0.4s ease;
+  }
+  .supplier-segment.green { background: var(--success); }
+  .supplier-segment.amber { background: var(--amber); }
+  .supplier-segment.red   { background: var(--critical); }
+  .supplier-counts { display: flex; gap: 16px; margin-bottom: 12px; }
+  .supplier-count { display: flex; align-items: center; gap: 6px; }
+  .supplier-dot { width: 10px; height: 10px; border-radius: 50%; }
+  .supplier-dot.green { background: var(--success); }
+  .supplier-dot.amber { background: var(--amber); }
+  .supplier-dot.red   { background: var(--critical); }
+  .supplier-count-num { font-size: 16px; font-weight: 700; }
+  .supplier-count-label { font-size: 12px; color: var(--muted); }
+  .red-suppliers-list { display: flex; flex-direction: column; gap: 4px; }
+  .red-supplier-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 6px 10px;
+    background: var(--critical-bg);
+    border: 1px solid rgba(248,81,73,0.2);
+    border-radius: var(--radius);
+    font-size: 12px;
+  }
+  .red-supplier-name { font-family: monospace; color: var(--critical); font-weight: 600; }
+  .red-supplier-score { color: var(--muted); }
+
+  /* ── Location tiers ──────────────────────────────────────────────── */
+  .tier-grid { display: flex; flex-direction: column; gap: 10px; }
+  .tier-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 10px 12px;
+    border-radius: var(--radius);
+    background: var(--surface2);
+    border: 1px solid var(--border2);
+  }
+  .tier-row.tier3-critical { border-color: var(--critical); background: var(--critical-bg); }
+  .tier-badge {
+    font-size: 11px;
+    font-weight: 700;
+    padding: 2px 8px;
+    border-radius: 10px;
+    white-space: nowrap;
+    flex-shrink: 0;
+  }
+  .tier-badge.t1 { background: var(--success-bg); color: var(--success); }
+  .tier-badge.t2 { background: var(--info-bg); color: var(--info); }
+  .tier-badge.t3 { background: var(--warning-bg); color: var(--warning); }
+  .tier-info { flex: 1; }
+  .tier-label { font-size: 12px; color: var(--muted); }
+  .tier-locs { font-size: 12px; color: var(--text); font-family: monospace; }
+  .tier-count { font-size: 20px; font-weight: 700; color: var(--muted); }
+
+  /* ── Forecast accuracy ───────────────────────────────────────────── */
+  .accuracy-row { display: flex; flex-direction: column; gap: 10px; }
+  .accuracy-item {
+    padding: 10px 12px;
+    border-radius: var(--radius);
+    background: var(--surface2);
+    border: 1px solid var(--border2);
+  }
+  .accuracy-item.above { border-color: var(--critical); }
+  .accuracy-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
+  .accuracy-model { font-size: 12px; font-weight: 600; }
+  .accuracy-mape { font-size: 18px; font-weight: 700; }
+  .accuracy-mape.above { color: var(--critical); }
+  .accuracy-mape.ok { color: var(--success); }
+  .accuracy-bar-bg { height: 4px; background: var(--border2); border-radius: 2px; }
+  .accuracy-bar-fill { height: 4px; border-radius: 2px; transition: width 0.5s ease; }
+  .accuracy-bar-fill.above { background: var(--critical); }
+  .accuracy-bar-fill.ok { background: var(--success); }
+  .accuracy-meta { font-size: 11px; color: var(--muted); margin-top: 4px; }
+  .no-data { color: var(--muted); font-size: 13px; text-align: center; padding: 20px 0; }
+
+  /* ── Empty state ─────────────────────────────────────────────────── */
+  .empty-state { text-align: center; padding: 24px; color: var(--muted); font-size: 13px; }
+  .empty-state .icon { font-size: 24px; margin-bottom: 8px; }
+
+  /* ── Skeleton loading ────────────────────────────────────────────── */
+  .skeleton {
+    background: linear-gradient(90deg, var(--surface2) 25%, var(--border2) 50%, var(--surface2) 75%);
+    background-size: 200% 100%;
+    animation: shimmer 1.5s infinite;
+    border-radius: 4px;
+  }
+  @keyframes shimmer { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
+
+  /* ── Error state ─────────────────────────────────────────────────── */
+  .error-banner {
+    background: var(--critical-bg);
+    border: 1px solid var(--critical);
+    border-radius: var(--radius);
+    padding: 12px 16px;
+    color: var(--critical);
+    font-size: 13px;
+    margin-bottom: 16px;
+  }
+
+  /* ── Mobile ──────────────────────────────────────────────────────── */
+  @media (max-width: 768px) {
+    .header { flex-direction: column; align-items: flex-start; gap: 10px; padding: 12px 16px; }
+    .header-right { width: 100%; justify-content: space-between; }
+    .main { padding: 12px 16px 40px; }
+    .alert-summary-row { grid-template-columns: 1fr; }
+    .panels-grid { grid-template-columns: 1fr; }
+    .weather-banner { padding: 14px 16px; }
+    .weather-details { gap: 12px; }
+    .freeze-alert-text { margin-left: 0; }
+    .data-table { font-size: 12px; }
+    .data-table th, .data-table td { padding: 8px; }
+  }
+  @media (max-width: 1024px) {
+    .panels-grid { grid-template-columns: repeat(2, 1fr); }
+  }
+</style>
+</head>
+<body>
+
+<!-- ── Header ─────────────────────────────────────────────────────── -->
+<header class="header">
+  <div class="header-left">
+    <div class="logo">PartsWatch <span>AI</span></div>
+    <div class="header-date" id="header-date">Loading…</div>
+  </div>
+  <div class="header-right">
+    <div class="conn-status">
+      <div class="conn-dot loading" id="conn-dot"></div>
+      <span id="conn-label">Connecting…</span>
+    </div>
+    <span class="last-updated" id="last-updated"></span>
+    <button class="refresh-btn" onclick="loadData()">↻ Refresh</button>
+    <span class="refresh-countdown" id="countdown"></span>
+  </div>
+</header>
+
+<!-- ── Main ───────────────────────────────────────────────────────── -->
+<main class="main">
+
+  <div id="error-area"></div>
+
+  <!-- Weather -->
+  <div id="weather-section" class="section">
+    <div class="skeleton" style="height:120px;"></div>
+  </div>
+
+  <!-- Alert Summary -->
+  <div class="alert-summary-row" id="alert-summary">
+    <div class="alert-card critical">
+      <div class="alert-count skeleton" style="width:40px;height:36px;">‌</div>
+      <div><div class="alert-label">Critical</div><div class="alert-sublabel">Alerts</div></div>
+    </div>
+    <div class="alert-card warning">
+      <div class="alert-count skeleton" style="width:40px;height:36px;">‌</div>
+      <div><div class="alert-label">Warning</div><div class="alert-sublabel">Alerts</div></div>
+    </div>
+    <div class="alert-card info">
+      <div class="alert-count skeleton" style="width:40px;height:36px;">‌</div>
+      <div><div class="alert-label">Info</div><div class="alert-sublabel">Alerts</div></div>
+    </div>
+  </div>
+
+  <!-- Critical Alerts -->
+  <div class="section card" id="alerts-section">
+    <div class="card-header">
+      <span class="card-title">⚠ Critical Alerts</span>
+      <span class="card-updated" id="alerts-updated"></span>
+    </div>
+    <div class="card-body" id="alerts-body">
+      <div class="skeleton" style="height:80px;"></div>
+    </div>
+  </div>
+
+  <!-- Reorder Recommendations -->
+  <div class="section card" id="reorder-section" style="margin-top:20px;">
+    <div class="card-header">
+      <span class="card-title">📦 Top Reorder Recommendations</span>
+      <span class="card-updated" id="reorder-updated"></span>
+    </div>
+    <div class="card-body" style="padding:0;" id="reorder-body">
+      <div class="skeleton" style="height:120px;margin:16px;border-radius:6px;"></div>
+    </div>
+  </div>
+
+  <!-- Bottom 3-panel row -->
+  <div class="panels-grid" style="margin-top:20px;">
+
+    <!-- Supplier Health -->
+    <div class="card" id="supplier-section">
+      <div class="card-header">
+        <span class="card-title">🏭 Supplier Health</span>
+        <span class="card-updated" id="supplier-updated"></span>
+      </div>
+      <div class="card-body" id="supplier-body">
+        <div class="skeleton" style="height:100px;"></div>
+      </div>
+    </div>
+
+    <!-- Inventory Health -->
+    <div class="card" id="inventory-section">
+      <div class="card-header">
+        <span class="card-title">📊 Inventory Health</span>
+        <span class="card-updated" id="inventory-updated"></span>
+      </div>
+      <div class="card-body" id="inventory-body">
+        <div class="skeleton" style="height:100px;"></div>
+      </div>
+    </div>
+
+    <!-- Forecast Accuracy -->
+    <div class="card" id="accuracy-section">
+      <div class="card-header">
+        <span class="card-title">🎯 Forecast Accuracy</span>
+        <span class="card-updated" id="accuracy-updated"></span>
+      </div>
+      <div class="card-body" id="accuracy-body">
+        <div class="skeleton" style="height:100px;"></div>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- Location Performance -->
+  <div class="section card" id="location-section">
+    <div class="card-header">
+      <span class="card-title">📍 Location Performance</span>
+      <span class="card-updated" id="location-updated"></span>
+    </div>
+    <div class="card-body" id="location-body">
+      <div class="skeleton" style="height:120px;"></div>
+    </div>
+  </div>
+
+</main>
+
+<script>
+// ── Config ─────────────────────────────────────────────────────────
+const REFRESH_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
+let countdownTimer = null;
+let countdownSecs = REFRESH_INTERVAL_MS / 1000;
+
+// ── Utilities ───────────────────────────────────────────────────────
+function fmtTemp(v) {
+  return v != null ? `${Math.round(v)}°F` : '—';
+}
+function fmtNum(v, decimals = 0) {
+  if (v == null) return '—';
+  return Number(v).toFixed(decimals);
+}
+function fmtDate(iso) {
+  if (!iso) return '—';
+  const d = new Date(iso + 'T00:00:00');
+  return d.toLocaleDateString('en-US', { weekday:'short', month:'short', day:'numeric' });
+}
+function nowStr() {
+  return new Date().toLocaleTimeString('en-US', { hour:'2-digit', minute:'2-digit' });
+}
+function badge(cls, text) {
+  return `<span class="badge badge-${cls}">${text}</span>`;
+}
+function escHtml(s) {
+  if (!s) return '';
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+// ── Set today's date in header ─────────────────────────────────────
+function setHeaderDate() {
+  const d = new Date();
+  document.getElementById('header-date').textContent =
+    d.toLocaleDateString('en-US', { weekday:'long', year:'numeric', month:'long', day:'numeric' });
+}
+
+// ── Countdown timer ────────────────────────────────────────────────
+function startCountdown() {
+  clearInterval(countdownTimer);
+  countdownSecs = REFRESH_INTERVAL_MS / 1000;
+  const el = document.getElementById('countdown');
+  countdownTimer = setInterval(() => {
+    countdownSecs--;
+    if (countdownSecs <= 0) {
+      clearInterval(countdownTimer);
+      el.textContent = '';
+      loadData();
+    } else {
+      const m = Math.floor(countdownSecs / 60);
+      const s = countdownSecs % 60;
+      el.textContent = `Next refresh in ${m}:${String(s).padStart(2,'0')}`;
+    }
+  }, 1000);
+}
+
+// ── Connection status ──────────────────────────────────────────────
+function setStatus(state) {
+  const dot = document.getElementById('conn-dot');
+  const lbl = document.getElementById('conn-label');
+  dot.className = 'conn-dot ' + state;
+  lbl.textContent = { live:'Live', error:'Offline', loading:'Loading…' }[state] || state;
+}
+
+// ── Render: Weather ────────────────────────────────────────────────
+function renderWeather(data) {
+  const t = data.today || {};
+  const forecast = data.forecast || [];
+  const freeze = data.freeze_warning;
+
+  const hi = fmtTemp(t.temp_max_f);
+  const lo = fmtTemp(t.temp_min_f);
+  const icon = freeze ? '🥶' : (t.temp_max_f > 70 ? '☀️' : t.temp_max_f > 45 ? '🌤' : '🌨');
+  const snow = t.snowfall_in ? `${fmtNum(t.snowfall_in,1)} in snow` : '';
+  const prec = t.precipitation_in ? `${fmtNum(t.precipitation_in,2)} in precip` : '';
+  const extras = [snow, prec].filter(Boolean).join('  ·  ');
+  const ftc = t.freeze_thaw_cycle ? '  ·  Freeze-thaw active' : '';
+  const streak = t.consecutive_freeze_days > 0 ? `  ·  Freeze streak: ${t.consecutive_freeze_days}d` : '';
+
+  const freezeAlertHtml = freeze
+    ? `<div class="freeze-alert-text">❄ FREEZE ALERT: ${data.freeze_days_count} day(s) below 32°F — lowest ${fmtTemp(data.coldest_temp)} on ${data.coldest_date}</div>`
+    : '';
+
+  const forecastHtml = forecast.map(f => {
+    const isFreezeDay = f.temp_min_f != null && f.temp_min_f < 32;
+    const d = f.log_date ? f.log_date.slice(5).replace('-','/') : '?';
+    return `<div class="forecast-day ${isFreezeDay ? 'freeze' : ''}">
+      <div class="day-label">${d}</div>
+      <div class="day-hi">${fmtTemp(f.temp_max_f)}</div>
+      <div class="day-lo">${fmtTemp(f.temp_min_f)}</div>
+    </div>`;
+  }).join('');
+
+  document.getElementById('weather-section').innerHTML = `
+    <div class="weather-banner ${freeze ? 'freeze-warning' : ''}">
+      <div class="weather-icon">${icon}</div>
+      <div class="weather-main">
+        <div class="temp">${hi} <span style="font-size:16px;color:var(--muted)">/ ${lo}</span></div>
+        <div class="temp-range">NE Ohio — Today${extras ? '  ·  ' + extras : ''}${ftc}${streak}</div>
+      </div>
+      <div class="weather-details">
+        <div class="weather-detail"><span class="label">High</span><span class="value">${hi}</span></div>
+        <div class="weather-detail"><span class="label">Low</span><span class="value">${lo}</span></div>
+        ${t.snowfall_in > 0 ? `<div class="weather-detail"><span class="label">Snow</span><span class="value">${fmtNum(t.snowfall_in,1)}"</span></div>` : ''}
+        ${t.consecutive_freeze_days > 0 ? `<div class="weather-detail"><span class="label">Freeze Streak</span><span class="value">${t.consecutive_freeze_days}d</span></div>` : ''}
+      </div>
+      ${freezeAlertHtml}
+      ${forecastHtml ? `<div class="forecast-strip" style="width:100%">${forecastHtml}</div>` : ''}
+    </div>`;
+}
+
+// ── Render: Alert Summary Cards ────────────────────────────────────
+function renderAlertSummary(summary) {
+  const c = summary.critical || 0;
+  const w = summary.warning || 0;
+  const i = summary.info || 0;
+  document.getElementById('alert-summary').innerHTML = `
+    <div class="alert-card critical" onclick="document.getElementById('alerts-section').scrollIntoView({behavior:'smooth'})">
+      <div class="alert-count" style="color:var(--critical)">${c}</div>
+      <div><div class="alert-label">Critical</div><div class="alert-sublabel">Alerts</div></div>
+    </div>
+    <div class="alert-card warning" onclick="document.getElementById('alerts-section').scrollIntoView({behavior:'smooth'})">
+      <div class="alert-count" style="color:var(--warning)">${w}</div>
+      <div><div class="alert-label">Warning</div><div class="alert-sublabel">Alerts</div></div>
+    </div>
+    <div class="alert-card info" onclick="document.getElementById('alerts-section').scrollIntoView({behavior:'smooth'})">
+      <div class="alert-count" style="color:var(--info)">${i}</div>
+      <div><div class="alert-label">Info</div><div class="alert-sublabel">Alerts</div></div>
+    </div>`;
+}
+
+// ── Render: Critical Alerts Table ──────────────────────────────────
+function renderAlerts(items) {
+  document.getElementById('alerts-updated').textContent = `Updated ${nowStr()}`;
+  const critical = items.filter(a => a.severity === 'critical');
+  const warnings = items.filter(a => a.severity === 'warning');
+  const shown = [...critical, ...warnings];
+
+  if (!shown.length) {
+    document.getElementById('alerts-body').innerHTML =
+      `<div class="empty-state"><div class="icon">✅</div>No critical or warning alerts today.</div>`;
+    return;
+  }
+
+  const rows = shown.map(a => {
+    const sev = a.severity === 'critical' ? badge('critical','CRITICAL') : badge('warning','WARNING');
+    const type = escHtml(a.alert_type || '').replace(/_/g,' ');
+    const sku = a.sku_id ? `<span class="sku-id">${escHtml(a.sku_id)}</span>` : '—';
+    const loc = a.location_id ? `<span class="loc-id">${escHtml(a.location_id)}</span>` : '—';
+    const sup = a.supplier_id ? `<span class="loc-id">${escHtml(a.supplier_id)}</span>` : '';
+    const ctx = [sku, loc, sup].filter(s => s && s !== '—').join(' ');
+    const msg = escHtml((a.message || '').substring(0, 140));
+    return `<tr>
+      <td>${sev}</td>
+      <td style="font-size:12px;font-weight:600;">${type}</td>
+      <td>${ctx}</td>
+      <td class="msg-text">${msg}${a.message && a.message.length > 140 ? '…' : ''}</td>
+    </tr>`;
+  }).join('');
+
+  document.getElementById('alerts-body').innerHTML = `
+    <table class="data-table">
+      <thead><tr>
+        <th style="width:80px">Severity</th>
+        <th style="width:160px">Type</th>
+        <th style="width:200px">Context</th>
+        <th>Message</th>
+      </tr></thead>
+      <tbody>${rows}</tbody>
+    </table>`;
+}
+
+// ── Render: Reorder Recommendations ───────────────────────────────
+function renderReorder(items) {
+  document.getElementById('reorder-updated').textContent = `Updated ${nowStr()}`;
+  if (!items || !items.length) {
+    document.getElementById('reorder-body').innerHTML =
+      `<div class="card-body"><div class="empty-state"><div class="icon">✅</div>No pending reorder recommendations today.</div></div>`;
+    return;
+  }
+
+  const urgencyBadge = u => {
+    if (u === 'critical') return badge('critical', 'CRITICAL');
+    if (u === 'high')     return badge('high', 'HIGH');
+    if (u === 'medium')   return badge('medium', 'MEDIUM');
+    return badge('low', 'LOW');
+  };
+
+  const rows = items.map(r => {
+    const rtype = (r.recommendation_type || 'po').toUpperCase();
+    const typeBadge = rtype === 'TRANSFER' ? badge('transfer','TRANSFER') : badge('po','PO');
+    const days = r.days_of_supply_remaining != null ? `${fmtNum(r.days_of_supply_remaining,1)}d` : '—';
+    const fromLoc = r.transfer_from_location ? `← ${escHtml(r.transfer_from_location)}` : '';
+    const model = escHtml(r.forecast_model_used || '');
+    return `<tr>
+      <td>${urgencyBadge(r.urgency)}</td>
+      <td><span class="sku-id">${escHtml(r.sku_id)}</span></td>
+      <td><span class="loc-id">${escHtml(r.location_id)}</span> <span style="color:var(--muted);font-size:11px">${fromLoc}</span></td>
+      <td style="font-weight:600">${fmtNum(r.qty_to_order)} units</td>
+      <td>${days} supply</td>
+      <td>${typeBadge}</td>
+      <td style="color:var(--muted);font-size:11px">${model}</td>
+    </tr>`;
+  }).join('');
+
+  document.getElementById('reorder-body').innerHTML = `
+    <table class="data-table">
+      <thead><tr>
+        <th>Urgency</th>
+        <th>SKU</th>
+        <th>Location</th>
+        <th>Qty</th>
+        <th>Supply</th>
+        <th>Type</th>
+        <th>Model</th>
+      </tr></thead>
+      <tbody>${rows}</tbody>
+    </table>`;
+}
+
+// ── Render: Supplier Health ────────────────────────────────────────
+function renderSupplierHealth(data) {
+  document.getElementById('supplier-updated').textContent = `Updated ${nowStr()}`;
+  const total = data.total || 1;
+  const gPct = Math.round((data.green / total) * 100);
+  const aPct = Math.round((data.amber / total) * 100);
+  const rPct = Math.round((data.red / total) * 100);
+
+  const redList = (data.red_suppliers || []).map(s =>
+    `<div class="red-supplier-row">
+      <span class="red-supplier-name">${escHtml(s.supplier_id)}</span>
+      <span class="red-supplier-score">Score: ${s.score != null ? fmtNum(s.score,1) : '—'}/100</span>
+    </div>`
+  ).join('');
+
+  document.getElementById('supplier-body').innerHTML = `
+    <div class="supplier-counts">
+      <div class="supplier-count">
+        <div class="supplier-dot green"></div>
+        <div class="supplier-count-num" style="color:var(--success)">${data.green}</div>
+        <div class="supplier-count-label">Green</div>
+      </div>
+      <div class="supplier-count">
+        <div class="supplier-dot amber"></div>
+        <div class="supplier-count-num" style="color:var(--amber)">${data.amber}</div>
+        <div class="supplier-count-label">Amber</div>
+      </div>
+      <div class="supplier-count">
+        <div class="supplier-dot red"></div>
+        <div class="supplier-count-num" style="color:var(--critical)">${data.red}</div>
+        <div class="supplier-count-label">Red</div>
+      </div>
+    </div>
+    <div style="display:flex;gap:3px;height:6px;border-radius:3px;overflow:hidden;margin-bottom:14px">
+      ${gPct > 0 ? `<div style="flex:${gPct};background:var(--success);border-radius:3px 0 0 3px"></div>` : ''}
+      ${aPct > 0 ? `<div style="flex:${aPct};background:var(--amber)"></div>` : ''}
+      ${rPct > 0 ? `<div style="flex:${rPct};background:var(--critical);border-radius:0 3px 3px 0"></div>` : ''}
+    </div>
+    ${redList ? `<div class="red-suppliers-list">${redList}</div>` : '<div class="empty-state" style="padding:8px 0;font-size:12px">No red-flag suppliers</div>'}`;
+}
+
+// ── Render: Inventory Health ───────────────────────────────────────
+function renderInventoryHealth(data) {
+  document.getElementById('inventory-updated').textContent = `Updated ${nowStr()}`;
+  const pairs = (data.stockout_pairs || []).slice(0,5).map(p =>
+    `<span class="sku-id" style="font-size:11px">${escHtml(p.sku_id)}@${escHtml(p.location_id)}</span>`
+  ).join(', ');
+
+  document.getElementById('inventory-body').innerHTML = `
+    <div class="stat-block">
+      <div class="stat-row">
+        <span class="stat-label">Active Stockouts</span>
+        <span class="stat-value" style="color:${data.stockout_count > 0 ? 'var(--critical)' : 'var(--success)'}">${data.stockout_count}</span>
+      </div>
+      <div class="stat-divider"></div>
+      <div class="stat-row">
+        <span class="stat-label">Low Supply (&lt; 3d)</span>
+        <span class="stat-value" style="color:${data.low_supply_count > 0 ? 'var(--warning)' : 'var(--success)'}">${data.low_supply_count}</span>
+      </div>
+      <div class="stat-divider"></div>
+      <div class="stat-row">
+        <span class="stat-label">Pairs Tracked</span>
+        <span class="stat-value" style="color:var(--muted)">${data.snapshot_count}</span>
+      </div>
+      ${pairs ? `<div style="font-size:11px;color:var(--muted);padding-top:4px">${pairs}</div>` : ''}
+    </div>`;
+}
+
+// ── Render: Forecast Accuracy ──────────────────────────────────────
+function renderForecastAccuracy(items) {
+  document.getElementById('accuracy-updated').textContent = `Updated ${nowStr()}`;
+  if (!items || !items.length) {
+    document.getElementById('accuracy-body').innerHTML =
+      `<div class="no-data">Accuracy tracking starts once<br>forecasts enter the history window.</div>`;
+    return;
+  }
+  const html = items.map(a => {
+    const pct = Math.min(a.mape_pct / 50 * 100, 100);
+    const cls = a.above_threshold ? 'above' : 'ok';
+    const modelLabel = a.model_type === 'rolling_avg' ? 'Rolling Avg (C-class)' : 'LightGBM (B-class)';
+    return `<div class="accuracy-item ${cls}">
+      <div class="accuracy-header">
+        <span class="accuracy-model">${escHtml(modelLabel)}</span>
+        <span class="accuracy-mape ${cls}">${a.mape_pct}%</span>
+      </div>
+      <div class="accuracy-bar-bg">
+        <div class="accuracy-bar-fill ${cls}" style="width:${pct}%"></div>
+      </div>
+      <div class="accuracy-meta">${a.n_obs} observations · Threshold: 25%${a.above_threshold ? ' · ⚠ Above threshold' : ''}</div>
+    </div>`;
+  }).join('');
+  document.getElementById('accuracy-body').innerHTML = `<div class="accuracy-row">${html}</div>`;
+}
+
+// ── Render: Location Performance ───────────────────────────────────
+function renderLocations(data) {
+  document.getElementById('location-updated').textContent = `Updated ${nowStr()}`;
+  const tiers = [
+    { num: 1, key: 'tier1', label: 'Tier 1 — First-Call', cls: 't1' },
+    { num: 2, key: 'tier2', label: 'Tier 2 — Second-Call', cls: 't2' },
+    { num: 3, key: 'tier3', label: 'Tier 3 — Third-Call', cls: 't3' },
+  ];
+  const critSet = new Set(data.tier3_critical || []);
+
+  const html = tiers.map(t => {
+    const locs = data[t.key] || [];
+    const hasCritical = t.num === 3 && locs.some(l => critSet.has(l));
+    const locHtml = locs.map(l =>
+      `<span class="loc-id" style="${critSet.has(l) ? 'color:var(--critical)' : ''}">${escHtml(l)}</span>`
+    ).join(' ');
+
+    return `<div class="tier-row ${hasCritical ? 'tier3-critical' : ''}">
+      <span class="tier-badge ${t.cls}">${t.cls.toUpperCase()}</span>
+      <div class="tier-info">
+        <div class="tier-label">${t.label}</div>
+        <div class="tier-locs">${locHtml || '<span style="color:var(--muted)">—</span>'}</div>
+        ${hasCritical ? '<div style="color:var(--critical);font-size:11px;margin-top:3px">⚠ Critical alerts on tier-3 location(s)</div>' : ''}
+      </div>
+      <div class="tier-count">${locs.length}</div>
+    </div>`;
+  }).join('');
+
+  document.getElementById('location-body').innerHTML = `<div class="tier-grid">${html}</div>`;
+}
+
+// ── Main load function ─────────────────────────────────────────────
+async function loadData() {
+  setStatus('loading');
+  document.getElementById('error-area').innerHTML = '';
+
+  try {
+    const resp = await fetch('/api/dashboard');
+    if (!resp.ok) throw new Error(`Server returned ${resp.status}`);
+    const data = await resp.json();
+
+    if (data.error) throw new Error(data.error);
+
+    // Render each section
+    if (data.weather)              renderWeather(data.weather);
+    if (data.alerts)               renderAlertSummary(data.alerts.summary || {});
+    if (data.alerts)               renderAlerts(data.alerts.items || []);
+    if (data.reorder != null)      renderReorder(data.reorder);
+    if (data.supplier_health)      renderSupplierHealth(data.supplier_health);
+    if (data.inventory_health)     renderInventoryHealth(data.inventory_health);
+    if (data.forecast_accuracy != null) renderForecastAccuracy(data.forecast_accuracy);
+    if (data.location_performance) renderLocations(data.location_performance);
+
+    // Update timestamps
+    const updStr = `Updated ${nowStr()}`;
+    ['alerts','reorder','supplier','inventory','accuracy','location'].forEach(id =>
+      document.getElementById(id + '-updated').textContent = updStr
+    );
+    document.getElementById('last-updated').textContent =
+      `Last updated ${nowStr()} · ${data.query_ms}ms`;
+
+    setStatus('live');
+    startCountdown();
+
+  } catch (err) {
+    setStatus('error');
+    document.getElementById('error-area').innerHTML =
+      `<div class="error-banner">⚠ Failed to load dashboard data: ${escHtml(err.message)}. Retrying in 30 seconds.</div>`;
+    setTimeout(loadData, 30_000);
+  }
+}
+
+// ── Init ───────────────────────────────────────────────────────────
+setHeaderDate();
+loadData();
+</script>
+</body>
+</html>

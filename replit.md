@@ -11,7 +11,7 @@ Acts as shared foundation code (config, DB connection, logging utilities) and sy
 
 ## Roadmap
 
-### Phase 1 — Complete (core pipeline)
+### Phase 1 — Complete (core pipeline + dashboard)
 - Datatron data extraction (current system pre-PartsWatch)
 - PartsWatch extraction ready (switches via `PARTSWATCH_SOURCE` env var)
 - Weather pipeline — 3 years NE Ohio data
@@ -22,10 +22,12 @@ Acts as shared foundation code (config, DB connection, logging utilities) and sy
 - Rolling average forecasting — C-class SKUs
 - Reorder engine — transfers + PO recommendations
 - Alerts engine — 7 alert types, idempotent nightly run
+- AI purchasing assistant — Claude multi-turn chat with live context builder
+- Morning dashboard — Flask server + dark web UI, 7 live data sections, 5-min auto-refresh
 
 ### Phase 2 — Next priorities (confirmed by ownership)
 
-**1. Location demand quality classification** ← *in progress*
+**1. Location demand quality classification** ← *COMPLETE*
 - Third-call store problem: downstream stores distort upstream demand signals
 - `is_residual_demand` flag on `sales_transactions`
 - `sku_location_demand_quality` table (0.0–1.0 score per SKU×location pair)
@@ -155,8 +157,18 @@ partswatch-ai/
 │   ├── __init__.py
 │   ├── context_builder.py           # 7-section live Supabase context (~800 tokens) for Claude
 │   └── claude_api.py                # PurchasingAssistant class — multi-turn Claude chat
+├── dashboard/
+│   ├── server.py                    # Flask server — serves UI + /api/dashboard JSON endpoint
+│   └── index.html                   # Dark web dashboard — 7 panels, 5-min auto-refresh
 └── models/                          # ML model wrappers (to be built)
 ```
+
+## Dashboard
+- **URL**: served from port 5000 via `python dashboard/server.py` (workflow: "Start application")
+- **Endpoint**: `GET /api/dashboard` — returns all 7 sections as JSON in ~1s
+- **Sections**: Weather (freeze warnings), Alert Summary, Critical Alerts, Top Reorder Recommendations, Supplier Health, Inventory Health, Forecast Accuracy, Location Tiers
+- **Refresh**: JS auto-refreshes every 5 minutes with countdown; manual refresh button
+- **Status**: Green dot = live, amber = loading, red = offline (retries in 30s)
 
 ## PartsWatch Pipeline — Switching Data Sources
 Change ONE environment variable — nothing else in the codebase changes:

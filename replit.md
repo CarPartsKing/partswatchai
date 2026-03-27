@@ -149,7 +149,12 @@ partswatch-ai/
 ├── engine/
 │   ├── __init__.py
 │   ├── transfer.py                  # Pure-computation inter-location excess detector (no DB I/O)
-│   └── reorder.py                   # Recommendation engine → reorder_recommendations table
+│   ├── reorder.py                   # Recommendation engine → reorder_recommendations table
+│   └── alerts.py                    # 7 alert types → alerts table (idempotent nightly run)
+├── assistant/
+│   ├── __init__.py
+│   ├── context_builder.py           # 7-section live Supabase context (~800 tokens) for Claude
+│   └── claude_api.py                # PurchasingAssistant class — multi-turn Claude chat
 └── models/                          # ML model wrappers (to be built)
 ```
 

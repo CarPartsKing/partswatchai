@@ -55,9 +55,9 @@ Acts as shared foundation code (config, DB connection, logging utilities) and sy
 - If accessible: primary demand indicator
 
 **6. Additional ML models**
-- Basket analysis (mlxtend) — co-purchase signals
+- Basket analysis (mlxtend) — co-purchase signals ← *WEEKLY PIPELINE (Phase 2)*
 - Customer churn predictor
-- Dead stock classifier
+- Dead stock classifier ← *COMPLETE* (see `ml/dead_stock.py`)
 - What-if scenario engine
 
 ### Phase 3 — Strategy layer (months 6–12)
@@ -173,7 +173,7 @@ partswatch-ai/
 | `python main.py` | Full 9-stage nightly pipeline |
 | `python main.py --dry-run` | All stages in test mode — no DB writes (derive stage skipped) |
 | `python main.py --stage forecast_lgbm` | Single named stage (any of the 9 keys) |
-| `python main.py --weekly` | Weekly jobs (basket, accuracy, dead-stock — Phase 2) |
+| `python main.py --weekly` | Weekly jobs: dead_stock (live); basket_analysis + accuracy_report (Phase 2) |
 | `python main.py --health` | System health check (config, DB, weather API) |
 
 **Stage keys**: `extract`, `clean`, `derive`, `location_classify`, `anomaly`, `forecast_rolling`, `forecast_lgbm`, `reorder`, `alerts`

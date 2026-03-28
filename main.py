@@ -78,11 +78,9 @@ NIGHTLY_STAGES: list[Stage] = [
 ]
 
 WEEKLY_STAGES: list[Stage] = [
-    # These modules are planned for Phase 2.
-    # Add entries here as each is implemented.
+    Stage("dead_stock",      "ml.dead_stock",  "run_dead_stock", "dry_run"),
     # Stage("basket_analysis", "ml.basket",      "run_basket",     "dry_run"),
     # Stage("accuracy_report", "ml.accuracy",    "run_report",     "dry_run"),
-    # Stage("dead_stock",      "ml.dead_stock",  "run_dead_stock", "dry_run"),
 ]
 
 STAGE_INDEX: dict[str, Stage] = {s.key: s for s in NIGHTLY_STAGES + WEEKLY_STAGES}
@@ -250,7 +248,7 @@ _STAGE_DISPLAY: dict[str, str] = {
     "alerts":            "Alerts engine",
     "basket_analysis":   "Basket analysis (weekly)",
     "accuracy_report":   "Forecast accuracy report (weekly)",
-    "dead_stock":        "Dead-stock classifier (weekly)",
+    "dead_stock":        "Dead stock — capital-weighted (weekly)",
 }
 
 

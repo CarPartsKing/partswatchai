@@ -1,0 +1,57 @@
+Add a chat interface to dashboard/index.html
+
+Embed the purchasing assistant directly into 
+the dashboard as a chat panel. 
+
+Requirements:
+- Chat box at the bottom or right side of 
+  the dashboard — always visible
+- Text input with send button
+- Conversation history displayed above input
+- Connects to a new endpoint: /api/chat
+- dashboard/server.py adds POST /api/chat 
+  that calls claude_api.PurchasingAssistant 
+  and returns the response
+- Maintain conversation session per browser 
+  session — multi-turn conversations work
+- Show a typing indicator while Claude thinks
+- Each response renders cleanly — line breaks, 
+  numbers, lists all formatted properly
+
+The assistant already has full context of your 
+live database on every message:
+- Today's alerts
+- Current reorder recommendations  
+- Weather conditions
+- Supplier health
+- Inventory health
+- Location tiers
+- Forecast accuracy
+
+Example questions it can answer:
+"Show me my top 10 best selling parts this week"
+"Which locations are critically low on stock?"
+"What should I order from Interstate Batteries today?"
+"Show me all dead stock over $1000 in value"
+"Which suppliers are underperforming this month?"
+"What's our battery exposure going into next week?"
+"Show me everything we know about SKU BCI-H6-AGM"
+"Which parts haven't moved in 90 days at LOC-003?"
+"What are my most urgent transfers to make today?"
+"Compare fill rates across all 23 locations"
+
+The assistant can answer ANY of these because 
+Claude reads live Supabase data on every message 
+through context_builder.py — and for deeper 
+queries it can run specific database lookups.
+
+For questions that need data beyond the standard 
+context (like "top 10 parts this week"), 
+context_builder.py should support dynamic 
+queries — the assistant tells the server what 
+data it needs and the server fetches it.
+
+Make the chat panel feel native to the dashboard —
+same dark professional theme, clean message 
+bubbles, clear distinction between user messages 
+and AI responses.

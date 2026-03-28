@@ -25,6 +25,7 @@
     --blue:      #58a6ff;
     --radius:    8px;
     --radius-lg: 12px;
+    --chat-width: 380px;
   }
 
   * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -36,6 +37,7 @@
     font-size: 14px;
     line-height: 1.5;
     min-height: 100vh;
+    padding-right: var(--chat-width);
   }
 
   /* ── Header ──────────────────────────────────────────────────────── */
@@ -407,6 +409,208 @@
     margin-bottom: 16px;
   }
 
+  /* ── Chat Panel ──────────────────────────────────────────────────── */
+  .chat-panel {
+    position: fixed;
+    right: 0;
+    top: 0;
+    bottom: 0;
+    width: var(--chat-width);
+    background: var(--surface);
+    border-left: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    z-index: 99;
+  }
+
+  .chat-panel-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 16px;
+    height: 57px;
+    border-bottom: 1px solid var(--border2);
+    flex-shrink: 0;
+  }
+
+  .chat-panel-title {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text);
+  }
+
+  .chat-title-icon {
+    color: var(--blue);
+    font-size: 16px;
+    line-height: 1;
+  }
+
+  .chat-title-sub {
+    font-size: 11px;
+    color: var(--muted);
+    font-weight: 400;
+  }
+
+  .chat-clear-btn {
+    background: none;
+    border: 1px solid var(--border);
+    color: var(--muted);
+    font-size: 11px;
+    padding: 3px 10px;
+    border-radius: var(--radius);
+    cursor: pointer;
+    transition: color 0.15s, border-color 0.15s;
+  }
+  .chat-clear-btn:hover { color: var(--text); border-color: var(--muted); }
+
+  .chat-messages {
+    flex: 1;
+    overflow-y: auto;
+    padding: 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    scrollbar-width: thin;
+    scrollbar-color: var(--border) transparent;
+  }
+
+  .chat-welcome {
+    background: var(--surface2);
+    border: 1px solid var(--border2);
+    border-radius: var(--radius);
+    padding: 12px 14px;
+    font-size: 12px;
+    color: var(--muted);
+    line-height: 1.7;
+  }
+
+  .chat-welcome strong { color: var(--text); }
+
+  .chat-message { display: flex; flex-direction: column; }
+  .chat-message.user    { align-items: flex-end; }
+  .chat-message.assistant { align-items: flex-start; }
+
+  .chat-bubble {
+    max-width: 92%;
+    padding: 8px 12px;
+    border-radius: var(--radius);
+    font-size: 13px;
+    line-height: 1.65;
+    word-break: break-word;
+  }
+  .chat-bubble.user {
+    background: #1f4e8a;
+    color: #e6edf3;
+    border-radius: var(--radius) var(--radius) 2px var(--radius);
+  }
+  .chat-bubble.assistant {
+    background: var(--surface2);
+    border: 1px solid var(--border2);
+    color: var(--text);
+    border-radius: var(--radius) var(--radius) var(--radius) 2px;
+  }
+  .chat-bubble ul, .chat-bubble ol { margin: 5px 0 5px 18px; }
+  .chat-bubble li { margin: 3px 0; }
+  .chat-bubble strong { color: var(--text); font-weight: 600; }
+  .chat-bubble.assistant code {
+    background: var(--bg);
+    border: 1px solid var(--border2);
+    border-radius: 3px;
+    padding: 1px 5px;
+    font-family: "SF Mono", "Fira Code", monospace;
+    font-size: 11px;
+    color: var(--blue);
+  }
+
+  .chat-typing-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 0 2px;
+  }
+  .typing-dots {
+    display: flex;
+    gap: 3px;
+    align-items: center;
+  }
+  .typing-dots span {
+    width: 5px;
+    height: 5px;
+    background: var(--muted);
+    border-radius: 50%;
+    animation: typing-bounce 1.2s ease-in-out infinite;
+  }
+  .typing-dots span:nth-child(2) { animation-delay: 0.2s; }
+  .typing-dots span:nth-child(3) { animation-delay: 0.4s; }
+  @keyframes typing-bounce {
+    0%, 80%, 100% { transform: scale(0.65); opacity: 0.4; }
+    40%           { transform: scale(1);    opacity: 1;   }
+  }
+  .typing-label { font-size: 11px; color: var(--muted); }
+
+  .chat-input-area {
+    padding: 10px 12px 8px;
+    border-top: 1px solid var(--border2);
+    display: flex;
+    gap: 8px;
+    align-items: flex-end;
+    background: var(--surface);
+    flex-shrink: 0;
+  }
+
+  .chat-input {
+    flex: 1;
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    color: var(--text);
+    font-family: inherit;
+    font-size: 13px;
+    padding: 8px 12px;
+    resize: none;
+    line-height: 1.5;
+    min-height: 36px;
+    max-height: 120px;
+    overflow-y: auto;
+    outline: none;
+    transition: border-color 0.15s;
+    scrollbar-width: thin;
+  }
+  .chat-input:focus { border-color: var(--blue); }
+  .chat-input::placeholder { color: var(--muted); }
+  .chat-input:disabled { opacity: 0.5; }
+
+  .chat-send-btn {
+    background: var(--blue);
+    border: none;
+    border-radius: var(--radius);
+    color: #fff;
+    font-size: 16px;
+    width: 34px;
+    height: 34px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    transition: background 0.15s, opacity 0.15s;
+    line-height: 1;
+  }
+  .chat-send-btn:hover   { background: #4895e0; }
+  .chat-send-btn:disabled { opacity: 0.35; cursor: not-allowed; }
+
+  .chat-hint {
+    text-align: center;
+    font-size: 10px;
+    color: var(--muted);
+    padding: 3px 0 6px;
+    flex-shrink: 0;
+    opacity: 0.6;
+  }
+
   /* ── Mobile ──────────────────────────────────────────────────────── */
   @media (max-width: 768px) {
     .header { flex-direction: column; align-items: flex-start; gap: 10px; padding: 12px 16px; }
@@ -419,6 +623,8 @@
     .freeze-alert-text { margin-left: 0; }
     .data-table { font-size: 12px; }
     .data-table th, .data-table td { padding: 8px; }
+    body { padding-right: 0; }
+    .chat-panel { display: none; }
   }
   @media (max-width: 1024px) {
     .panels-grid { grid-template-columns: repeat(2, 1fr); }
@@ -542,6 +748,49 @@
   </div>
 
 </main>
+
+<!-- ── AI Chat Panel ───────────────────────────────────────────────── -->
+<div class="chat-panel" id="chat-panel">
+
+  <div class="chat-panel-header">
+    <div class="chat-panel-title">
+      <span class="chat-title-icon">◆</span>
+      AI Assistant
+      <span class="chat-title-sub">powered by Claude</span>
+    </div>
+    <button class="chat-clear-btn" onclick="clearChat()" title="Clear conversation">Clear</button>
+  </div>
+
+  <div class="chat-messages" id="chat-messages">
+    <div class="chat-welcome">
+      <strong>PartsWatch AI</strong> has live access to your entire operation — alerts, reorders, suppliers, inventory, forecasts, and weather.<br><br>
+      Try asking:<br>
+      · Which locations are critically low on stock?<br>
+      · What should I order from Interstate Batteries today?<br>
+      · Show me all dead stock over $1,000<br>
+      · What's our battery exposure going into next week?
+    </div>
+  </div>
+
+  <div id="chat-typing" style="display:none; padding: 0 12px 4px;">
+    <div class="chat-typing-row">
+      <div class="typing-dots"><span></span><span></span><span></span></div>
+      <span class="typing-label">PartsWatch is thinking…</span>
+    </div>
+  </div>
+
+  <div class="chat-input-area">
+    <textarea
+      class="chat-input"
+      id="chat-input"
+      placeholder="Ask about inventory, suppliers, reorders…"
+      rows="1"
+    ></textarea>
+    <button class="chat-send-btn" id="chat-send-btn" onclick="sendMessage()" title="Send (Enter)">↑</button>
+  </div>
+  <div class="chat-hint">Enter to send &nbsp;·&nbsp; Shift+Enter for new line</div>
+
+</div>
 
 <script>
 // ── Config ─────────────────────────────────────────────────────────
@@ -927,6 +1176,162 @@ async function loadData() {
       `<div class="error-banner">⚠ Failed to load dashboard data: ${escHtml(err.message)}. Retrying in 30 seconds.</div>`;
     setTimeout(loadData, 30_000);
   }
+}
+
+// ── Chat Panel ─────────────────────────────────────────────────────
+
+// Session ID — persistent for tab lifetime; regenerated on clear
+let _chatSessionId = _initSessionId();
+
+function _initSessionId() {
+  let sid = sessionStorage.getItem('pw_session_id');
+  if (!sid) {
+    sid = crypto.randomUUID();
+    sessionStorage.setItem('pw_session_id', sid);
+  }
+  return sid;
+}
+
+// Auto-resize textarea as the user types
+const _chatInput = document.getElementById('chat-input');
+_chatInput.addEventListener('input', () => {
+  _chatInput.style.height = 'auto';
+  _chatInput.style.height = Math.min(_chatInput.scrollHeight, 120) + 'px';
+});
+
+// Enter = send, Shift+Enter = newline
+_chatInput.addEventListener('keydown', e => {
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    sendMessage();
+  }
+});
+
+// Render markdown-lite: bold, inline code, bullet/numbered lists, line breaks
+function formatMessage(raw) {
+  // Escape HTML first
+  let t = raw
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+
+  // Bold **text**
+  t = t.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
+
+  // Inline code `text`
+  t = t.replace(/`([^`\n]+)`/g, '<code>$1</code>');
+
+  // Process line-by-line for lists
+  const lines = t.split('\n');
+  const out = [];
+  let inUl = false, inOl = false;
+
+  for (const line of lines) {
+    const ulM = line.match(/^[ \t]*[-•*]\s+(.+)/);
+    const olM = line.match(/^[ \t]*\d+\.\s+(.+)/);
+
+    if (ulM) {
+      if (inOl) { out.push('</ol>'); inOl = false; }
+      if (!inUl) { out.push('<ul>'); inUl = true; }
+      out.push(`<li>${ulM[1]}</li>`);
+    } else if (olM) {
+      if (inUl) { out.push('</ul>'); inUl = false; }
+      if (!inOl) { out.push('<ol>'); inOl = true; }
+      out.push(`<li>${olM[1]}</li>`);
+    } else {
+      if (inUl) { out.push('</ul>'); inUl = false; }
+      if (inOl) { out.push('</ol>'); inOl = false; }
+      out.push(line.trim() === '' ? '<br>' : line + '<br>');
+    }
+  }
+  if (inUl) out.push('</ul>');
+  if (inOl) out.push('</ol>');
+
+  // Collapse runs of 3+ BRs into 2, strip leading/trailing BRs
+  let html = out.join('');
+  html = html.replace(/(<br\s*\/?>){3,}/gi, '<br><br>');
+  html = html.replace(/^(<br\s*\/?>)+/i, '').replace(/(<br\s*\/?>)+$/i, '');
+  return html;
+}
+
+function _appendMessage(role, content) {
+  const msgs = document.getElementById('chat-messages');
+  const wrap = document.createElement('div');
+  wrap.className = `chat-message ${role}`;
+
+  if (role === 'user') {
+    wrap.innerHTML = `<div class="chat-bubble user">${escHtml(content)}</div>`;
+  } else {
+    wrap.innerHTML = `<div class="chat-bubble assistant">${formatMessage(content)}</div>`;
+  }
+
+  msgs.appendChild(wrap);
+  msgs.scrollTop = msgs.scrollHeight;
+}
+
+async function sendMessage() {
+  const input  = document.getElementById('chat-input');
+  const btn    = document.getElementById('chat-send-btn');
+  const typing = document.getElementById('chat-typing');
+  const msgs   = document.getElementById('chat-messages');
+  const msg    = input.value.trim();
+
+  if (!msg || input.disabled) return;
+
+  // Lock UI
+  input.value = '';
+  input.style.height = 'auto';
+  input.disabled = true;
+  btn.disabled   = true;
+
+  _appendMessage('user', msg);
+  typing.style.display = 'block';
+  msgs.scrollTop = msgs.scrollHeight;
+
+  try {
+    const resp = await fetch('/api/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ session_id: _chatSessionId, message: msg }),
+    });
+
+    const data = await resp.json();
+
+    if (!resp.ok || data.error) {
+      _appendMessage('assistant', `**Error:** ${escHtml(data.error || `HTTP ${resp.status}`)}`);
+    } else {
+      _appendMessage('assistant', data.reply);
+      // Capture session_id if server issued a new one
+      if (data.session_id && data.session_id !== _chatSessionId) {
+        _chatSessionId = data.session_id;
+        sessionStorage.setItem('pw_session_id', _chatSessionId);
+      }
+    }
+  } catch (err) {
+    _appendMessage('assistant', `**Connection error:** ${escHtml(err.message)}`);
+  } finally {
+    typing.style.display = 'none';
+    input.disabled = false;
+    btn.disabled   = false;
+    input.focus();
+    msgs.scrollTop = msgs.scrollHeight;
+  }
+}
+
+function clearChat() {
+  const msgs = document.getElementById('chat-messages');
+  msgs.innerHTML = `
+    <div class="chat-welcome">
+      <strong>PartsWatch AI</strong> has live access to your entire operation — alerts, reorders, suppliers, inventory, forecasts, and weather.<br><br>
+      Try asking:<br>
+      · Which locations are critically low on stock?<br>
+      · What should I order from Interstate Batteries today?<br>
+      · Show me all dead stock over $1,000<br>
+      · What's our battery exposure going into next week?
+    </div>`;
+  // New session ID so server history is also abandoned
+  sessionStorage.removeItem('pw_session_id');
+  _chatSessionId = _initSessionId();
 }
 
 // ── Init ───────────────────────────────────────────────────────────

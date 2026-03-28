@@ -15,16 +15,18 @@ from __future__ import annotations
 import os
 import sys
 import time
+import uuid
 from collections import defaultdict
 from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
 
-from flask import Flask, jsonify, send_from_directory
+from flask import Flask, jsonify, request, send_from_directory
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+from assistant.claude_api import PurchasingAssistant
 from db.connection import get_client
 from utils.logging_config import get_logger, setup_logging
 
@@ -32,6 +34,13 @@ setup_logging()
 log = get_logger(__name__)
 
 app = Flask(__name__, static_folder=str(Path(__file__).parent))
+
+# ---------------------------------------------------------------------------
+# Chat session store — one PurchasingAssistant per browser session
+# ---------------------------------------------------------------------------
+
+_sessions: dict[str, PurchasingAssistant] = {}
+_MAX_SESSIONS = 50          # prune oldest when limit reached
 
 _PAGE_SIZE = 1_000
 _LOW_SUPPLY_DAYS = 3.0
@@ -383,6 +392,51 @@ def dashboard_data():
     return jsonify(payload)
 
 
+@app.route("/api/chat", methods=["POST"])
+def chat():
+    """Handle a chat message, maintaining per-session conversation history.
+
+    Request body (JSON):
+        session_id  str  — browser-generated UUID; created server-side if absent
+        message     str  — the buyer's question
+
+    Response (JSON):
+        reply       str  — Claude's response
+        session_id  str  — echo the session_id (so a new one can be captured)
+    """
+    body = request.get_json(silent=True) or {}
+    session_id = (body.get("session_id") or "").strip()
+    message    = (body.get("message")    or "").strip()
+
+    if not message:
+        return jsonify({"error": "message is required"}), 400
+
+    if not session_id:
+        session_id = str(uuid.uuid4())
+
+    # Prune oldest session when limit reached
+    if session_id not in _sessions and len(_sessions) >= _MAX_SESSIONS:
+        oldest = next(iter(_sessions))
+        del _sessions[oldest]
+        log.debug("Session pruned: %s  (limit=%d)", oldest, _MAX_SESSIONS)
+
+    if session_id not in _sessions:
+        try:
+            _sessions[session_id] = PurchasingAssistant(get_client())
+            log.info("New chat session created: %s", session_id)
+        except Exception as exc:
+            log.exception("Failed to create PurchasingAssistant for session %s", session_id)
+            return jsonify({"error": str(exc)}), 503
+
+    assistant = _sessions[session_id]
+    try:
+        reply = assistant.chat(message)
+        return jsonify({"reply": reply, "session_id": session_id})
+    except Exception as exc:
+        log.exception("Chat failed for session %s", session_id)
+        return jsonify({"error": str(exc)}), 500
+
+
 @app.route("/health")
 def health():
     return jsonify({"status": "ok"})
@@ -396,4 +450,4 @@ if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     debug = "--dev" in sys.argv
     log.info("Starting PartsWatch AI dashboard on port %d  debug=%s", port, debug)
-    app.run(host="0.0.0.0", port=port, debug=debug)
+    app.run(host="0.0.0.0", port=port, debug=debug, threaded=True)

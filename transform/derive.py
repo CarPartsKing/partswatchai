@@ -8,9 +8,10 @@ never deleted — only targeted fields are updated via upsert.
 DERIVATIONS (run in this order)
     1. lost_sales_imputation — estimate unrecorded demand during stockout events
     2. abc_classification    — rank SKUs A/B/C by 90-day revenue
-    3. supplier_scores       — fill rate, lead time, on-time, composite score
-    4. weather_sensitivity   — Pearson r between daily qty sold and temp_min_f
-    5. sku_metrics           — last_sale_date and avg_weekly_units per SKU
+    3. xyz_classification    — X/Y/Z by CV of weekly demand (must follow ABC)
+    4. supplier_scores       — fill rate, lead time, on-time, composite score
+    5. weather_sensitivity   — Pearson r between daily qty sold and temp_min_f
+    6. sku_metrics           — last_sale_date and avg_weekly_units per SKU
 
 DESIGN PRINCIPLES
     - Each derivation is an isolated function. Adding a new one = write one
@@ -31,8 +32,9 @@ import argparse
 import math
 import sys
 import time
+from collections import defaultdict
 from datetime import date, timedelta
-from statistics import mean
+from statistics import mean, pstdev
 from typing import Any, Callable
 
 from utils.logging_config import get_logger
@@ -49,6 +51,16 @@ IMPUTATION_WINDOW_DAYS: int = 30
 
 # Revenue lookback for ABC classification
 ABC_LOOKBACK_DAYS: int = 90
+
+# Lookback window for XYZ demand-variability classification (weeks of sales data)
+XYZ_LOOKBACK_DAYS: int = 90   # same 90-day window as ABC for a consistent snapshot
+
+# Minimum number of distinct weeks needed to compute a meaningful CV
+MIN_XYZ_WEEKS: int = 4
+
+# CV thresholds that define each class boundary
+XYZ_CV_X: float = 0.5    # CV < this  → X (consistent)
+XYZ_CV_Y: float = 1.0    # CV < this  → Y (variable); else → Z (erratic)
 
 # Purchase-order lookback for supplier scoring
 SUPPLIER_LOOKBACK_DAYS: int = 90
@@ -308,7 +320,132 @@ def derive_abc_classification(client: Any) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Derivation 3 — Supplier scores
+# Derivation 3 — XYZ demand-variability classification
+# ---------------------------------------------------------------------------
+
+def derive_xyz_classification(client: Any) -> dict:
+    """Classify every SKU X / Y / Z by the variability of its weekly demand.
+
+    The coefficient of variation (CV = population_std / mean) is computed from
+    the SKU's weekly sales totals over the last XYZ_LOOKBACK_DAYS days.  Weeks
+    inside the window with no recorded sales are treated as 0 — a product that
+    only sells some weeks is inherently more erratic than one that sells every
+    week.
+
+    CV thresholds:
+        X — CV < 0.5   : demand is stable and predictable week-to-week
+        Y — 0.5 ≤ CV < 1.0 : demand varies but has a detectable pattern
+        Z — CV ≥ 1.0   : demand is erratic and hard to forecast
+
+    Special cases (assigned without computing CV):
+        No sales in the window       → Z  (dead / never-moved)
+        Fewer than MIN_XYZ_WEEKS     → Y  (not enough history for reliable CV)
+        Mean of weekly series = 0    → Z  (technically impossible if no-sales→Z,
+                                           but guards against float-zero errors)
+
+    After classifying, reads the abc_class already written to sku_master by
+    derive_abc_classification and combines the two into abc_xyz_class
+    (e.g. "AX", "BZ", "CY").
+
+    Writes to:
+        sku_master.xyz_class       (CHAR 1: X / Y / Z)
+        sku_master.abc_xyz_class   (CHAR 2: AX / AY / AZ / BX … CZ)
+
+    Returns:
+        {"rows_updated": N}
+    """
+    today  = date.today()
+    cutoff = (today - timedelta(days=XYZ_LOOKBACK_DAYS)).isoformat()
+
+    # Fetch transactions in the lookback window
+    tx_rows = _fetch_all(client, "sales_transactions",
+                         "sku_id,qty_sold,transaction_date")
+    tx_rows = [r for r in tx_rows
+               if str(r.get("transaction_date", ""))[:10] >= cutoff]
+
+    # Enumerate every ISO week that falls inside the window (for zero-padding)
+    all_iso_weeks: list[tuple[int, int]] = []
+    cursor = today - timedelta(days=XYZ_LOOKBACK_DAYS)
+    seen_weeks: set[tuple[int, int]] = set()
+    while cursor <= today:
+        iso_cal = cursor.isocalendar()
+        wk = (iso_cal[0], iso_cal[1])
+        if wk not in seen_weeks:
+            all_iso_weeks.append(wk)
+            seen_weeks.add(wk)
+        cursor += timedelta(days=7)
+    n_weeks = len(all_iso_weeks)
+
+    # Aggregate qty_sold per (sku_id, iso_year, iso_week)
+    weekly: dict[str, dict[tuple[int, int], float]] = defaultdict(
+        lambda: defaultdict(float)
+    )
+    for r in tx_rows:
+        sku   = r.get("sku_id", "")
+        qty   = float(r.get("qty_sold") or 0)
+        d_str = str(r.get("transaction_date", ""))[:10]
+        if not sku or not d_str:
+            continue
+        iso_cal = date.fromisoformat(d_str).isocalendar()
+        weekly[sku][(iso_cal[0], iso_cal[1])] += qty
+
+    # Fetch current abc_class for the combined field
+    sku_rows = _fetch_all(client, "sku_master", "sku_id,abc_class")
+    abc_map  = {r["sku_id"]: (r.get("abc_class") or "C") for r in sku_rows}
+    all_skus = list(abc_map.keys())
+
+    updates: list[dict] = []
+    class_counts: dict[str, int] = {"X": 0, "Y": 0, "Z": 0}
+
+    for sku_id in all_skus:
+        week_data = weekly.get(sku_id, {})
+
+        if not week_data:
+            # No sales at all in the window
+            xyz = "Z"
+        else:
+            # Build the full weekly series including zero-sales weeks
+            series = [week_data.get(wk, 0.0) for wk in all_iso_weeks]
+            total  = sum(series)
+
+            if total == 0:
+                xyz = "Z"
+            elif n_weeks < MIN_XYZ_WEEKS:
+                # Too few weeks — flag Y (not enough data to confirm stability)
+                xyz = "Y"
+            else:
+                mean_w = total / n_weeks
+                std_w  = pstdev(series)   # population std dev
+                cv     = std_w / mean_w if mean_w > 0 else float("inf")
+
+                if cv < XYZ_CV_X:
+                    xyz = "X"
+                elif cv < XYZ_CV_Y:
+                    xyz = "Y"
+                else:
+                    xyz = "Z"
+
+        class_counts[xyz] += 1
+        abc = abc_map.get(sku_id, "C")
+        updates.append({
+            "sku_id":        sku_id,
+            "xyz_class":     xyz,
+            "abc_xyz_class": abc + xyz,
+        })
+
+    _upsert(client, "sku_master", updates, on_conflict="sku_id")
+
+    log.info(
+        "  XYZ classified %d SKU(s): X=%d  Y=%d  Z=%d  "
+        "(lookback=%dd  weeks=%d  min_weeks=%d  cv_x=%.1f  cv_y=%.1f)",
+        len(updates), class_counts["X"], class_counts["Y"], class_counts["Z"],
+        XYZ_LOOKBACK_DAYS, n_weeks, MIN_XYZ_WEEKS, XYZ_CV_X, XYZ_CV_Y,
+    )
+    return {"rows_updated": len(updates)}
+
+
+# ---------------------------------------------------------------------------
+# Derivation 4 — Supplier scores
 # ---------------------------------------------------------------------------
 
 def derive_supplier_scores(client: Any) -> dict:
@@ -591,11 +728,12 @@ def derive_sku_metrics(client: Any) -> dict:
 # ---------------------------------------------------------------------------
 
 DERIVATIONS: list[tuple[str, DeriveFn]] = [
-    ("Lost sales imputation",   derive_lost_sales_imputation),
-    ("ABC classification",      derive_abc_classification),
-    ("Supplier scores",         derive_supplier_scores),
-    ("Weather sensitivity",     derive_weather_sensitivity),
-    ("SKU metrics",             derive_sku_metrics),
+    ("Lost sales imputation",       derive_lost_sales_imputation),
+    ("ABC classification",          derive_abc_classification),
+    ("XYZ demand variability",      derive_xyz_classification),   # after ABC (reads abc_class)
+    ("Supplier scores",             derive_supplier_scores),
+    ("Weather sensitivity",         derive_weather_sensitivity),
+    ("SKU metrics",                 derive_sku_metrics),
 ]
 
 

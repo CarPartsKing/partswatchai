@@ -16,7 +16,7 @@ Acts as shared foundation code (config, DB connection, logging utilities) and sy
 - PartsWatch extraction ready (switches via `PARTSWATCH_SOURCE` env var)
 - Weather pipeline — 3 years NE Ohio data
 - Data cleaning — 7 checks + data_quality_issues table
-- Derived fields — supplier scores, ABC class, weather sensitivity
+- Derived fields — supplier scores, ABC class, XYZ class (abc_xyz_class combined), weather sensitivity
 - Anomaly detection — Isolation Forest
 - LightGBM forecasting — B-class SKUs
 - Rolling average forecasting — C-class SKUs
@@ -178,7 +178,7 @@ partswatch-ai/
 
 **Stage keys**: `extract`, `clean`, `derive`, `location_classify`, `anomaly`, `forecast_rolling`, `forecast_lgbm`, `reorder`, `alerts`
 
-**Dry-run confirmed**: 8/8 active stages OK in 14.1s; `derive` skipped (no dry-run support)
+**Dry-run confirmed**: 8/8 active stages OK in 9.2s; `derive` skipped (no dry-run support)
 
 ## GitHub Actions
 - **nightly.yml**: `0 7 * * *` (7am UTC = 2am EST) — full pipeline

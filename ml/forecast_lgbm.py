@@ -5,11 +5,13 @@ Runs nightly after forecast_rolling.py.  Trains one LightGBM model per
 (SKU, location) pair with at least MIN_TRAIN_DAYS days of sales history, then
 generates FORECAST_HORIZON days of forward predictions.
 
-FEATURES (12 total)
+FEATURES (14 total)
     Calendar:  day_of_week, week_of_year, month
     Lags:      lag_7, lag_14, lag_28       (demand N days before target)
     Rolling:   rolling_mean_7, rolling_mean_28
     Weather:   temp_min_f, freeze_thaw_cycle, snowfall_in, consecutive_freeze_days
+    Quality:   demand_quality_score        (0.0 residual → 1.0 organic)
+    Variability: xyz_class_enc             (0=X consistent, 1=Y variable, 2=Z erratic)
 
 LAG STRATEGY FOR FORECAST PERIOD
     Lag dates that fall within the known historical window use actual demand.
@@ -154,6 +156,7 @@ FEATURE_NAMES: list[str] = [
     "snowfall_in",
     "consecutive_freeze_days",
     "demand_quality_score",   # 13th feature: 0.0 (residual) → 1.0 (organic)
+    "xyz_class_enc",          # 14th feature: 0=X (consistent), 1=Y, 2=Z (erratic)
 ]
 
 
@@ -346,8 +349,9 @@ def _build_feature_row(
     fallback_demand: float,
     today: date,
     demand_quality_score: float = 1.0,
+    xyz_class_enc: float = 1.0,
 ) -> list[float]:
-    """Compute the 13 feature values for one (SKU, location, date) observation.
+    """Compute the 14 feature values for one (SKU, location, date) observation.
 
     For lag dates that fall inside the forecast horizon (i.e. after today),
     fallback_demand (rolling_mean_28 of the training series) is used instead
@@ -363,9 +367,12 @@ def _build_feature_row(
         today:                The run date (first day of the forecast horizon).
         demand_quality_score: Per-(SKU, location) organic demand ratio (0.0–1.0).
                               Constant across all dates for a given pair.
+        xyz_class_enc:        XYZ demand-variability class encoded as float.
+                              0=X (consistent), 1=Y (variable), 2=Z (erratic).
+                              Constant across all dates for a given SKU.
 
     Returns:
-        List of 13 floats in FEATURE_NAMES order.
+        List of 14 floats in FEATURE_NAMES order.
     """
     def get_demand(d: date) -> float:
         if d >= today:
@@ -401,6 +408,7 @@ def _build_feature_row(
         rolling_mean_7, rolling_mean_28,
         float(temp), float(freeze), float(snow), float(cfd),
         float(demand_quality_score),
+        float(xyz_class_enc),
     ]
 
 
@@ -412,6 +420,7 @@ def _build_matrices(
     fallback_demand: float,
     today: date,
     demand_quality_score: float = 1.0,
+    xyz_class_enc: float = 1.0,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Build feature matrix X and target vector y for a list of history dates.
 
@@ -423,9 +432,10 @@ def _build_matrices(
         fallback_demand:      Fallback demand for future lag lookups.
         today:                Run date.
         demand_quality_score: Organic demand ratio for this (SKU, location) pair.
+        xyz_class_enc:        XYZ class as float (0=X, 1=Y, 2=Z) for this SKU.
 
     Returns:
-        (X, y) where X has shape (n, 13) and y has shape (n,).
+        (X, y) where X has shape (n, 14) and y has shape (n,).
     """
     rows = []
     targets = []
@@ -435,6 +445,7 @@ def _build_matrices(
                 d, demand_by_date, weather_by_date,
                 fallback_weather, fallback_demand, today,
                 demand_quality_score=demand_quality_score,
+                xyz_class_enc=xyz_class_enc,
             )
         )
         targets.append(demand_by_date.get(d.isoformat(), 0.0))
@@ -501,6 +512,7 @@ def _generate_forecast(
     today: date,
     run_date_str: str,
     demand_quality_score: float = 1.0,
+    xyz_class_enc: float = 1.0,
 ) -> list[dict]:
     """Generate FORECAST_HORIZON rows of predictions with uncertainty bounds.
 
@@ -518,6 +530,7 @@ def _generate_forecast(
         today:                First forecast date.
         run_date_str:         ISO run date string.
         demand_quality_score: Organic demand ratio; passed as a constant feature.
+        xyz_class_enc:        XYZ class as float (0=X, 1=Y, 2=Z); constant feature.
 
     Returns:
         List of FORECAST_HORIZON forecast row dicts.
@@ -528,6 +541,7 @@ def _generate_forecast(
             d, demand_by_date, weather_by_date,
             fallback_weather, fallback_demand, today,
             demand_quality_score=demand_quality_score,
+            xyz_class_enc=xyz_class_enc,
         )
         for d in forecast_dates
     ]
@@ -616,6 +630,39 @@ def _fetch_demand_quality(client: Any) -> dict[tuple[str, str], float]:
     }
 
 
+def _fetch_xyz_class(client: Any) -> dict[str, int]:
+    """Return xyz_class encoded as an integer per sku_id (B-class SKUs only).
+
+    Encoding matches FEATURE_NAMES["xyz_class_enc"]:
+        X = 0  (consistent demand, low CV)
+        Y = 1  (variable demand, medium CV)  ← default for unknown SKUs
+        Z = 2  (erratic demand, high CV)
+
+    Falls back gracefully:
+    - If migration 010 has not yet been applied and the column does not exist,
+      returns an empty dict so every SKU uses the Y default (1) at call sites.
+    - If a SKU has no xyz_class set, returns Y (1).
+
+    Returns:
+        {sku_id: encoded_int (0 / 1 / 2)}
+    """
+    _ENC: dict[str, int] = {"X": 0, "Y": 1, "Z": 2}
+    try:
+        rows = _fetch_all(client, "sku_master", "sku_id,xyz_class",
+                          filters={"abc_class": "B"})
+    except Exception as exc:
+        log.warning(
+            "xyz_class column unavailable (migration 010 not yet applied?) — "
+            "all B-class SKUs will use Y (variable) as fallback: %s", exc,
+        )
+        return {}
+    return {
+        r["sku_id"]: _ENC.get(r.get("xyz_class") or "Y", 1)
+        for r in rows
+        if r.get("sku_id")
+    }
+
+
 # ---------------------------------------------------------------------------
 # Orchestrator
 # ---------------------------------------------------------------------------
@@ -685,13 +732,14 @@ def run_forecast(dry_run: bool = False) -> int:
         log.info("  %d B-class SKU(s) had no sales in the 2-year window.", skus_no_sales)
     log.info("-" * 60)
 
-    # ── 4b. Fetch location tiers + demand quality for blending ────────────
-    log.info("Fetching location tiers and demand quality scores …")
+    # ── 4b. Fetch location tiers, demand quality, and XYZ classes ────────
+    log.info("Fetching location tiers, demand quality scores, and XYZ classes …")
     location_tiers = _fetch_location_tiers(client)
     demand_quality = _fetch_demand_quality(client)
+    xyz_class_map  = _fetch_xyz_class(client)
     log.info(
-        "  Location tiers loaded: %d  Demand quality pairs: %d",
-        len(location_tiers), len(demand_quality),
+        "  Location tiers loaded: %d  Demand quality pairs: %d  XYZ classes: %d",
+        len(location_tiers), len(demand_quality), len(xyz_class_map),
     )
 
     # Regional baseline demand per SKU: mean of Tier 1+2 location histories.
@@ -722,9 +770,10 @@ def run_forecast(dry_run: bool = False) -> int:
     for sku_id, location_id in active_pairs:
         demand_by_date = demand_map[(sku_id, location_id)]
 
-        # Look up demand quality and location tier for this pair
+        # Look up demand quality, location tier, and XYZ class for this pair
         dq_score = float(demand_quality.get((sku_id, location_id), 1.0))
         loc_tier = location_tiers.get(location_id, 2)
+        xyz_enc  = float(xyz_class_map.get(sku_id, 1))  # default Y=1
 
         # Determine calendar span from first sale to yesterday
         all_dates_str = sorted(demand_by_date.keys())
@@ -769,11 +818,13 @@ def run_forecast(dry_run: bool = False) -> int:
             train_dates, demand_by_date, weather_by_date,
             fallback_weather, fallback_demand, today,
             demand_quality_score=dq_score,
+            xyz_class_enc=xyz_enc,
         )
         X_val, y_val = _build_matrices(
             val_dates, demand_by_date, weather_by_date,
             fallback_weather, fallback_demand, today,
             demand_quality_score=dq_score,
+            xyz_class_enc=xyz_enc,
         )
 
         try:
@@ -794,6 +845,7 @@ def run_forecast(dry_run: bool = False) -> int:
             demand_by_date, weather_by_date, fallback_weather,
             fallback_demand, val_rmse, today, run_date_str,
             demand_quality_score=dq_score,
+            xyz_class_enc=xyz_enc,
         )
 
         # Tier 3 blending: if this location has low demand quality, weight

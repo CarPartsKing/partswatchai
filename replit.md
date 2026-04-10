@@ -35,26 +35,32 @@ Acts as shared foundation code (config, DB connection, logging utilities) and sy
 - Residual demand excluded from forecast training; Tier 3 forecasts blended toward regional baseline
 - Migration: `db/migrations/009_location_classify.sql` (written, pending Supabase apply)
 
-**2. Prophet A-class forecasting**
+**2. L/R part pair grouping**
+- Part pairing logic needed — L/R suffix SKUs (e.g. headlights, mirrors, control arms) are treated as separate SKUs but represent the same repair job. Build logic to group L/R pairs and aggregate demand for forecasting accuracy. Example: SKU-1234L and SKU-1234R should be forecasted as a pair.
+
+**3. Prophet A-class forecasting**
 - Runs weekly on laptop Sunday nights
 - Weather regressors: `temp_min_f`, `snowfall_in`, `consecutive_freeze_days`, `freeze_thaw_cycle`
 - XGBoost ensemble for top accuracy
 
-**3. Ohio VIO data**
+**4. Min/Max Qty comparison (buyer-set vs AI-generated)**
+- Product cube contains buyer-set Min Qty and Max Qty per SKU per location from Datatron. When loaded, compare AI-generated reorder points against these buyer-set minimums. Significant differences (>50% variance) should be flagged for review — either the AI found a better level or the buyer knows something the data doesn't capture.
+
+**5. Ohio VIO data**
 - Vehicle registrations by county and model year
 - 6-county NE Ohio market: Cuyahoga, Summit, Lorain, Medina, Lake, Geauga
 
-**4. ACES/PIES fitment data**
+**6. ACES/PIES fitment data**
 - Maps every SKU to vehicle applications
 - Cross-reference with VIO for active vehicle population per SKU in our market
 - Highest ROI Phase 2 addition
 
-**5. PartsTech search data**
+**7. PartsTech search data**
 - Leading demand signal — searches before orders
 - Need to confirm API access via seller account
 - If accessible: primary demand indicator
 
-**6. Additional ML models**
+**8. Additional ML models**
 - Basket analysis (mlxtend) — co-purchase signals ← *WEEKLY PIPELINE (Phase 2)*
 - Customer churn predictor
 - Dead stock classifier ← *COMPLETE* (see `ml/dead_stock.py`)
@@ -131,6 +137,7 @@ Acts as shared foundation code (config, DB connection, logging utilities) and sy
 | `freeze_thaw_cycle` | Pothole season predictor |
 | `weather_sensitivity_score` | Per-SKU category sensitivity |
 | `is_anomaly` | Isolation Forest outlier flag — excluded from forecast training |
+| `is_warranty` | Warranty transaction flag (TODO) — exclude from forecast training same as is_anomaly |
 
 ## Project Structure
 ```
@@ -280,6 +287,40 @@ Live connection to Autologue's Autocube data warehouse via XMLA/SOAP protocol.
 - Only hardcoded MDX templates used (date_key is the only parameterized value)
 
 **Secrets required:** `AUTOCUBE_SERVER`, `AUTOCUBE_USER`, `AUTOCUBE_PASSWORD`, `AUTOCUBE_CATALOG`
+
+## Location Mapping (Product Cube — 27 locations)
+| Cube ID | LOC Format | Name | On-Hand Qty | Notes |
+|---------|-----------|------|-------------|-------|
+| 1 | LOC-001 | BROOKPARK | 51,414 | |
+| 2 | LOC-002 | NOLMSTEAD | 30,253 | |
+| 3 | LOC-003 | S. EUCLID | 33,111 | |
+| 4 | LOC-004 | CLARK AUTO | 55,663 | |
+| 5 | LOC-005 | PARMA | 36,035 | |
+| 6 | LOC-006 | MEDINA | 33,122 | |
+| 7 | LOC-007 | BOARDMAN | 38,375 | |
+| 8 | LOC-008 | ELYRIA | 477,242 | Warehouse/hub |
+| 9 | LOC-009 | AKRON-GRANT | 29,973 | |
+| 10 | LOC-010 | MIDWAY CROSSINGS | 207,697 | Regional hub |
+| 11 | LOC-011 | ERIE ST | 54,887 | |
+| 12 | LOC-012 | MAYFIELD | 29,326 | |
+| 13 | LOC-013 | CANTON | 38,267 | |
+| 15 | LOC-015 | JUNIATA | 94,019 | |
+| 16 | LOC-016 | ARCHWOOD | 49,177 | |
+| 17 | LOC-017 | EUCLID | 38,375 | |
+| 18 | LOC-018 | WARREN | 31,377 | |
+| 20 | LOC-020 | ROOTSTOWN | 31,978 | |
+| 21 | LOC-021 | INTERNET | -1,795 | E-commerce/virtual |
+| 24 | LOC-024 | MENTOR | 25,740 | |
+| 25 | LOC-025 | DC | 585,402 | Main distribution center |
+| 26 | LOC-026 | COPLEY | 31,582 | |
+| 27 | LOC-027 | CHARDON | 24,967 | |
+| 28 | LOC-028 | STRONGSVILLE | 30,590 | |
+| 29 | LOC-029 | MIDDLEBURG | 226,741 | Regional hub |
+| 32 | LOC-032 | PERRY | 100,139 | |
+| 33 | LOC-033 | CRYSTAL | 28,615 | |
+
+**Gap numbers** (not in Product cube): 14, 19, 22, 23, 30, 31 — likely closed/retired locations.
+**Special locations**: LOC-021 (INTERNET) has negative on-hand (returns/adjustments). LOC-025 (DC) is the main distribution center with 585K items.
 
 ## Environment Variables (.env)
 | Variable | Required | Description |

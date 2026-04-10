@@ -34,6 +34,12 @@ MODES
     python -m extract.autocube_pull --mode incremental
         Pull previous day only.  Deduplicate before inserting.
 
+WARRANTY FLAG (TODO — Sales Detail cube)
+    The Sales Detail cube contains a Warranty Flag dimension. Once captured,
+    warranty transactions (is_warranty = TRUE) should be excluded from forecast
+    training data using the same exclusion logic as is_anomaly = TRUE.
+    Migration backlog: add is_warranty BOOLEAN DEFAULT FALSE to sales_transactions.
+
 XMLA ENDPOINT PATHS TRIED (in order)
     /olap/msmdpump.dll   — standard IIS HTTP pump
     /OLAP/msmdpump.dll   — case variant

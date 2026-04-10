@@ -99,16 +99,18 @@ WHERE a.location_id = l.location_id
 -- 6. Flag LOC-021 INTERNET negative on-hand as a data quality issue
 -- ---------------------------------------------------------------------------
 INSERT INTO data_quality_issues (
-    issue_type, table_name, column_name, severity,
-    description, affected_count, checked_at
+    source_table, source_id, issue_type,
+    issue_detail, field_name, field_value,
+    severity, checked_at
 )
 VALUES (
-    'negative_inventory',
     'inventory_snapshots',
-    'qty_on_hand',
-    'warning',
+    'LOC-021',
+    'negative_inventory',
     'INTERNET location (LOC-021) shows negative on-hand inventory (-1,795 units) — possible oversell or receiving discrepancy',
-    1,
+    'qty_on_hand',
+    '-1795',
+    'warning',
     NOW()
 )
-ON CONFLICT DO NOTHING;
+ON CONFLICT (source_table, source_id, issue_type) DO NOTHING;

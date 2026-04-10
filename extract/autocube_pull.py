@@ -752,6 +752,185 @@ def run_connection_test() -> int:
     return 0
 
 
+def run_full_discovery() -> int:
+    """Deep metadata discovery — list ALL catalogs, cubes, dimensions, and measures.
+
+    Goes beyond the default catalog to find every database and cube
+    available on the SSAS server, including inventory, purchasing,
+    and customer cubes we may not have explored yet.
+
+    Returns 0 on success, 1 on failure.
+    """
+    log.info("=" * 70)
+    log.info("  AUTOCUBE FULL METADATA DISCOVERY")
+    log.info("=" * 70)
+    log.info("Server:  %s", config.AUTOCUBE_SERVER)
+    log.info("User:    %s", config.AUTOCUBE_USER)
+    log.info("Default Catalog: %s", config.AUTOCUBE_CATALOG)
+
+    try:
+        client = get_client()
+        endpoint = client.connect()
+        log.info("Connected: %s", endpoint)
+    except Exception:
+        log.exception("Connection failed.")
+        return 1
+
+    log.info("")
+    log.info("=" * 70)
+    log.info("  PHASE 1: DISCOVER ALL CATALOGS (DATABASES)")
+    log.info("=" * 70)
+    catalogs: list[str] = []
+    try:
+        cat_rows = client.discover("DBSCHEMA_CATALOGS", {})
+        if cat_rows:
+            for c in cat_rows:
+                name = c.get("CATALOG_NAME", "?")
+                catalogs.append(name)
+                log.info("  Database: %-40s  Description: %s",
+                         name, c.get("DESCRIPTION", ""))
+            log.info("  Total databases found: %d", len(catalogs))
+        else:
+            log.info("  (DBSCHEMA_CATALOGS returned 0 rows — server may not support it)")
+            catalogs.append(config.AUTOCUBE_CATALOG)
+    except Exception:
+        log.warning("  DBSCHEMA_CATALOGS not supported — falling back to default catalog.")
+        catalogs.append(config.AUTOCUBE_CATALOG)
+
+    log.info("")
+    log.info("=" * 70)
+    log.info("  PHASE 2: DISCOVER ALL CUBES IN EACH CATALOG")
+    log.info("=" * 70)
+
+    all_cubes: list[tuple[str, str, str]] = []
+
+    for catalog in catalogs:
+        log.info("")
+        log.info("--- Catalog: %s ---", catalog)
+        try:
+            cube_rows = client.discover("MDSCHEMA_CUBES", {
+                "CATALOG_NAME": catalog,
+            })
+            if not cube_rows:
+                log.info("  (no cubes found)")
+                continue
+            for c in cube_rows:
+                cube_name = c.get("CUBE_NAME", "?")
+                cube_type = c.get("CUBE_TYPE", "?")
+                desc = c.get("DESCRIPTION", "")
+                created = c.get("CREATED_ON", "")
+                updated = c.get("LAST_SCHEMA_UPDATE", c.get("LAST_DATA_UPDATE", ""))
+                all_cubes.append((catalog, cube_name, cube_type))
+                log.info("  Cube: %-35s  Type: %-12s  Created: %s  Updated: %s",
+                         cube_name, cube_type, created[:19] if created else "?",
+                         updated[:19] if updated else "?")
+                if desc:
+                    log.info("        Description: %s", desc[:200])
+        except Exception:
+            log.exception("  Failed to list cubes in catalog '%s'.", catalog)
+
+    log.info("")
+    log.info("  Total cubes found across all catalogs: %d", len(all_cubes))
+
+    log.info("")
+    log.info("=" * 70)
+    log.info("  PHASE 3: DIMENSIONS & MEASURES FOR EACH CUBE")
+    log.info("=" * 70)
+
+    for catalog, cube_name, cube_type in all_cubes:
+        log.info("")
+        log.info("╔══════════════════════════════════════════════════════════════╗")
+        log.info("║  Catalog: %-20s  Cube: %-25s ║", catalog[:20], cube_name[:25])
+        log.info("╚══════════════════════════════════════════════════════════════╝")
+
+        log.info("")
+        log.info("  --- Dimensions ---")
+        try:
+            dims = client.discover("MDSCHEMA_DIMENSIONS", {
+                "CATALOG_NAME": catalog,
+                "CUBE_NAME": cube_name,
+            })
+            if dims:
+                for d in dims:
+                    log.info("    Dim: %-30s  UniqueName: %-40s  Type: %s",
+                             d.get("DIMENSION_NAME", "?"),
+                             d.get("DIMENSION_UNIQUE_NAME", "?"),
+                             d.get("DIMENSION_TYPE", "?"))
+            else:
+                log.info("    (no dimensions)")
+        except Exception:
+            log.exception("    Failed to list dimensions for cube '%s'.", cube_name)
+
+        log.info("")
+        log.info("  --- Hierarchies ---")
+        try:
+            hierarchies = client.discover("MDSCHEMA_HIERARCHIES", {
+                "CATALOG_NAME": catalog,
+                "CUBE_NAME": cube_name,
+            })
+            if hierarchies:
+                for h in hierarchies:
+                    log.info("    Hierarchy: %-35s  Dimension: %-30s",
+                             h.get("HIERARCHY_UNIQUE_NAME", "?"),
+                             h.get("DIMENSION_UNIQUE_NAME", "?"))
+            else:
+                log.info("    (no hierarchies)")
+        except Exception:
+            log.exception("    Failed to list hierarchies for cube '%s'.", cube_name)
+
+        log.info("")
+        log.info("  --- Measures ---")
+        try:
+            measures = client.discover("MDSCHEMA_MEASURES", {
+                "CATALOG_NAME": catalog,
+                "CUBE_NAME": cube_name,
+            })
+            if measures:
+                for m in measures:
+                    log.info("    Measure: %-35s  UniqueName: %-45s  Type: %s  Agg: %s",
+                             m.get("MEASURE_NAME", "?"),
+                             m.get("MEASURE_UNIQUE_NAME", "?"),
+                             m.get("DATA_TYPE", "?"),
+                             m.get("MEASURE_AGGREGATOR", "?"))
+                log.info("    Total measures: %d", len(measures))
+            else:
+                log.info("    (no measures)")
+        except Exception:
+            log.exception("    Failed to list measures for cube '%s'.", cube_name)
+
+        log.info("")
+        log.info("  --- Levels ---")
+        try:
+            levels = client.discover("MDSCHEMA_LEVELS", {
+                "CATALOG_NAME": catalog,
+                "CUBE_NAME": cube_name,
+            })
+            if levels:
+                for lv in levels:
+                    log.info("    Level: %-40s  Hierarchy: %-35s  Depth: %s",
+                             lv.get("LEVEL_UNIQUE_NAME", "?"),
+                             lv.get("HIERARCHY_UNIQUE_NAME", "?"),
+                             lv.get("LEVEL_NUMBER", "?"))
+            else:
+                log.info("    (no levels)")
+        except Exception:
+            log.exception("    Failed to list levels for cube '%s'.", cube_name)
+
+    log.info("")
+    log.info("=" * 70)
+    log.info("  DISCOVERY SUMMARY")
+    log.info("=" * 70)
+    log.info("  Catalogs (databases): %d", len(catalogs))
+    for cat in catalogs:
+        cube_names = [cn for ca, cn, _ in all_cubes if ca == cat]
+        log.info("    %s: %d cubes — %s", cat, len(cube_names),
+                 ", ".join(cube_names) if cube_names else "(none)")
+    log.info("  Total cubes: %d", len(all_cubes))
+    log.info("")
+    log.info("Full discovery complete.")
+    return 0
+
+
 # ---------------------------------------------------------------------------
 # Data cleaning — scientific notation + date formatting
 # ---------------------------------------------------------------------------
@@ -1292,6 +1471,11 @@ def main() -> int:
         help="Connection test — list dimensions and measures, no data pull",
     )
     parser.add_argument(
+        "--discover-all",
+        action="store_true",
+        help="Deep discovery — list ALL catalogs, cubes, dimensions, and measures across the entire server",
+    )
+    parser.add_argument(
         "--mode",
         choices=["full", "incremental", "historical", "retry-failed"],
         help="Extract mode",
@@ -1321,9 +1505,12 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    if not args.test and not args.mode:
+    if not args.test and not args.discover_all and not args.mode:
         parser.print_help()
         return 1
+
+    if args.discover_all:
+        return run_full_discovery()
 
     if args.test:
         return run_connection_test()

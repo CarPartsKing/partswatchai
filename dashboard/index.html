@@ -40,7 +40,6 @@
     padding-right: var(--chat-width);
   }
 
-  /* ── Header ──────────────────────────────────────────────────────── */
   .header {
     background: var(--surface);
     border-bottom: 1px solid var(--border);
@@ -53,208 +52,110 @@
     z-index: 100;
   }
   .header-left { display: flex; align-items: center; gap: 14px; }
-  .logo {
-    font-size: 18px;
-    font-weight: 700;
-    color: var(--blue);
-    letter-spacing: -0.3px;
-  }
+  .logo { font-size: 18px; font-weight: 700; color: var(--blue); letter-spacing: -0.3px; }
   .logo span { color: var(--muted); font-weight: 400; }
-  .header-date {
-    font-size: 13px;
-    color: var(--muted);
-    border-left: 1px solid var(--border);
-    padding-left: 14px;
-  }
+  .header-date { font-size: 13px; color: var(--muted); border-left: 1px solid var(--border); padding-left: 14px; }
   .header-right { display: flex; align-items: center; gap: 16px; }
-  .conn-status {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    font-size: 12px;
-    color: var(--muted);
-  }
-  .conn-dot {
-    width: 8px; height: 8px;
-    border-radius: 50%;
-    background: var(--muted);
-    flex-shrink: 0;
-  }
+  .conn-status { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); }
+  .conn-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); flex-shrink: 0; }
   .conn-dot.live  { background: var(--success); box-shadow: 0 0 6px var(--success); }
   .conn-dot.error { background: var(--critical); }
   .conn-dot.loading { background: var(--warning); animation: pulse 1s infinite; }
   .last-updated { font-size: 12px; color: var(--muted); }
   .refresh-btn {
-    background: var(--surface2);
-    border: 1px solid var(--border);
-    color: var(--text);
-    padding: 5px 12px;
-    border-radius: var(--radius);
-    cursor: pointer;
-    font-size: 12px;
+    background: var(--surface2); border: 1px solid var(--border); color: var(--text);
+    padding: 5px 12px; border-radius: var(--radius); cursor: pointer; font-size: 12px;
     transition: background 0.15s;
   }
   .refresh-btn:hover { background: var(--border2); }
   .refresh-countdown { font-size: 11px; color: var(--muted); }
 
-  @keyframes pulse {
-    0%, 100% { opacity: 1; }
-    50% { opacity: 0.4; }
-  }
+  @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
 
-  /* ── Main layout ──────────────────────────────────────────────────── */
   .main { max-width: 1400px; margin: 0 auto; padding: 20px 24px 48px; }
 
-  /* ── Card ────────────────────────────────────────────────────────── */
   .card {
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-lg);
-    overflow: hidden;
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: var(--radius-lg); overflow: hidden;
   }
   .card-header {
-    padding: 14px 18px;
-    border-bottom: 1px solid var(--border2);
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
+    padding: 14px 18px; border-bottom: 1px solid var(--border2);
+    display: flex; align-items: center; justify-content: space-between;
   }
   .card-title {
-    font-size: 13px;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.5px;
-    color: var(--muted);
+    font-size: 13px; font-weight: 600; text-transform: uppercase;
+    letter-spacing: 0.5px; color: var(--muted);
   }
   .card-body { padding: 16px 18px; }
   .card-updated { font-size: 11px; color: var(--muted); }
 
-  /* ── Weather Banner ───────────────────────────────────────────────── */
+  .section { margin-bottom: 20px; }
+
+  .kpi-row {
+    display: grid; grid-template-columns: repeat(5, 1fr); gap: 12px; margin-bottom: 20px;
+  }
+  .kpi-card {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: var(--radius-lg); padding: 16px 18px;
+    display: flex; flex-direction: column; gap: 4px;
+  }
+  .kpi-label { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; }
+  .kpi-value { font-size: 28px; font-weight: 700; line-height: 1.2; }
+  .kpi-sub { font-size: 11px; color: var(--muted); }
+
   .weather-banner {
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-lg);
-    padding: 16px 20px;
-    margin-bottom: 20px;
-    display: flex;
-    align-items: center;
-    gap: 20px;
-    flex-wrap: wrap;
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: var(--radius-lg); padding: 16px 20px; margin-bottom: 20px;
+    display: flex; align-items: center; gap: 20px; flex-wrap: wrap;
   }
-  .weather-banner.freeze-warning {
-    border-color: var(--critical);
-    background: var(--critical-bg);
-  }
+  .weather-banner.freeze-warning { border-color: var(--critical); background: var(--critical-bg); }
   .weather-icon { font-size: 28px; line-height: 1; }
-  .weather-main .temp {
-    font-size: 22px;
-    font-weight: 700;
-    color: var(--text);
-  }
-  .weather-main .temp-range {
-    font-size: 13px;
-    color: var(--muted);
-  }
-  .weather-details {
-    display: flex;
-    gap: 20px;
-    flex-wrap: wrap;
-  }
-  .weather-detail {
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-  }
+  .weather-main .temp { font-size: 22px; font-weight: 700; color: var(--text); }
+  .weather-main .temp-range { font-size: 13px; color: var(--muted); }
+  .weather-details { display: flex; gap: 20px; flex-wrap: wrap; }
+  .weather-detail { display: flex; flex-direction: column; gap: 2px; }
   .weather-detail .label { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.4px; }
   .weather-detail .value { font-size: 14px; font-weight: 500; }
   .freeze-alert-text {
-    margin-left: auto;
-    background: var(--critical);
-    color: #fff;
-    padding: 6px 14px;
-    border-radius: var(--radius);
-    font-size: 12px;
-    font-weight: 600;
-    white-space: nowrap;
+    margin-left: auto; background: var(--critical); color: #fff;
+    padding: 6px 14px; border-radius: var(--radius); font-size: 12px;
+    font-weight: 600; white-space: nowrap;
   }
   .forecast-strip {
-    display: flex;
-    gap: 8px;
-    overflow-x: auto;
-    padding: 10px 0 4px;
-    border-top: 1px solid var(--border2);
-    margin-top: 12px;
-    scrollbar-width: thin;
-    scrollbar-color: var(--border) transparent;
+    display: flex; gap: 8px; overflow-x: auto; padding: 10px 0 4px;
+    border-top: 1px solid var(--border2); margin-top: 12px;
+    scrollbar-width: thin; scrollbar-color: var(--border) transparent;
   }
   .forecast-day {
-    flex-shrink: 0;
-    background: var(--surface2);
-    border: 1px solid var(--border2);
-    border-radius: var(--radius);
-    padding: 6px 10px;
-    text-align: center;
-    min-width: 60px;
+    flex-shrink: 0; background: var(--surface2); border: 1px solid var(--border2);
+    border-radius: var(--radius); padding: 6px 10px; text-align: center; min-width: 60px;
   }
   .forecast-day.freeze { border-color: var(--critical); background: var(--critical-bg); }
   .forecast-day .day-label { font-size: 11px; color: var(--muted); }
   .forecast-day .day-hi { font-size: 13px; font-weight: 600; }
   .forecast-day .day-lo { font-size: 11px; color: var(--muted); }
 
-  /* ── Alert Summary Row ────────────────────────────────────────────── */
-  .alert-summary-row {
-    display: grid;
-    grid-template-columns: repeat(3, 1fr);
-    gap: 12px;
-    margin-bottom: 20px;
-  }
+  .alert-summary-row { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-bottom: 20px; }
   .alert-card {
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-lg);
-    padding: 16px 20px;
-    cursor: pointer;
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: var(--radius-lg); padding: 16px 20px; cursor: pointer;
     transition: border-color 0.15s, background 0.15s;
-    display: flex;
-    align-items: center;
-    gap: 16px;
+    display: flex; align-items: center; gap: 16px;
   }
   .alert-card:hover { background: var(--surface2); }
   .alert-card.critical { border-left: 3px solid var(--critical); }
   .alert-card.warning  { border-left: 3px solid var(--warning); }
   .alert-card.info     { border-left: 3px solid var(--info); }
-  .alert-card.critical:hover { border-color: var(--critical); }
-  .alert-card.warning:hover  { border-color: var(--warning); }
-  .alert-card.info:hover     { border-color: var(--info); }
-  .alert-count {
-    font-size: 32px;
-    font-weight: 700;
-    line-height: 1;
-  }
+  .alert-count { font-size: 32px; font-weight: 700; line-height: 1; }
   .alert-card.critical .alert-count { color: var(--critical); }
   .alert-card.warning  .alert-count { color: var(--warning); }
   .alert-card.info     .alert-count { color: var(--info); }
-  .alert-label {
-    font-size: 13px;
-    font-weight: 600;
-    color: var(--muted);
-    text-transform: uppercase;
-    letter-spacing: 0.4px;
-  }
+  .alert-label { font-size: 13px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.4px; }
   .alert-sublabel { font-size: 11px; color: var(--muted); margin-top: 2px; }
 
-  /* ── Sections grid ────────────────────────────────────────────────── */
-  .section { margin-bottom: 20px; }
-
-  /* ── Badges ──────────────────────────────────────────────────────── */
   .badge {
-    display: inline-block;
-    padding: 2px 8px;
-    border-radius: 12px;
-    font-size: 11px;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.3px;
+    display: inline-block; padding: 2px 8px; border-radius: 12px;
+    font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.3px;
   }
   .badge-critical { background: var(--critical-bg); color: var(--critical); border: 1px solid rgba(248,81,73,0.3); }
   .badge-warning  { background: var(--warning-bg);  color: var(--warning);  border: 1px solid rgba(210,153,34,0.3); }
@@ -265,112 +166,96 @@
   .badge-low      { background: var(--surface2); color: var(--muted); border: 1px solid var(--border); }
   .badge-po       { background: rgba(56,139,253,0.1); color: var(--blue); border: 1px solid rgba(88,166,255,0.25); }
   .badge-transfer { background: rgba(63,185,80,0.1); color: var(--success); border: 1px solid rgba(63,185,80,0.25); }
+  .badge-red      { background: var(--critical-bg); color: var(--critical); border: 1px solid rgba(248,81,73,0.3); }
+  .badge-amber    { background: var(--warning-bg);  color: var(--warning);  border: 1px solid rgba(210,153,34,0.3); }
+  .badge-green    { background: var(--success-bg);  color: var(--success);  border: 1px solid rgba(63,185,80,0.3); }
 
-  /* ── Table ────────────────────────────────────────────────────────── */
   .data-table { width: 100%; border-collapse: collapse; }
   .data-table th {
-    text-align: left;
-    padding: 8px 12px;
-    font-size: 11px;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.4px;
-    color: var(--muted);
+    text-align: left; padding: 8px 12px; font-size: 11px; font-weight: 600;
+    text-transform: uppercase; letter-spacing: 0.4px; color: var(--muted);
     border-bottom: 1px solid var(--border2);
   }
-  .data-table td {
-    padding: 10px 12px;
-    border-bottom: 1px solid var(--border2);
-    font-size: 13px;
-  }
+  .data-table td { padding: 10px 12px; border-bottom: 1px solid var(--border2); font-size: 13px; }
   .data-table tr:last-child td { border-bottom: none; }
   .data-table tr:hover td { background: var(--surface2); }
+  .data-table th.right, .data-table td.right { text-align: right; }
   .sku-id { font-family: "SF Mono", "Fira Code", monospace; font-size: 12px; color: var(--blue); }
   .loc-id { font-family: "SF Mono", "Fira Code", monospace; font-size: 12px; color: var(--muted); }
   .msg-text { color: var(--muted); font-size: 12px; }
 
-  /* ── Bottom panels grid ───────────────────────────────────────────── */
-  .panels-grid {
-    display: grid;
-    grid-template-columns: repeat(3, 1fr);
-    gap: 16px;
-    margin-bottom: 20px;
-  }
+  .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 20px; }
+  .grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin-bottom: 20px; }
 
-  /* ── Stat block ──────────────────────────────────────────────────── */
   .stat-block { display: flex; flex-direction: column; gap: 14px; }
   .stat-row { display: flex; justify-content: space-between; align-items: center; }
   .stat-label { font-size: 13px; color: var(--muted); }
   .stat-value { font-size: 20px; font-weight: 700; }
   .stat-divider { height: 1px; background: var(--border2); }
 
-  /* ── Supplier dots ───────────────────────────────────────────────── */
-  .supplier-bar { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 12px; }
-  .supplier-segment {
-    height: 6px; border-radius: 3px;
-    min-width: 12px;
-    transition: width 0.4s ease;
-  }
-  .supplier-segment.green { background: var(--success); }
-  .supplier-segment.amber { background: var(--amber); }
-  .supplier-segment.red   { background: var(--critical); }
-  .supplier-counts { display: flex; gap: 16px; margin-bottom: 12px; }
-  .supplier-count { display: flex; align-items: center; gap: 6px; }
-  .supplier-dot { width: 10px; height: 10px; border-radius: 50%; }
-  .supplier-dot.green { background: var(--success); }
-  .supplier-dot.amber { background: var(--amber); }
-  .supplier-dot.red   { background: var(--critical); }
-  .supplier-count-num { font-size: 16px; font-weight: 700; }
-  .supplier-count-label { font-size: 12px; color: var(--muted); }
-  .red-suppliers-list { display: flex; flex-direction: column; gap: 4px; }
-  .red-supplier-row {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    padding: 6px 10px;
-    background: var(--critical-bg);
-    border: 1px solid rgba(248,81,73,0.2);
-    border-radius: var(--radius);
-    font-size: 12px;
-  }
-  .red-supplier-name { font-family: monospace; color: var(--critical); font-weight: 600; }
-  .red-supplier-score { color: var(--muted); }
+  .abc-bar { display: flex; height: 32px; border-radius: 6px; overflow: hidden; gap: 2px; margin: 10px 0; }
+  .abc-segment { display: flex; align-items: center; justify-content: center; font-size: 11px; font-weight: 700; color: #fff; transition: flex 0.5s ease; }
+  .abc-segment.a { background: #388bfd; }
+  .abc-segment.b { background: #e3b341; }
+  .abc-segment.c { background: #484f58; }
+  .abc-legend { display: flex; gap: 16px; margin-top: 6px; }
+  .abc-legend-item { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); }
+  .abc-dot { width: 10px; height: 10px; border-radius: 3px; }
+  .abc-dot.a { background: #388bfd; }
+  .abc-dot.b { background: #e3b341; }
+  .abc-dot.c { background: #484f58; }
 
-  /* ── Location tiers ──────────────────────────────────────────────── */
-  .tier-grid { display: flex; flex-direction: column; gap: 10px; }
-  .tier-row {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    padding: 10px 12px;
-    border-radius: var(--radius);
-    background: var(--surface2);
-    border: 1px solid var(--border2);
+  .supplier-detail-card {
+    padding: 12px 14px; border-radius: var(--radius); margin-bottom: 8px;
+    border: 1px solid var(--border2); background: var(--surface2);
   }
-  .tier-row.tier3-critical { border-color: var(--critical); background: var(--critical-bg); }
-  .tier-badge {
-    font-size: 11px;
-    font-weight: 700;
-    padding: 2px 8px;
-    border-radius: 10px;
-    white-space: nowrap;
-    flex-shrink: 0;
-  }
-  .tier-badge.t1 { background: var(--success-bg); color: var(--success); }
-  .tier-badge.t2 { background: var(--info-bg); color: var(--info); }
-  .tier-badge.t3 { background: var(--warning-bg); color: var(--warning); }
-  .tier-info { flex: 1; }
-  .tier-label { font-size: 12px; color: var(--muted); }
-  .tier-locs { font-size: 12px; color: var(--text); font-family: monospace; }
-  .tier-count { font-size: 20px; font-weight: 700; color: var(--muted); }
+  .supplier-detail-card.red { border-color: rgba(248,81,73,0.3); background: var(--critical-bg); }
+  .supplier-detail-card.green { border-color: rgba(63,185,80,0.3); }
+  .supplier-detail-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+  .supplier-detail-name { font-family: monospace; font-weight: 600; font-size: 14px; }
+  .supplier-detail-metrics { display: flex; gap: 16px; flex-wrap: wrap; }
+  .supplier-metric { display: flex; flex-direction: column; gap: 2px; }
+  .supplier-metric .sm-label { font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.3px; }
+  .supplier-metric .sm-value { font-size: 14px; font-weight: 600; }
 
-  /* ── Forecast accuracy ───────────────────────────────────────────── */
+  .score-bar-bg { height: 6px; background: var(--border2); border-radius: 3px; flex: 1; }
+  .score-bar-fill { height: 6px; border-radius: 3px; transition: width 0.5s ease; }
+
+  .tier-grid { display: flex; flex-direction: column; gap: 6px; }
+  .loc-row {
+    display: grid; grid-template-columns: 90px 1fr 60px; align-items: center; gap: 10px;
+    padding: 8px 12px; border-radius: var(--radius); background: var(--surface2);
+    border: 1px solid var(--border2); font-size: 13px;
+  }
+  .loc-row.critical-loc { border-color: var(--critical); background: var(--critical-bg); }
+  .loc-row .loc-name { font-family: monospace; font-weight: 600; color: var(--text); font-size: 12px; }
+  .loc-row .loc-score { font-weight: 700; text-align: right; font-size: 14px; }
+
+  .tier-separator {
+    padding: 6px 12px; font-size: 11px; font-weight: 700; text-transform: uppercase;
+    letter-spacing: 0.5px; margin-top: 8px;
+  }
+  .tier-separator.t1 { color: var(--success); }
+  .tier-separator.t2 { color: var(--info); }
+  .tier-separator.t3 { color: var(--warning); }
+
+  .pipeline-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(110px, 1fr)); gap: 6px; }
+  .pipeline-stage {
+    padding: 8px 10px; border-radius: var(--radius); text-align: center;
+    border: 1px solid var(--border2); background: var(--surface2); font-size: 11px;
+  }
+  .pipeline-stage.ok { border-color: rgba(63,185,80,0.3); }
+  .pipeline-stage.failed { border-color: rgba(248,81,73,0.3); background: var(--critical-bg); }
+  .pipeline-stage.running { border-color: rgba(210,153,34,0.3); background: var(--warning-bg); }
+  .pipeline-stage.never { border-color: var(--border2); opacity: 0.5; }
+  .pipeline-stage-name { font-weight: 600; margin-bottom: 2px; }
+  .pipeline-stage-status { font-size: 10px; color: var(--muted); }
+  .pipeline-stage-time { font-size: 10px; color: var(--muted); }
+
   .accuracy-row { display: flex; flex-direction: column; gap: 10px; }
   .accuracy-item {
-    padding: 10px 12px;
-    border-radius: var(--radius);
-    background: var(--surface2);
-    border: 1px solid var(--border2);
+    padding: 10px 12px; border-radius: var(--radius);
+    background: var(--surface2); border: 1px solid var(--border2);
   }
   .accuracy-item.above { border-color: var(--critical); }
   .accuracy-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
@@ -384,222 +269,99 @@
   .accuracy-bar-fill.ok { background: var(--success); }
   .accuracy-meta { font-size: 11px; color: var(--muted); margin-top: 4px; }
   .no-data { color: var(--muted); font-size: 13px; text-align: center; padding: 20px 0; }
-
-  /* ── Empty state ─────────────────────────────────────────────────── */
   .empty-state { text-align: center; padding: 24px; color: var(--muted); font-size: 13px; }
   .empty-state .icon { font-size: 24px; margin-bottom: 8px; }
 
-  /* ── Skeleton loading ────────────────────────────────────────────── */
   .skeleton {
     background: linear-gradient(90deg, var(--surface2) 25%, var(--border2) 50%, var(--surface2) 75%);
-    background-size: 200% 100%;
-    animation: shimmer 1.5s infinite;
-    border-radius: 4px;
+    background-size: 200% 100%; animation: shimmer 1.5s infinite; border-radius: 4px;
   }
   @keyframes shimmer { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
 
-  /* ── Error state ─────────────────────────────────────────────────── */
   .error-banner {
-    background: var(--critical-bg);
-    border: 1px solid var(--critical);
-    border-radius: var(--radius);
-    padding: 12px 16px;
-    color: var(--critical);
-    font-size: 13px;
-    margin-bottom: 16px;
+    background: var(--critical-bg); border: 1px solid var(--critical);
+    border-radius: var(--radius); padding: 12px 16px; color: var(--critical);
+    font-size: 13px; margin-bottom: 16px;
   }
 
-  /* ── Chat Panel ──────────────────────────────────────────────────── */
   .chat-panel {
-    position: fixed;
-    right: 0;
-    top: 0;
-    bottom: 0;
-    width: var(--chat-width);
-    background: var(--surface);
-    border-left: 1px solid var(--border);
-    display: flex;
-    flex-direction: column;
-    z-index: 99;
-    transition: transform 0.25s ease;
+    position: fixed; right: 0; top: 0; bottom: 0; width: var(--chat-width);
+    background: var(--surface); border-left: 1px solid var(--border);
+    display: flex; flex-direction: column; z-index: 99; transition: transform 0.25s ease;
   }
-  .chat-panel.collapsed {
-    transform: translateX(100%);
-  }
-  body.chat-collapsed {
-    padding-right: 0;
-  }
+  .chat-panel.collapsed { transform: translateX(100%); }
+  body.chat-collapsed { padding-right: 0; }
 
   .chat-toggle-tab {
-    position: fixed;
-    right: 0;
-    top: 50%;
-    transform: translateY(-50%);
-    z-index: 98;
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-right: none;
-    border-radius: 8px 0 0 8px;
-    padding: 12px 6px;
-    cursor: pointer;
-    color: var(--blue);
-    font-size: 16px;
-    line-height: 1;
-    display: none;
-    writing-mode: vertical-lr;
-    letter-spacing: 1px;
-    font-weight: 600;
-    font-size: 11px;
-    gap: 6px;
-    align-items: center;
+    position: fixed; right: 0; top: 50%; transform: translateY(-50%); z-index: 98;
+    background: var(--surface); border: 1px solid var(--border); border-right: none;
+    border-radius: 8px 0 0 8px; padding: 12px 6px; cursor: pointer; color: var(--blue);
+    font-size: 11px; line-height: 1; display: none; writing-mode: vertical-lr;
+    letter-spacing: 1px; font-weight: 600; gap: 6px; align-items: center;
     transition: background 0.15s ease;
   }
-  .chat-toggle-tab:hover {
-    background: var(--surface2);
-  }
-  .chat-toggle-tab .toggle-icon {
-    font-size: 14px;
-    writing-mode: horizontal-tb;
-    margin-bottom: 4px;
-  }
-  body.chat-collapsed .chat-toggle-tab {
-    display: flex;
-  }
+  .chat-toggle-tab:hover { background: var(--surface2); }
+  .chat-toggle-tab .toggle-icon { font-size: 14px; writing-mode: horizontal-tb; margin-bottom: 4px; }
+  body.chat-collapsed .chat-toggle-tab { display: flex; }
 
   .chat-collapse-btn {
-    background: none;
-    border: none;
-    color: var(--muted);
-    cursor: pointer;
-    font-size: 16px;
-    padding: 4px 6px;
-    border-radius: 4px;
-    line-height: 1;
+    background: none; border: none; color: var(--muted); cursor: pointer;
+    font-size: 16px; padding: 4px 6px; border-radius: 4px; line-height: 1;
     transition: color 0.15s, background 0.15s;
   }
-  .chat-collapse-btn:hover {
-    color: var(--text);
-    background: var(--surface2);
-  }
+  .chat-collapse-btn:hover { color: var(--text); background: var(--surface2); }
 
   .chat-panel-header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 0 16px;
-    height: 57px;
-    border-bottom: 1px solid var(--border2);
-    flex-shrink: 0;
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 0 16px; height: 57px; border-bottom: 1px solid var(--border2); flex-shrink: 0;
   }
-
-  .chat-panel-title {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    font-size: 13px;
-    font-weight: 600;
-    color: var(--text);
-  }
-
-  .chat-title-icon {
-    color: var(--blue);
-    font-size: 16px;
-    line-height: 1;
-  }
-
-  .chat-title-sub {
-    font-size: 11px;
-    color: var(--muted);
-    font-weight: 400;
-  }
+  .chat-panel-title { display: flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 600; color: var(--text); }
+  .chat-title-icon { color: var(--blue); font-size: 16px; line-height: 1; }
+  .chat-title-sub { font-size: 11px; color: var(--muted); font-weight: 400; }
 
   .chat-clear-btn {
-    background: none;
-    border: 1px solid var(--border);
-    color: var(--muted);
-    font-size: 11px;
-    padding: 3px 10px;
-    border-radius: var(--radius);
-    cursor: pointer;
+    background: none; border: 1px solid var(--border); color: var(--muted);
+    font-size: 11px; padding: 3px 10px; border-radius: var(--radius); cursor: pointer;
     transition: color 0.15s, border-color 0.15s;
   }
   .chat-clear-btn:hover { color: var(--text); border-color: var(--muted); }
 
   .chat-messages {
-    flex: 1;
-    overflow-y: auto;
-    padding: 12px;
-    display: flex;
-    flex-direction: column;
-    gap: 10px;
-    scrollbar-width: thin;
-    scrollbar-color: var(--border) transparent;
+    flex: 1; overflow-y: auto; padding: 12px; display: flex; flex-direction: column; gap: 10px;
+    scrollbar-width: thin; scrollbar-color: var(--border) transparent;
   }
-
   .chat-welcome {
-    background: var(--surface2);
-    border: 1px solid var(--border2);
-    border-radius: var(--radius);
-    padding: 12px 14px;
-    font-size: 12px;
-    color: var(--muted);
-    line-height: 1.7;
+    background: var(--surface2); border: 1px solid var(--border2); border-radius: var(--radius);
+    padding: 12px 14px; font-size: 12px; color: var(--muted); line-height: 1.7;
   }
-
   .chat-welcome strong { color: var(--text); }
-
   .chat-message { display: flex; flex-direction: column; }
   .chat-message.user    { align-items: flex-end; }
   .chat-message.assistant { align-items: flex-start; }
-
   .chat-bubble {
-    max-width: 92%;
-    padding: 8px 12px;
-    border-radius: var(--radius);
-    font-size: 13px;
-    line-height: 1.65;
-    word-break: break-word;
+    max-width: 92%; padding: 8px 12px; border-radius: var(--radius);
+    font-size: 13px; line-height: 1.65; word-break: break-word;
   }
   .chat-bubble.user {
-    background: #1f4e8a;
-    color: #e6edf3;
+    background: #1f4e8a; color: #e6edf3;
     border-radius: var(--radius) var(--radius) 2px var(--radius);
   }
   .chat-bubble.assistant {
-    background: var(--surface2);
-    border: 1px solid var(--border2);
-    color: var(--text);
+    background: var(--surface2); border: 1px solid var(--border2); color: var(--text);
     border-radius: var(--radius) var(--radius) var(--radius) 2px;
   }
   .chat-bubble ul, .chat-bubble ol { margin: 5px 0 5px 18px; }
   .chat-bubble li { margin: 3px 0; }
   .chat-bubble strong { color: var(--text); font-weight: 600; }
   .chat-bubble.assistant code {
-    background: var(--bg);
-    border: 1px solid var(--border2);
-    border-radius: 3px;
-    padding: 1px 5px;
-    font-family: "SF Mono", "Fira Code", monospace;
-    font-size: 11px;
-    color: var(--blue);
+    background: var(--bg); border: 1px solid var(--border2); border-radius: 3px;
+    padding: 1px 5px; font-family: "SF Mono", "Fira Code", monospace; font-size: 11px; color: var(--blue);
   }
 
-  .chat-typing-row {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 4px 0 2px;
-  }
-  .typing-dots {
-    display: flex;
-    gap: 3px;
-    align-items: center;
-  }
+  .chat-typing-row { display: flex; align-items: center; gap: 8px; padding: 4px 0 2px; }
+  .typing-dots { display: flex; gap: 3px; align-items: center; }
   .typing-dots span {
-    width: 5px;
-    height: 5px;
-    background: var(--muted);
-    border-radius: 50%;
+    width: 5px; height: 5px; background: var(--muted); border-radius: 50%;
     animation: typing-bounce 1.2s ease-in-out infinite;
   }
   .typing-dots span:nth-child(2) { animation-delay: 0.2s; }
@@ -611,75 +373,41 @@
   .typing-label { font-size: 11px; color: var(--muted); }
 
   .chat-input-area {
-    padding: 10px 12px 8px;
-    border-top: 1px solid var(--border2);
-    display: flex;
-    gap: 8px;
-    align-items: flex-end;
-    background: var(--surface);
-    flex-shrink: 0;
+    padding: 10px 12px 8px; border-top: 1px solid var(--border2);
+    display: flex; gap: 8px; align-items: flex-end; background: var(--surface); flex-shrink: 0;
   }
-
   .chat-input {
-    flex: 1;
-    background: var(--surface2);
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    color: var(--text);
-    font-family: inherit;
-    font-size: 13px;
-    padding: 8px 12px;
-    resize: none;
-    line-height: 1.5;
-    min-height: 36px;
-    max-height: 120px;
-    overflow-y: auto;
-    outline: none;
-    transition: border-color 0.15s;
-    scrollbar-width: thin;
+    flex: 1; background: var(--surface2); border: 1px solid var(--border);
+    border-radius: var(--radius); color: var(--text); font-family: inherit; font-size: 13px;
+    padding: 8px 12px; resize: none; line-height: 1.5; min-height: 36px; max-height: 120px;
+    overflow-y: auto; outline: none; transition: border-color 0.15s; scrollbar-width: thin;
   }
   .chat-input:focus { border-color: var(--blue); }
   .chat-input::placeholder { color: var(--muted); }
   .chat-input:disabled { opacity: 0.5; }
-
   .chat-send-btn {
-    background: var(--blue);
-    border: none;
-    border-radius: var(--radius);
-    color: #fff;
-    font-size: 16px;
-    width: 34px;
-    height: 34px;
-    cursor: pointer;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    flex-shrink: 0;
-    transition: background 0.15s, opacity 0.15s;
-    line-height: 1;
+    background: var(--blue); border: none; border-radius: var(--radius); color: #fff;
+    font-size: 16px; width: 34px; height: 34px; cursor: pointer;
+    display: flex; align-items: center; justify-content: center; flex-shrink: 0;
+    transition: background 0.15s;
   }
   .chat-send-btn:hover   { background: #4895e0; }
   .chat-send-btn:disabled { opacity: 0.35; cursor: not-allowed; }
-
   .chat-hint {
-    text-align: center;
-    font-size: 10px;
-    color: var(--muted);
-    padding: 3px 0 6px;
-    flex-shrink: 0;
-    opacity: 0.6;
+    text-align: center; font-size: 10px; color: var(--muted);
+    padding: 3px 0 6px; flex-shrink: 0; opacity: 0.6;
   }
 
-  /* ── Mobile ──────────────────────────────────────────────────────── */
+  .anomaly-high { color: var(--critical); }
+  .anomaly-neg  { color: var(--warning); }
+
   @media (max-width: 768px) {
     .header { flex-direction: column; align-items: flex-start; gap: 10px; padding: 12px 16px; }
     .header-right { width: 100%; justify-content: space-between; }
     .main { padding: 12px 16px 40px; }
-    .alert-summary-row { grid-template-columns: 1fr; }
-    .panels-grid { grid-template-columns: 1fr; }
+    .alert-summary-row, .kpi-row { grid-template-columns: 1fr 1fr; }
+    .grid-2, .grid-3 { grid-template-columns: 1fr; }
     .weather-banner { padding: 14px 16px; }
-    .weather-details { gap: 12px; }
-    .freeze-alert-text { margin-left: 0; }
     .data-table { font-size: 12px; }
     .data-table th, .data-table td { padding: 8px; }
     body { padding-right: 0; }
@@ -687,626 +415,624 @@
     .chat-toggle-tab { display: none !important; }
   }
   @media (max-width: 1024px) {
-    .panels-grid { grid-template-columns: repeat(2, 1fr); }
+    .grid-3 { grid-template-columns: 1fr 1fr; }
+    .kpi-row { grid-template-columns: repeat(3, 1fr); }
   }
 </style>
 </head>
 <body>
 
-<!-- ── Header ─────────────────────────────────────────────────────── -->
 <header class="header">
   <div class="header-left">
     <div class="logo">PartsWatch <span>AI</span></div>
-    <div class="header-date" id="header-date">Loading…</div>
+    <div class="header-date" id="header-date">Loading...</div>
   </div>
   <div class="header-right">
     <div class="conn-status">
       <div class="conn-dot loading" id="conn-dot"></div>
-      <span id="conn-label">Connecting…</span>
+      <span id="conn-label">Connecting...</span>
     </div>
     <span class="last-updated" id="last-updated"></span>
-    <button class="refresh-btn" onclick="loadData()">↻ Refresh</button>
+    <button class="refresh-btn" onclick="loadData()">Refresh</button>
     <span class="refresh-countdown" id="countdown"></span>
   </div>
 </header>
 
-<!-- ── Main ───────────────────────────────────────────────────────── -->
 <main class="main">
 
   <div id="error-area"></div>
 
-  <!-- Weather -->
+  <div class="kpi-row" id="kpi-row">
+    <div class="kpi-card"><div class="kpi-label">Total SKUs</div><div class="kpi-value skeleton" style="height:32px">&nbsp;</div></div>
+    <div class="kpi-card"><div class="kpi-label">Locations</div><div class="kpi-value skeleton" style="height:32px">&nbsp;</div></div>
+    <div class="kpi-card"><div class="kpi-label">Suppliers</div><div class="kpi-value skeleton" style="height:32px">&nbsp;</div></div>
+    <div class="kpi-card"><div class="kpi-label">A-Class SKUs</div><div class="kpi-value skeleton" style="height:32px">&nbsp;</div></div>
+    <div class="kpi-card"><div class="kpi-label">Anomalies Flagged</div><div class="kpi-value skeleton" style="height:32px">&nbsp;</div></div>
+  </div>
+
   <div id="weather-section" class="section">
-    <div class="skeleton" style="height:120px;"></div>
+    <div class="skeleton" style="height:80px;border-radius:12px"></div>
   </div>
 
-  <!-- Alert Summary -->
   <div class="alert-summary-row" id="alert-summary">
-    <div class="alert-card critical">
-      <div class="alert-count skeleton" style="width:40px;height:36px;">‌</div>
-      <div><div class="alert-label">Critical</div><div class="alert-sublabel">Alerts</div></div>
-    </div>
-    <div class="alert-card warning">
-      <div class="alert-count skeleton" style="width:40px;height:36px;">‌</div>
-      <div><div class="alert-label">Warning</div><div class="alert-sublabel">Alerts</div></div>
-    </div>
-    <div class="alert-card info">
-      <div class="alert-count skeleton" style="width:40px;height:36px;">‌</div>
-      <div><div class="alert-label">Info</div><div class="alert-sublabel">Alerts</div></div>
-    </div>
+    <div class="alert-card critical"><div class="alert-count skeleton" style="width:40px;height:36px">&nbsp;</div><div><div class="alert-label">Critical</div></div></div>
+    <div class="alert-card warning"><div class="alert-count skeleton" style="width:40px;height:36px">&nbsp;</div><div><div class="alert-label">Warning</div></div></div>
+    <div class="alert-card info"><div class="alert-count skeleton" style="width:40px;height:36px">&nbsp;</div><div><div class="alert-label">Info</div></div></div>
   </div>
 
-  <!-- Critical Alerts -->
   <div class="section card" id="alerts-section">
     <div class="card-header">
-      <span class="card-title">⚠ Critical Alerts</span>
+      <span class="card-title">Critical &amp; Warning Alerts</span>
       <span class="card-updated" id="alerts-updated"></span>
     </div>
-    <div class="card-body" id="alerts-body">
-      <div class="skeleton" style="height:80px;"></div>
+    <div class="card-body" id="alerts-body"><div class="skeleton" style="height:60px"></div></div>
+  </div>
+
+  <div class="grid-2">
+    <div class="card" id="abc-section">
+      <div class="card-header">
+        <span class="card-title">ABC Classification</span>
+        <span class="card-updated" id="abc-updated"></span>
+      </div>
+      <div class="card-body" id="abc-body"><div class="skeleton" style="height:100px"></div></div>
+    </div>
+
+    <div class="card" id="topsku-section">
+      <div class="card-header">
+        <span class="card-title">Top A-Class SKUs</span>
+        <span class="card-updated" id="topsku-updated"></span>
+      </div>
+      <div class="card-body" style="padding:0" id="topsku-body"><div class="skeleton" style="height:100px;margin:16px;border-radius:6px"></div></div>
     </div>
   </div>
 
-  <!-- Reorder Recommendations -->
-  <div class="section card" id="reorder-section" style="margin-top:20px;">
+  <div class="section card" id="reorder-section">
     <div class="card-header">
-      <span class="card-title">📦 Top Reorder Recommendations</span>
+      <span class="card-title">Top Reorder Recommendations</span>
       <span class="card-updated" id="reorder-updated"></span>
     </div>
-    <div class="card-body" style="padding:0;" id="reorder-body">
-      <div class="skeleton" style="height:120px;margin:16px;border-radius:6px;"></div>
-    </div>
+    <div class="card-body" style="padding:0" id="reorder-body"><div class="skeleton" style="height:100px;margin:16px;border-radius:6px"></div></div>
   </div>
 
-  <!-- Bottom 3-panel row -->
-  <div class="panels-grid" style="margin-top:20px;">
-
-    <!-- Supplier Health -->
-    <div class="card" id="supplier-section">
-      <div class="card-header">
-        <span class="card-title">🏭 Supplier Health</span>
-        <span class="card-updated" id="supplier-updated"></span>
-      </div>
-      <div class="card-body" id="supplier-body">
-        <div class="skeleton" style="height:100px;"></div>
-      </div>
+  <div class="section card" id="supplier-detail-section">
+    <div class="card-header">
+      <span class="card-title">Supplier Health &amp; Open POs</span>
+      <span class="card-updated" id="supplier-updated"></span>
     </div>
+    <div class="card-body" id="supplier-body"><div class="skeleton" style="height:120px"></div></div>
+  </div>
 
-    <!-- Inventory Health -->
+  <div class="grid-2">
     <div class="card" id="inventory-section">
       <div class="card-header">
-        <span class="card-title">📊 Inventory Health</span>
+        <span class="card-title">Inventory Health</span>
         <span class="card-updated" id="inventory-updated"></span>
       </div>
-      <div class="card-body" id="inventory-body">
-        <div class="skeleton" style="height:100px;"></div>
-      </div>
+      <div class="card-body" id="inventory-body"><div class="skeleton" style="height:100px"></div></div>
     </div>
 
-    <!-- Forecast Accuracy -->
     <div class="card" id="accuracy-section">
       <div class="card-header">
-        <span class="card-title">🎯 Forecast Accuracy</span>
+        <span class="card-title">Forecast Accuracy</span>
         <span class="card-updated" id="accuracy-updated"></span>
       </div>
-      <div class="card-body" id="accuracy-body">
-        <div class="skeleton" style="height:100px;"></div>
-      </div>
+      <div class="card-body" id="accuracy-body"><div class="skeleton" style="height:100px"></div></div>
     </div>
-
   </div>
 
-  <!-- Location Performance -->
+  <div class="section card" id="anomaly-section">
+    <div class="card-header">
+      <span class="card-title">Anomaly Detection</span>
+      <span class="card-updated" id="anomaly-updated"></span>
+    </div>
+    <div class="card-body" id="anomaly-body"><div class="skeleton" style="height:120px"></div></div>
+  </div>
+
   <div class="section card" id="location-section">
     <div class="card-header">
-      <span class="card-title">📍 Location Performance</span>
+      <span class="card-title">Location Performance</span>
       <span class="card-updated" id="location-updated"></span>
     </div>
-    <div class="card-body" id="location-body">
-      <div class="skeleton" style="height:120px;"></div>
+    <div class="card-body" id="location-body"><div class="skeleton" style="height:120px"></div></div>
+  </div>
+
+  <div class="section card" id="pipeline-section">
+    <div class="card-header">
+      <span class="card-title">Pipeline Status</span>
+      <span class="card-updated" id="pipeline-updated"></span>
     </div>
+    <div class="card-body" id="pipeline-body"><div class="skeleton" style="height:60px"></div></div>
   </div>
 
 </main>
 
-<!-- ── AI Chat Toggle Tab (visible when collapsed) ────────────────── -->
 <button class="chat-toggle-tab" id="chat-toggle-tab" onclick="toggleChat()" title="Open AI Assistant">
-  <span class="toggle-icon">◆</span>
+  <span class="toggle-icon">&#9670;</span>
   AI Assistant
 </button>
 
-<!-- ── AI Chat Panel ───────────────────────────────────────────────── -->
 <div class="chat-panel" id="chat-panel">
-
   <div class="chat-panel-header">
     <div class="chat-panel-title">
-      <span class="chat-title-icon">◆</span>
+      <span class="chat-title-icon">&#9670;</span>
       AI Assistant
       <span class="chat-title-sub">powered by Claude</span>
     </div>
     <div style="display:flex;align-items:center;gap:6px;">
       <button class="chat-clear-btn" onclick="clearChat()" title="Clear conversation">Clear</button>
-      <button class="chat-collapse-btn" onclick="toggleChat()" title="Collapse panel">✕</button>
+      <button class="chat-collapse-btn" onclick="toggleChat()" title="Collapse panel">&#10005;</button>
     </div>
   </div>
 
   <div class="chat-messages" id="chat-messages">
     <div class="chat-welcome">
-      <strong>PartsWatch AI</strong> has live access to your entire operation — alerts, reorders, suppliers, inventory, forecasts, and weather.<br><br>
+      <strong>PartsWatch AI</strong> has live access to your entire operation &mdash; 317K+ SKUs, 26 locations, alerts, reorders, suppliers, inventory, forecasts, and weather.<br><br>
       Try asking:<br>
-      · Which locations are critically low on stock?<br>
-      · What should I order from Interstate Batteries today?<br>
-      · Show me all dead stock over $1,000<br>
-      · What's our battery exposure going into next week?
+      &middot; Which locations are critically low on stock?<br>
+      &middot; What should I order from Interstate Batteries today?<br>
+      &middot; Show me all dead stock over $1,000<br>
+      &middot; What's our battery exposure going into next week?<br>
+      &middot; Which suppliers are red-flagged right now?
     </div>
   </div>
 
   <div id="chat-typing" style="display:none; padding: 0 12px 4px;">
     <div class="chat-typing-row">
       <div class="typing-dots"><span></span><span></span><span></span></div>
-      <span class="typing-label">PartsWatch is thinking…</span>
+      <span class="typing-label">PartsWatch is thinking...</span>
     </div>
   </div>
 
   <div class="chat-input-area">
-    <textarea
-      class="chat-input"
-      id="chat-input"
-      placeholder="Ask about inventory, suppliers, reorders…"
-      rows="1"
-    ></textarea>
-    <button class="chat-send-btn" id="chat-send-btn" onclick="sendMessage()" title="Send (Enter)">↑</button>
+    <textarea class="chat-input" id="chat-input" placeholder="Ask about inventory, suppliers, reorders..." rows="1"></textarea>
+    <button class="chat-send-btn" id="chat-send-btn" onclick="sendMessage()" title="Send (Enter)">&uarr;</button>
   </div>
-  <div class="chat-hint">Enter to send &nbsp;·&nbsp; Shift+Enter for new line</div>
-
+  <div class="chat-hint">Enter to send &nbsp;&middot;&nbsp; Shift+Enter for new line</div>
 </div>
 
 <script>
-// ── Config ─────────────────────────────────────────────────────────
-const REFRESH_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
+const REFRESH_INTERVAL_MS = 5 * 60 * 1000;
 let countdownTimer = null;
 let countdownSecs = REFRESH_INTERVAL_MS / 1000;
 
-// ── Utilities ───────────────────────────────────────────────────────
-function fmtTemp(v) {
-  return v != null ? `${Math.round(v)}°F` : '—';
-}
-function fmtNum(v, decimals = 0) {
-  if (v == null) return '—';
-  return Number(v).toFixed(decimals);
-}
+function fmtTemp(v) { return v != null ? Math.round(v) + '\u00B0F' : '\u2014'; }
+function fmtNum(v, d) { if (v == null) return '\u2014'; return d != null ? Number(v).toFixed(d) : Number(v).toLocaleString(); }
+function fmtMoney(v) { if (v == null) return '\u2014'; return '$' + Number(v).toLocaleString(undefined, {minimumFractionDigits:0, maximumFractionDigits:0}); }
 function fmtDate(iso) {
-  if (!iso) return '—';
+  if (!iso) return '\u2014';
   const d = new Date(iso + 'T00:00:00');
   return d.toLocaleDateString('en-US', { weekday:'short', month:'short', day:'numeric' });
 }
-function nowStr() {
-  return new Date().toLocaleTimeString('en-US', { hour:'2-digit', minute:'2-digit' });
-}
-function badge(cls, text) {
-  return `<span class="badge badge-${cls}">${text}</span>`;
-}
-function escHtml(s) {
-  if (!s) return '';
-  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+function nowStr() { return new Date().toLocaleTimeString('en-US', { hour:'2-digit', minute:'2-digit' }); }
+function badge(cls, text) { return '<span class="badge badge-' + cls + '">' + text + '</span>'; }
+function escHtml(s) { if (!s) return ''; return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+function pctBar(val, max, color) {
+  const pct = Math.min((val / max) * 100, 100);
+  return '<div style="display:flex;align-items:center;gap:8px"><div class="score-bar-bg"><div class="score-bar-fill" style="width:' + pct + '%;background:' + color + '"></div></div><span style="font-size:11px;color:var(--muted);min-width:35px;text-align:right">' + (val * 100).toFixed(0) + '%</span></div>';
 }
 
-// ── Set today's date in header ─────────────────────────────────────
 function setHeaderDate() {
-  const d = new Date();
   document.getElementById('header-date').textContent =
-    d.toLocaleDateString('en-US', { weekday:'long', year:'numeric', month:'long', day:'numeric' });
+    new Date().toLocaleDateString('en-US', { weekday:'long', year:'numeric', month:'long', day:'numeric' });
 }
 
-// ── Countdown timer ────────────────────────────────────────────────
 function startCountdown() {
   clearInterval(countdownTimer);
   countdownSecs = REFRESH_INTERVAL_MS / 1000;
   const el = document.getElementById('countdown');
-  countdownTimer = setInterval(() => {
+  countdownTimer = setInterval(function() {
     countdownSecs--;
-    if (countdownSecs <= 0) {
-      clearInterval(countdownTimer);
-      el.textContent = '';
-      loadData();
-    } else {
+    if (countdownSecs <= 0) { clearInterval(countdownTimer); el.textContent = ''; loadData(); }
+    else {
       const m = Math.floor(countdownSecs / 60);
       const s = countdownSecs % 60;
-      el.textContent = `Next refresh in ${m}:${String(s).padStart(2,'0')}`;
+      el.textContent = 'Next refresh in ' + m + ':' + String(s).padStart(2,'0');
     }
   }, 1000);
 }
 
-// ── Connection status ──────────────────────────────────────────────
 function setStatus(state) {
-  const dot = document.getElementById('conn-dot');
-  const lbl = document.getElementById('conn-label');
+  var dot = document.getElementById('conn-dot');
+  var lbl = document.getElementById('conn-label');
   dot.className = 'conn-dot ' + state;
-  lbl.textContent = { live:'Live', error:'Offline', loading:'Loading…' }[state] || state;
+  lbl.textContent = { live:'Live', error:'Offline', loading:'Loading...' }[state] || state;
 }
 
-// ── Render: Weather ────────────────────────────────────────────────
+function renderKPIs(data) {
+  if (!data) return;
+  var abc = data.abc_counts || {};
+  document.getElementById('kpi-row').innerHTML =
+    '<div class="kpi-card"><div class="kpi-label">Total SKUs</div><div class="kpi-value" style="color:var(--blue)">' + fmtNum(data.total_skus) + '</div><div class="kpi-sub">' + fmtNum(abc.A) + ' A / ' + fmtNum(abc.B) + ' B / ' + fmtNum(abc.C) + ' C</div></div>' +
+    '<div class="kpi-card"><div class="kpi-label">Locations</div><div class="kpi-value" style="color:var(--text)">' + fmtNum(data.location_count) + '</div><div class="kpi-sub">NE Ohio network</div></div>' +
+    '<div class="kpi-card"><div class="kpi-label">Suppliers Tracked</div><div class="kpi-value" style="color:var(--text)">' + fmtNum(data.supplier_count) + '</div><div class="kpi-sub">With risk scores</div></div>' +
+    '<div class="kpi-card"><div class="kpi-label">A-Class SKUs</div><div class="kpi-value" style="color:var(--success)">' + fmtNum(abc.A) + '</div><div class="kpi-sub">' + (data.total_skus > 0 ? ((abc.A / data.total_skus) * 100).toFixed(1) : 0) + '% of catalog</div></div>' +
+    '<div class="kpi-card"><div class="kpi-label">Anomalies Flagged</div><div class="kpi-value" style="color:var(--warning)">' + fmtNum(data.anomaly_count) + '</div><div class="kpi-sub">Across all transactions</div></div>';
+}
+
 function renderWeather(data) {
-  const t = data.today || {};
-  const forecast = data.forecast || [];
-  const freeze = data.freeze_warning;
+  var t = data.today || {};
+  var forecast = data.forecast || [];
+  var freeze = data.freeze_warning;
+  var hi = fmtTemp(t.temp_max_f);
+  var lo = fmtTemp(t.temp_min_f);
+  var icon = freeze ? '\u{1F976}' : (t.temp_max_f > 70 ? '\u2600\uFE0F' : t.temp_max_f > 45 ? '\u{1F324}' : '\u{1F328}');
+  var extras = [];
+  if (t.snowfall_in > 0) extras.push(fmtNum(t.snowfall_in,1) + '" snow');
+  if (t.precipitation_in > 0) extras.push(fmtNum(t.precipitation_in,2) + '" precip');
+  if (t.freeze_thaw_cycle) extras.push('Freeze-thaw active');
+  if (t.consecutive_freeze_days > 0) extras.push('Freeze streak: ' + t.consecutive_freeze_days + 'd');
 
-  const hi = fmtTemp(t.temp_max_f);
-  const lo = fmtTemp(t.temp_min_f);
-  const icon = freeze ? '🥶' : (t.temp_max_f > 70 ? '☀️' : t.temp_max_f > 45 ? '🌤' : '🌨');
-  const snow = t.snowfall_in ? `${fmtNum(t.snowfall_in,1)} in snow` : '';
-  const prec = t.precipitation_in ? `${fmtNum(t.precipitation_in,2)} in precip` : '';
-  const extras = [snow, prec].filter(Boolean).join('  ·  ');
-  const ftc = t.freeze_thaw_cycle ? '  ·  Freeze-thaw active' : '';
-  const streak = t.consecutive_freeze_days > 0 ? `  ·  Freeze streak: ${t.consecutive_freeze_days}d` : '';
-
-  const freezeAlertHtml = freeze
-    ? `<div class="freeze-alert-text">❄ FREEZE ALERT: ${data.freeze_days_count} day(s) below 32°F — lowest ${fmtTemp(data.coldest_temp)} on ${data.coldest_date}</div>`
+  var freezeHtml = freeze
+    ? '<div class="freeze-alert-text">FREEZE ALERT: ' + data.freeze_days_count + ' day(s) below 32\u00B0F &mdash; lowest ' + fmtTemp(data.coldest_temp) + ' on ' + (data.coldest_date||'') + '</div>'
     : '';
 
-  const forecastHtml = forecast.map(f => {
-    const isFreezeDay = f.temp_min_f != null && f.temp_min_f < 32;
-    const d = f.log_date ? f.log_date.slice(5).replace('-','/') : '?';
-    return `<div class="forecast-day ${isFreezeDay ? 'freeze' : ''}">
-      <div class="day-label">${d}</div>
-      <div class="day-hi">${fmtTemp(f.temp_max_f)}</div>
-      <div class="day-lo">${fmtTemp(f.temp_min_f)}</div>
-    </div>`;
+  var forecastHtml = forecast.map(function(f) {
+    var isFr = f.temp_min_f != null && f.temp_min_f < 32;
+    var d = f.log_date ? f.log_date.slice(5).replace('-','/') : '?';
+    return '<div class="forecast-day ' + (isFr ? 'freeze' : '') + '"><div class="day-label">' + d + '</div><div class="day-hi">' + fmtTemp(f.temp_max_f) + '</div><div class="day-lo">' + fmtTemp(f.temp_min_f) + '</div></div>';
   }).join('');
 
-  document.getElementById('weather-section').innerHTML = `
-    <div class="weather-banner ${freeze ? 'freeze-warning' : ''}">
-      <div class="weather-icon">${icon}</div>
-      <div class="weather-main">
-        <div class="temp">${hi} <span style="font-size:16px;color:var(--muted)">/ ${lo}</span></div>
-        <div class="temp-range">NE Ohio — Today${extras ? '  ·  ' + extras : ''}${ftc}${streak}</div>
-      </div>
-      <div class="weather-details">
-        <div class="weather-detail"><span class="label">High</span><span class="value">${hi}</span></div>
-        <div class="weather-detail"><span class="label">Low</span><span class="value">${lo}</span></div>
-        ${t.snowfall_in > 0 ? `<div class="weather-detail"><span class="label">Snow</span><span class="value">${fmtNum(t.snowfall_in,1)}"</span></div>` : ''}
-        ${t.consecutive_freeze_days > 0 ? `<div class="weather-detail"><span class="label">Freeze Streak</span><span class="value">${t.consecutive_freeze_days}d</span></div>` : ''}
-      </div>
-      ${freezeAlertHtml}
-      ${forecastHtml ? `<div class="forecast-strip" style="width:100%">${forecastHtml}</div>` : ''}
-    </div>`;
+  document.getElementById('weather-section').innerHTML =
+    '<div class="weather-banner ' + (freeze ? 'freeze-warning' : '') + '">' +
+    '<div class="weather-icon">' + icon + '</div>' +
+    '<div class="weather-main"><div class="temp">' + hi + ' <span style="font-size:16px;color:var(--muted)">/ ' + lo + '</span></div>' +
+    '<div class="temp-range">NE Ohio &mdash; Today' + (extras.length ? ' &middot; ' + extras.join(' &middot; ') : '') + '</div></div>' +
+    freezeHtml +
+    (forecastHtml ? '<div class="forecast-strip" style="width:100%">' + forecastHtml + '</div>' : '') +
+    '</div>';
 }
 
-// ── Render: Alert Summary Cards ────────────────────────────────────
 function renderAlertSummary(summary) {
-  const c = summary.critical || 0;
-  const w = summary.warning || 0;
-  const i = summary.info || 0;
-  document.getElementById('alert-summary').innerHTML = `
-    <div class="alert-card critical" onclick="document.getElementById('alerts-section').scrollIntoView({behavior:'smooth'})">
-      <div class="alert-count" style="color:var(--critical)">${c}</div>
-      <div><div class="alert-label">Critical</div><div class="alert-sublabel">Alerts</div></div>
-    </div>
-    <div class="alert-card warning" onclick="document.getElementById('alerts-section').scrollIntoView({behavior:'smooth'})">
-      <div class="alert-count" style="color:var(--warning)">${w}</div>
-      <div><div class="alert-label">Warning</div><div class="alert-sublabel">Alerts</div></div>
-    </div>
-    <div class="alert-card info" onclick="document.getElementById('alerts-section').scrollIntoView({behavior:'smooth'})">
-      <div class="alert-count" style="color:var(--info)">${i}</div>
-      <div><div class="alert-label">Info</div><div class="alert-sublabel">Alerts</div></div>
-    </div>`;
+  var c = summary.critical || 0, w = summary.warning || 0, i = summary.info || 0;
+  document.getElementById('alert-summary').innerHTML =
+    '<div class="alert-card critical" onclick="document.getElementById(\'alerts-section\').scrollIntoView({behavior:\'smooth\'})"><div class="alert-count" style="color:var(--critical)">' + c + '</div><div><div class="alert-label">Critical</div><div class="alert-sublabel">Alerts</div></div></div>' +
+    '<div class="alert-card warning" onclick="document.getElementById(\'alerts-section\').scrollIntoView({behavior:\'smooth\'})"><div class="alert-count" style="color:var(--warning)">' + w + '</div><div><div class="alert-label">Warning</div><div class="alert-sublabel">Alerts</div></div></div>' +
+    '<div class="alert-card info" onclick="document.getElementById(\'alerts-section\').scrollIntoView({behavior:\'smooth\'})"><div class="alert-count" style="color:var(--info)">' + i + '</div><div><div class="alert-label">Info</div><div class="alert-sublabel">Alerts</div></div></div>';
 }
 
-// ── Render: Critical Alerts Table ──────────────────────────────────
 function renderAlerts(items) {
-  document.getElementById('alerts-updated').textContent = `Updated ${nowStr()}`;
-  const critical = items.filter(a => a.severity === 'critical');
-  const warnings = items.filter(a => a.severity === 'warning');
-  const shown = [...critical, ...warnings];
-
+  document.getElementById('alerts-updated').textContent = 'Updated ' + nowStr();
+  var shown = items.filter(function(a) { return a.severity === 'critical' || a.severity === 'warning'; });
   if (!shown.length) {
-    document.getElementById('alerts-body').innerHTML =
-      `<div class="empty-state"><div class="icon">✅</div>No critical or warning alerts today.</div>`;
+    document.getElementById('alerts-body').innerHTML = '<div class="empty-state"><div class="icon">&#10003;</div>No critical or warning alerts today.</div>';
     return;
   }
-
-  const rows = shown.map(a => {
-    const sev = a.severity === 'critical' ? badge('critical','CRITICAL') : badge('warning','WARNING');
-    const type = escHtml(a.alert_type || '').replace(/_/g,' ');
-    const sku = a.sku_id ? `<span class="sku-id">${escHtml(a.sku_id)}</span>` : '—';
-    const loc = a.location_id ? `<span class="loc-id">${escHtml(a.location_id)}</span>` : '—';
-    const sup = a.supplier_id ? `<span class="loc-id">${escHtml(a.supplier_id)}</span>` : '';
-    const ctx = [sku, loc, sup].filter(s => s && s !== '—').join(' ');
-    const msg = escHtml((a.message || '').substring(0, 140));
-    return `<tr>
-      <td>${sev}</td>
-      <td style="font-size:12px;font-weight:600;">${type}</td>
-      <td>${ctx}</td>
-      <td class="msg-text">${msg}${a.message && a.message.length > 140 ? '…' : ''}</td>
-    </tr>`;
+  var rows = shown.map(function(a) {
+    var sev = a.severity === 'critical' ? badge('critical','CRITICAL') : badge('warning','WARNING');
+    var type = escHtml(a.alert_type || '').replace(/_/g,' ');
+    var sku = a.sku_id ? '<span class="sku-id">' + escHtml(a.sku_id) + '</span>' : '';
+    var loc = a.location_id ? '<span class="loc-id">' + escHtml(a.location_id) + '</span>' : '';
+    var sup = a.supplier_id ? '<span class="loc-id">' + escHtml(a.supplier_id) + '</span>' : '';
+    var ctx = [sku, loc, sup].filter(function(s) { return s; }).join(' ');
+    var msg = escHtml((a.message || '').substring(0, 140));
+    return '<tr><td>' + sev + '</td><td style="font-size:12px;font-weight:600;">' + type + '</td><td>' + ctx + '</td><td class="msg-text">' + msg + (a.message && a.message.length > 140 ? '...' : '') + '</td></tr>';
   }).join('');
-
-  document.getElementById('alerts-body').innerHTML = `
-    <table class="data-table">
-      <thead><tr>
-        <th style="width:80px">Severity</th>
-        <th style="width:160px">Type</th>
-        <th style="width:200px">Context</th>
-        <th>Message</th>
-      </tr></thead>
-      <tbody>${rows}</tbody>
-    </table>`;
+  document.getElementById('alerts-body').innerHTML =
+    '<table class="data-table"><thead><tr><th style="width:80px">Severity</th><th style="width:140px">Type</th><th style="width:180px">Context</th><th>Message</th></tr></thead><tbody>' + rows + '</tbody></table>';
 }
 
-// ── Render: Reorder Recommendations ───────────────────────────────
+function renderABC(data) {
+  document.getElementById('abc-updated').textContent = 'Updated ' + nowStr();
+  if (!data) return;
+  var abc = data.abc_counts || {};
+  var total = data.total_skus || 1;
+  var aPct = ((abc.A || 0) / total * 100).toFixed(1);
+  var bPct = ((abc.B || 0) / total * 100).toFixed(1);
+  var cPct = ((abc.C || 0) / total * 100).toFixed(1);
+  document.getElementById('abc-body').innerHTML =
+    '<div class="abc-bar">' +
+    '<div class="abc-segment a" style="flex:' + (abc.A || 1) + '">A ' + aPct + '%</div>' +
+    '<div class="abc-segment b" style="flex:' + (abc.B || 1) + '">B ' + bPct + '%</div>' +
+    '<div class="abc-segment c" style="flex:' + (abc.C || 1) + '">C ' + cPct + '%</div>' +
+    '</div>' +
+    '<div class="abc-legend">' +
+    '<div class="abc-legend-item"><div class="abc-dot a"></div><strong>' + fmtNum(abc.A) + '</strong> A-class (high revenue)</div>' +
+    '<div class="abc-legend-item"><div class="abc-dot b"></div><strong>' + fmtNum(abc.B) + '</strong> B-class (medium)</div>' +
+    '<div class="abc-legend-item"><div class="abc-dot c"></div><strong>' + fmtNum(abc.C) + '</strong> C-class (long tail)</div>' +
+    '</div>' +
+    '<div style="margin-top:12px;font-size:12px;color:var(--muted)">' +
+    'Total catalog: <strong style="color:var(--text)">' + fmtNum(total) + '</strong> active SKUs &mdash; ' +
+    'Top ' + aPct + '% drives the bulk of revenue' +
+    '</div>';
+}
+
+function renderTopSKUs(items) {
+  document.getElementById('topsku-updated').textContent = 'Updated ' + nowStr();
+  if (!items || !items.length) {
+    document.getElementById('topsku-body').innerHTML = '<div class="card-body"><div class="no-data">No A-class SKUs loaded yet.</div></div>';
+    return;
+  }
+  var rows = items.slice(0, 10).map(function(r, i) {
+    var desc = r.description || r.category || r.brand || '\u2014';
+    return '<tr>' +
+      '<td style="color:var(--muted);font-size:12px;text-align:center">' + (i+1) + '</td>' +
+      '<td><span class="sku-id">' + escHtml(r.sku_id) + '</span></td>' +
+      '<td style="font-size:12px;color:var(--muted)">' + escHtml(desc).substring(0,40) + '</td>' +
+      '<td class="right" style="font-weight:600">' + fmtNum(r.avg_weekly_units, 1) + '</td>' +
+      '</tr>';
+  }).join('');
+  document.getElementById('topsku-body').innerHTML =
+    '<table class="data-table"><thead><tr><th style="width:30px">#</th><th>SKU</th><th>Description</th><th class="right">Avg Wk Units</th></tr></thead><tbody>' + rows + '</tbody></table>';
+}
+
 function renderReorder(items) {
-  document.getElementById('reorder-updated').textContent = `Updated ${nowStr()}`;
+  document.getElementById('reorder-updated').textContent = 'Updated ' + nowStr();
   if (!items || !items.length) {
-    document.getElementById('reorder-body').innerHTML =
-      `<div class="card-body"><div class="empty-state"><div class="icon">✅</div>No pending reorder recommendations today.</div></div>`;
+    document.getElementById('reorder-body').innerHTML = '<div class="card-body"><div class="empty-state"><div class="icon">&#10003;</div>No pending reorder recommendations today.</div></div>';
     return;
   }
+  var rows = items.map(function(r) {
+    var u = r.urgency;
+    var ub = u === 'critical' ? badge('critical','CRITICAL') : u === 'high' ? badge('high','HIGH') : u === 'medium' ? badge('medium','MEDIUM') : badge('low','LOW');
+    var rtype = (r.recommendation_type || 'po').toUpperCase();
+    var tb = rtype === 'TRANSFER' ? badge('transfer','TRANSFER') : badge('po','PO');
+    var days = r.days_of_supply_remaining != null ? fmtNum(r.days_of_supply_remaining,1) + 'd' : '\u2014';
+    var fromLoc = r.transfer_from_location ? '\u2190 ' + escHtml(r.transfer_from_location) : '';
+    return '<tr><td>' + ub + '</td><td><span class="sku-id">' + escHtml(r.sku_id) + '</span></td>' +
+      '<td><span class="loc-id">' + escHtml(r.location_id) + '</span> <span style="color:var(--muted);font-size:11px">' + fromLoc + '</span></td>' +
+      '<td style="font-weight:600">' + fmtNum(r.qty_to_order) + ' units</td><td>' + days + ' supply</td><td>' + tb + '</td></tr>';
+  }).join('');
+  document.getElementById('reorder-body').innerHTML =
+    '<table class="data-table"><thead><tr><th>Urgency</th><th>SKU</th><th>Location</th><th>Qty</th><th>Supply</th><th>Type</th></tr></thead><tbody>' + rows + '</tbody></table>';
+}
 
-  const urgencyBadge = u => {
-    if (u === 'critical') return badge('critical', 'CRITICAL');
-    if (u === 'high')     return badge('high', 'HIGH');
-    if (u === 'medium')   return badge('medium', 'MEDIUM');
-    return badge('low', 'LOW');
-  };
+function renderSupplierDetail(items) {
+  document.getElementById('supplier-updated').textContent = 'Updated ' + nowStr();
+  if (!items || !items.length) {
+    document.getElementById('supplier-body').innerHTML = '<div class="no-data">No supplier data available.</div>';
+    return;
+  }
+  var html = items.map(function(s) {
+    var flag = s.risk_flag || 'unknown';
+    var flagBadge = flag === 'red' ? badge('red','RED') : flag === 'amber' ? badge('amber','AMBER') : badge('green','GREEN');
+    var scoreColor = s.composite_score < 50 ? 'var(--critical)' : s.composite_score < 70 ? 'var(--warning)' : 'var(--success)';
 
-  const rows = items.map(r => {
-    const rtype = (r.recommendation_type || 'po').toUpperCase();
-    const typeBadge = rtype === 'TRANSFER' ? badge('transfer','TRANSFER') : badge('po','PO');
-    const days = r.days_of_supply_remaining != null ? `${fmtNum(r.days_of_supply_remaining,1)}d` : '—';
-    const fromLoc = r.transfer_from_location ? `← ${escHtml(r.transfer_from_location)}` : '';
-    const model = escHtml(r.forecast_model_used || '');
-    return `<tr>
-      <td>${urgencyBadge(r.urgency)}</td>
-      <td><span class="sku-id">${escHtml(r.sku_id)}</span></td>
-      <td><span class="loc-id">${escHtml(r.location_id)}</span> <span style="color:var(--muted);font-size:11px">${fromLoc}</span></td>
-      <td style="font-weight:600">${fmtNum(r.qty_to_order)} units</td>
-      <td>${days} supply</td>
-      <td>${typeBadge}</td>
-      <td style="color:var(--muted);font-size:11px">${model}</td>
-    </tr>`;
+    var metrics = '<div class="supplier-detail-metrics">' +
+      '<div class="supplier-metric"><div class="sm-label">Score</div><div class="sm-value" style="color:' + scoreColor + '">' + fmtNum(s.composite_score, 1) + '/100</div></div>' +
+      '<div class="supplier-metric"><div class="sm-label">Lead Time</div><div class="sm-value">' + (s.avg_lead_time_days != null ? fmtNum(s.avg_lead_time_days,1) + 'd' : '\u2014') + '</div></div>' +
+      '<div class="supplier-metric"><div class="sm-label">Fill Rate</div><div class="sm-value">' + (s.fill_rate_pct != null ? fmtNum(s.fill_rate_pct,1) + '%' : s.actual_fill_rate != null ? fmtNum(s.actual_fill_rate,1) + '%' : '\u2014') + '</div></div>' +
+      '<div class="supplier-metric"><div class="sm-label">On-Time</div><div class="sm-value">' + (s.on_time_delivery_pct != null ? fmtNum(s.on_time_delivery_pct,1) + '%' : '\u2014') + '</div></div>' +
+      '<div class="supplier-metric"><div class="sm-label">LT Variance</div><div class="sm-value">' + (s.lead_time_variance_avg != null ? (s.lead_time_variance_avg > 0 ? '+' : '') + fmtNum(s.lead_time_variance_avg,1) + 'd' : s.avg_lead_time_variance != null ? (s.avg_lead_time_variance > 0 ? '+' : '') + fmtNum(s.avg_lead_time_variance,1) + 'd' : '\u2014') + '</div></div>' +
+      '<div class="supplier-metric"><div class="sm-label">Open POs</div><div class="sm-value">' + s.open_po_count + '</div></div>' +
+      '<div class="supplier-metric"><div class="sm-label">$ at Risk</div><div class="sm-value" style="color:' + (s.open_po_value > 0 ? 'var(--warning)' : 'var(--muted)') + '">' + fmtMoney(s.open_po_value) + '</div></div>' +
+      '</div>';
+
+    var poLines = '';
+    if (s.open_pos && s.open_pos.length > 0) {
+      poLines = '<div style="margin-top:8px;font-size:11px;color:var(--muted)">' +
+        s.open_pos.map(function(p) {
+          return '<div style="padding:2px 0"><span class="sku-id" style="font-size:11px">' + escHtml(p.sku_id) + '</span> ' +
+            escHtml(p.po_number) + ' qty=' + fmtNum(p.qty_ordered) + ' ' + fmtMoney(p.value) +
+            ' <span style="color:' + (p.status === 'open' ? 'var(--warning)' : 'var(--muted)') + '">' + escHtml(p.status) + '</span>' +
+            ' exp=' + (p.expected_delivery || '\u2014') + '</div>';
+        }).join('') + '</div>';
+    }
+
+    return '<div class="supplier-detail-card ' + flag + '">' +
+      '<div class="supplier-detail-header">' +
+      '<span class="supplier-detail-name" style="color:' + scoreColor + '">' + escHtml(s.supplier_id) + '</span>' +
+      flagBadge +
+      '</div>' +
+      metrics + poLines +
+      '</div>';
   }).join('');
 
-  document.getElementById('reorder-body').innerHTML = `
-    <table class="data-table">
-      <thead><tr>
-        <th>Urgency</th>
-        <th>SKU</th>
-        <th>Location</th>
-        <th>Qty</th>
-        <th>Supply</th>
-        <th>Type</th>
-        <th>Model</th>
-      </tr></thead>
-      <tbody>${rows}</tbody>
-    </table>`;
+  document.getElementById('supplier-body').innerHTML = html;
 }
 
-// ── Render: Supplier Health ────────────────────────────────────────
-function renderSupplierHealth(data) {
-  document.getElementById('supplier-updated').textContent = `Updated ${nowStr()}`;
-  const total = data.total || 1;
-  const gPct = Math.round((data.green / total) * 100);
-  const aPct = Math.round((data.amber / total) * 100);
-  const rPct = Math.round((data.red / total) * 100);
-
-  const redList = (data.red_suppliers || []).map(s =>
-    `<div class="red-supplier-row">
-      <span class="red-supplier-name">${escHtml(s.supplier_id)}</span>
-      <span class="red-supplier-score">Score: ${s.score != null ? fmtNum(s.score,1) : '—'}/100</span>
-    </div>`
-  ).join('');
-
-  document.getElementById('supplier-body').innerHTML = `
-    <div class="supplier-counts">
-      <div class="supplier-count">
-        <div class="supplier-dot green"></div>
-        <div class="supplier-count-num" style="color:var(--success)">${data.green}</div>
-        <div class="supplier-count-label">Green</div>
-      </div>
-      <div class="supplier-count">
-        <div class="supplier-dot amber"></div>
-        <div class="supplier-count-num" style="color:var(--amber)">${data.amber}</div>
-        <div class="supplier-count-label">Amber</div>
-      </div>
-      <div class="supplier-count">
-        <div class="supplier-dot red"></div>
-        <div class="supplier-count-num" style="color:var(--critical)">${data.red}</div>
-        <div class="supplier-count-label">Red</div>
-      </div>
-    </div>
-    <div style="display:flex;gap:3px;height:6px;border-radius:3px;overflow:hidden;margin-bottom:14px">
-      ${gPct > 0 ? `<div style="flex:${gPct};background:var(--success);border-radius:3px 0 0 3px"></div>` : ''}
-      ${aPct > 0 ? `<div style="flex:${aPct};background:var(--amber)"></div>` : ''}
-      ${rPct > 0 ? `<div style="flex:${rPct};background:var(--critical);border-radius:0 3px 3px 0"></div>` : ''}
-    </div>
-    ${redList ? `<div class="red-suppliers-list">${redList}</div>` : '<div class="empty-state" style="padding:8px 0;font-size:12px">No red-flag suppliers</div>'}`;
-}
-
-// ── Render: Inventory Health ───────────────────────────────────────
 function renderInventoryHealth(data) {
-  document.getElementById('inventory-updated').textContent = `Updated ${nowStr()}`;
-  const pairs = (data.stockout_pairs || []).slice(0,5).map(p =>
-    `<span class="sku-id" style="font-size:11px">${escHtml(p.sku_id)}@${escHtml(p.location_id)}</span>`
-  ).join(', ');
-
-  document.getElementById('inventory-body').innerHTML = `
-    <div class="stat-block">
-      <div class="stat-row">
-        <span class="stat-label">Active Stockouts</span>
-        <span class="stat-value" style="color:${data.stockout_count > 0 ? 'var(--critical)' : 'var(--success)'}">${data.stockout_count}</span>
-      </div>
-      <div class="stat-divider"></div>
-      <div class="stat-row">
-        <span class="stat-label">Low Supply (&lt; 3d)</span>
-        <span class="stat-value" style="color:${data.low_supply_count > 0 ? 'var(--warning)' : 'var(--success)'}">${data.low_supply_count}</span>
-      </div>
-      <div class="stat-divider"></div>
-      <div class="stat-row">
-        <span class="stat-label">Pairs Tracked</span>
-        <span class="stat-value" style="color:var(--muted)">${data.snapshot_count}</span>
-      </div>
-      ${pairs ? `<div style="font-size:11px;color:var(--muted);padding-top:4px">${pairs}</div>` : ''}
-    </div>`;
+  document.getElementById('inventory-updated').textContent = 'Updated ' + nowStr();
+  var pairs = (data.stockout_pairs || []).slice(0,5).map(function(p) {
+    return '<span class="sku-id" style="font-size:11px">' + escHtml(p.sku_id) + '@' + escHtml(p.location_id) + '</span>';
+  }).join(', ');
+  document.getElementById('inventory-body').innerHTML =
+    '<div class="stat-block">' +
+    '<div class="stat-row"><span class="stat-label">Active Stockouts</span><span class="stat-value" style="color:' + (data.stockout_count > 0 ? 'var(--critical)' : 'var(--success)') + '">' + data.stockout_count + '</span></div>' +
+    '<div class="stat-divider"></div>' +
+    '<div class="stat-row"><span class="stat-label">Low Supply (&lt; 3d)</span><span class="stat-value" style="color:' + (data.low_supply_count > 0 ? 'var(--warning)' : 'var(--success)') + '">' + data.low_supply_count + '</span></div>' +
+    '<div class="stat-divider"></div>' +
+    '<div class="stat-row"><span class="stat-label">Pairs Tracked</span><span class="stat-value" style="color:var(--muted)">' + data.snapshot_count + '</span></div>' +
+    (pairs ? '<div style="font-size:11px;color:var(--muted);padding-top:4px">' + pairs + '</div>' : '') +
+    '</div>';
 }
 
-// ── Render: Forecast Accuracy ──────────────────────────────────────
 function renderForecastAccuracy(items) {
-  document.getElementById('accuracy-updated').textContent = `Updated ${nowStr()}`;
+  document.getElementById('accuracy-updated').textContent = 'Updated ' + nowStr();
   if (!items || !items.length) {
-    document.getElementById('accuracy-body').innerHTML =
-      `<div class="no-data">Accuracy tracking starts once<br>forecasts enter the history window.</div>`;
+    document.getElementById('accuracy-body').innerHTML = '<div class="no-data">Accuracy tracking starts once forecasts enter the history window.</div>';
     return;
   }
-  const html = items.map(a => {
-    const pct = Math.min(a.mape_pct / 50 * 100, 100);
-    const cls = a.above_threshold ? 'above' : 'ok';
-    const modelLabel = a.model_type === 'rolling_avg' ? 'Rolling Avg (C-class)' : 'LightGBM (B-class)';
-    return `<div class="accuracy-item ${cls}">
-      <div class="accuracy-header">
-        <span class="accuracy-model">${escHtml(modelLabel)}</span>
-        <span class="accuracy-mape ${cls}">${a.mape_pct}%</span>
-      </div>
-      <div class="accuracy-bar-bg">
-        <div class="accuracy-bar-fill ${cls}" style="width:${pct}%"></div>
-      </div>
-      <div class="accuracy-meta">${a.n_obs} observations · Threshold: 25%${a.above_threshold ? ' · ⚠ Above threshold' : ''}</div>
-    </div>`;
+  var html = items.map(function(a) {
+    var pct = Math.min(a.mape_pct / 50 * 100, 100);
+    var cls = a.above_threshold ? 'above' : 'ok';
+    return '<div class="accuracy-item ' + cls + '">' +
+      '<div class="accuracy-header"><span class="accuracy-model">' + escHtml(a.model_type) + ' &middot; ' + escHtml(a.abc_class) + '-class</span>' +
+      '<span class="accuracy-mape ' + cls + '">' + a.mape_pct + '%</span></div>' +
+      '<div class="accuracy-bar-bg"><div class="accuracy-bar-fill ' + cls + '" style="width:' + pct + '%"></div></div>' +
+      '<div class="accuracy-meta">' + a.n_obs + ' observations &middot; Threshold: 25%' + (a.above_threshold ? ' &middot; Above threshold' : '') + '</div></div>';
   }).join('');
-  document.getElementById('accuracy-body').innerHTML = `<div class="accuracy-row">${html}</div>`;
+  document.getElementById('accuracy-body').innerHTML = '<div class="accuracy-row">' + html + '</div>';
 }
 
-// ── Render: Location Performance ───────────────────────────────────
+function renderAnomalySummary(data) {
+  document.getElementById('anomaly-updated').textContent = 'Updated ' + nowStr();
+  if (!data) return;
+
+  var statsHtml = '<div style="display:flex;gap:24px;margin-bottom:16px;flex-wrap:wrap">' +
+    '<div><div style="font-size:11px;color:var(--muted);text-transform:uppercase">Total Flagged</div><div style="font-size:24px;font-weight:700;color:var(--warning)">' + fmtNum(data.total_flagged) + '</div></div>';
+
+  if (data.location_distribution) {
+    var locHtml = Object.keys(data.location_distribution).map(function(loc) {
+      return '<span style="font-size:11px"><span class="loc-id">' + escHtml(loc) + '</span> ' + fmtNum(data.location_distribution[loc]) + '</span>';
+    }).join(' &nbsp; ');
+    statsHtml += '<div style="flex:1"><div style="font-size:11px;color:var(--muted);text-transform:uppercase;margin-bottom:4px">By Location (sample)</div>' + locHtml + '</div>';
+  }
+  statsHtml += '</div>';
+
+  var highRows = '';
+  if (data.top_high && data.top_high.length) {
+    highRows = '<div style="margin-bottom:12px"><div style="font-size:11px;color:var(--muted);text-transform:uppercase;margin-bottom:6px">Highest Quantity Anomalies</div>' +
+      '<table class="data-table"><thead><tr><th>SKU</th><th>Location</th><th>Date</th><th class="right">Qty</th><th class="right">Revenue</th></tr></thead><tbody>' +
+      data.top_high.slice(0, 6).map(function(r) {
+        return '<tr><td><span class="sku-id">' + escHtml(r.sku_id) + '</span></td>' +
+          '<td><span class="loc-id">' + escHtml(r.location_id) + '</span></td>' +
+          '<td style="font-size:12px">' + (r.date || '\u2014') + '</td>' +
+          '<td class="right anomaly-high" style="font-weight:600">' + fmtNum(r.qty) + '</td>' +
+          '<td class="right">' + fmtMoney(r.revenue) + '</td></tr>';
+      }).join('') +
+      '</tbody></table></div>';
+  }
+
+  var lowRows = '';
+  if (data.top_low && data.top_low.length) {
+    lowRows = '<div><div style="font-size:11px;color:var(--muted);text-transform:uppercase;margin-bottom:6px">Negative Qty Anomalies (Returns/Credits)</div>' +
+      '<table class="data-table"><thead><tr><th>SKU</th><th>Location</th><th>Date</th><th class="right">Qty</th><th class="right">Revenue</th></tr></thead><tbody>' +
+      data.top_low.slice(0, 5).map(function(r) {
+        return '<tr><td><span class="sku-id">' + escHtml(r.sku_id) + '</span></td>' +
+          '<td><span class="loc-id">' + escHtml(r.location_id) + '</span></td>' +
+          '<td style="font-size:12px">' + (r.date || '\u2014') + '</td>' +
+          '<td class="right anomaly-neg" style="font-weight:600">' + fmtNum(r.qty) + '</td>' +
+          '<td class="right">' + fmtMoney(r.revenue) + '</td></tr>';
+      }).join('') +
+      '</tbody></table></div>';
+  }
+
+  document.getElementById('anomaly-body').innerHTML = statsHtml + highRows + lowRows;
+}
+
 function renderLocations(data) {
-  document.getElementById('location-updated').textContent = `Updated ${nowStr()}`;
-  const tiers = [
-    { num: 1, key: 'tier1', label: 'Tier 1', cls: 't1' },
-    { num: 2, key: 'tier2', label: 'Tier 2', cls: 't2' },
-    { num: 3, key: 'tier3', label: 'Tier 3', cls: 't3' },
+  document.getElementById('location-updated').textContent = 'Updated ' + nowStr();
+  var critSet = {};
+  (data.tier3_critical || []).forEach(function(l) { critSet[l] = true; });
+
+  var tiers = [
+    { key: 'tier1', label: 'Tier 1 \u2014 High Volume', cls: 't1', color: 'var(--success)' },
+    { key: 'tier2', label: 'Tier 2 \u2014 Mid Volume', cls: 't2', color: 'var(--info)' },
+    { key: 'tier3', label: 'Tier 3 \u2014 Low Volume', cls: 't3', color: 'var(--warning)' },
   ];
-  const critSet = new Set(data.tier3_critical || []);
 
-  const html = tiers.map(t => {
-    const locs = data[t.key] || [];
-    const hasCritical = t.num === 3 && locs.some(l => critSet.has(l));
-    const locHtml = locs.map(l =>
-      `<span class="loc-id" style="${critSet.has(l) ? 'color:var(--critical)' : ''}">${escHtml(l)}</span>`
-    ).join(' ');
+  var html = tiers.map(function(t) {
+    var locs = data[t.key] || [];
+    if (!locs.length) return '';
 
-    return `<div class="tier-row ${hasCritical ? 'tier3-critical' : ''}">
-      <span class="tier-badge ${t.cls}">${t.cls.toUpperCase()}</span>
-      <div class="tier-info">
-        <div class="tier-label">${t.label}</div>
-        <div class="tier-locs">${locHtml || '<span style="color:var(--muted)">—</span>'}</div>
-        ${hasCritical ? '<div style="color:var(--critical);font-size:11px;margin-top:3px">⚠ Critical alerts on tier-3 location(s)</div>' : ''}
-      </div>
-      <div class="tier-count">${locs.length}</div>
-    </div>`;
+    var header = '<div class="tier-separator ' + t.cls + '">' + t.label + ' (' + locs.length + ' locations)</div>';
+    var rows = locs.map(function(loc) {
+      var l = typeof loc === 'string' ? { location_id: loc, composite_tier_score: data.scores ? data.scores[loc] || 0 : 0 } : loc;
+      var isCrit = critSet[l.location_id];
+      var score = l.composite_tier_score || 0;
+      var scoreColor = score > 0.5 ? 'var(--success)' : score > 0.25 ? 'var(--info)' : 'var(--warning)';
+      var barPct = Math.min(score * 100 / 0.8, 100);
+
+      return '<div class="loc-row ' + (isCrit ? 'critical-loc' : '') + '">' +
+        '<div class="loc-name">' + escHtml(l.location_id) + '</div>' +
+        '<div><div style="display:flex;align-items:center;gap:8px">' +
+        '<div class="score-bar-bg" style="flex:1"><div class="score-bar-fill" style="width:' + barPct + '%;background:' + scoreColor + '"></div></div>' +
+        '<span style="font-size:10px;color:var(--muted)">' +
+        (l.revenue_score != null ? 'R:' + (l.revenue_score * 100).toFixed(0) : '') +
+        (l.sku_breadth_score != null ? ' S:' + (l.sku_breadth_score * 100).toFixed(0) : '') +
+        (l.fill_rate_score != null ? ' F:' + (l.fill_rate_score * 100).toFixed(0) : '') +
+        '</span></div></div>' +
+        '<div class="loc-score" style="color:' + scoreColor + '">' + (score * 100).toFixed(1) + '</div>' +
+        '</div>';
+    }).join('');
+    return header + rows;
   }).join('');
 
-  document.getElementById('location-body').innerHTML = `<div class="tier-grid">${html}</div>`;
+  document.getElementById('location-body').innerHTML = '<div class="tier-grid">' + html + '</div>';
 }
 
-// ── Main load function ─────────────────────────────────────────────
+function renderPipelineStatus(items) {
+  document.getElementById('pipeline-updated').textContent = 'Updated ' + nowStr();
+  if (!items || !items.length) {
+    document.getElementById('pipeline-body').innerHTML = '<div class="no-data">No pipeline run data.</div>';
+    return;
+  }
+  var html = items.map(function(s) {
+    var cls = s.status === 'ok' || s.status === 'completed' || s.status === 'success' ? 'ok' : s.status === 'failed' || s.status === 'error' ? 'failed' : s.status === 'running' ? 'running' : 'never';
+    var icon = cls === 'ok' ? '\u2713' : cls === 'failed' ? '\u2717' : cls === 'running' ? '\u25CB' : '\u2014';
+    var dur = s.duration_s != null ? (s.duration_s < 60 ? s.duration_s + 's' : Math.floor(s.duration_s/60) + 'm' + (s.duration_s%60) + 's') : '';
+    var when = s.started_at ? s.started_at.slice(5, 16).replace('T', ' ') : '';
+    return '<div class="pipeline-stage ' + cls + '">' +
+      '<div class="pipeline-stage-name">' + icon + ' ' + escHtml(s.stage) + '</div>' +
+      '<div class="pipeline-stage-status">' + escHtml(s.status) + (dur ? ' &middot; ' + dur : '') + '</div>' +
+      '<div class="pipeline-stage-time">' + when + '</div>' +
+      (s.error ? '<div style="font-size:10px;color:var(--critical);margin-top:2px">' + escHtml(s.error).substring(0,60) + '</div>' : '') +
+      '</div>';
+  }).join('');
+  document.getElementById('pipeline-body').innerHTML = '<div class="pipeline-grid">' + html + '</div>';
+}
+
 async function loadData() {
   setStatus('loading');
   document.getElementById('error-area').innerHTML = '';
-
   try {
-    const resp = await fetch('/api/dashboard');
-    if (!resp.ok) throw new Error(`Server returned ${resp.status}`);
-    const data = await resp.json();
-
+    var resp = await fetch('/api/dashboard');
+    if (!resp.ok) throw new Error('Server returned ' + resp.status);
+    var data = await resp.json();
     if (data.error) throw new Error(data.error);
 
-    // Render each section
+    if (data.network_kpis)         renderKPIs(data.network_kpis);
+    if (data.network_kpis)         renderABC(data.network_kpis);
     if (data.weather)              renderWeather(data.weather);
     if (data.alerts)               renderAlertSummary(data.alerts.summary || {});
     if (data.alerts)               renderAlerts(data.alerts.items || []);
     if (data.reorder != null)      renderReorder(data.reorder);
-    if (data.supplier_health)      renderSupplierHealth(data.supplier_health);
+    if (data.supplier_detail)      renderSupplierDetail(data.supplier_detail);
     if (data.inventory_health)     renderInventoryHealth(data.inventory_health);
     if (data.forecast_accuracy != null) renderForecastAccuracy(data.forecast_accuracy);
+    if (data.top_skus)             renderTopSKUs(data.top_skus);
+    if (data.anomaly_summary)      renderAnomalySummary(data.anomaly_summary);
     if (data.location_performance) renderLocations(data.location_performance);
+    if (data.pipeline_status)      renderPipelineStatus(data.pipeline_status);
 
-    // Update timestamps
-    const updStr = `Updated ${nowStr()}`;
-    ['alerts','reorder','supplier','inventory','accuracy','location'].forEach(id =>
-      document.getElementById(id + '-updated').textContent = updStr
-    );
     document.getElementById('last-updated').textContent =
-      `Last updated ${nowStr()} · ${data.query_ms}ms`;
-
+      'Last updated ' + nowStr() + ' \u00B7 ' + data.query_ms + 'ms';
     setStatus('live');
     startCountdown();
-
   } catch (err) {
     setStatus('error');
     document.getElementById('error-area').innerHTML =
-      `<div class="error-banner">⚠ Failed to load dashboard data: ${escHtml(err.message)}. Retrying in 30 seconds.</div>`;
-    setTimeout(loadData, 30_000);
+      '<div class="error-banner">Failed to load dashboard data: ' + escHtml(err.message) + '. Retrying in 30 seconds.</div>';
+    setTimeout(loadData, 30000);
   }
 }
 
-// ── Chat Panel ─────────────────────────────────────────────────────
-
-// Session ID — persistent for tab lifetime; regenerated on clear
 let _chatSessionId = _initSessionId();
 
 function _initSessionId() {
-  let sid = sessionStorage.getItem('pw_session_id');
-  if (!sid) {
-    sid = crypto.randomUUID();
-    sessionStorage.setItem('pw_session_id', sid);
-  }
+  var sid = sessionStorage.getItem('pw_session_id');
+  if (!sid) { sid = crypto.randomUUID(); sessionStorage.setItem('pw_session_id', sid); }
   return sid;
 }
 
-// Auto-resize textarea as the user types
-const _chatInput = document.getElementById('chat-input');
-_chatInput.addEventListener('input', () => {
+var _chatInput = document.getElementById('chat-input');
+_chatInput.addEventListener('input', function() {
   _chatInput.style.height = 'auto';
   _chatInput.style.height = Math.min(_chatInput.scrollHeight, 120) + 'px';
 });
-
-// Enter = send, Shift+Enter = newline
-_chatInput.addEventListener('keydown', e => {
-  if (e.key === 'Enter' && !e.shiftKey) {
-    e.preventDefault();
-    sendMessage();
-  }
+_chatInput.addEventListener('keydown', function(e) {
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); }
 });
 
-// Render markdown-lite: bold, inline code, bullet/numbered lists, line breaks
 function formatMessage(raw) {
-  // Escape HTML first
-  let t = raw
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;');
-
-  // Bold **text**
+  var t = raw.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
   t = t.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
-
-  // Inline code `text`
   t = t.replace(/`([^`\n]+)`/g, '<code>$1</code>');
-
-  // Process line-by-line for lists
-  const lines = t.split('\n');
-  const out = [];
-  let inUl = false, inOl = false;
-
-  for (const line of lines) {
-    const ulM = line.match(/^[ \t]*[-•*]\s+(.+)/);
-    const olM = line.match(/^[ \t]*\d+\.\s+(.+)/);
-
+  var lines = t.split('\n');
+  var out = [];
+  var inUl = false, inOl = false;
+  for (var i = 0; i < lines.length; i++) {
+    var line = lines[i];
+    var ulM = line.match(/^[ \t]*[-\u2022*]\s+(.+)/);
+    var olM = line.match(/^[ \t]*\d+\.\s+(.+)/);
     if (ulM) {
       if (inOl) { out.push('</ol>'); inOl = false; }
       if (!inUl) { out.push('<ul>'); inUl = true; }
-      out.push(`<li>${ulM[1]}</li>`);
+      out.push('<li>' + ulM[1] + '</li>');
     } else if (olM) {
       if (inUl) { out.push('</ul>'); inUl = false; }
       if (!inOl) { out.push('<ol>'); inOl = true; }
-      out.push(`<li>${olM[1]}</li>`);
+      out.push('<li>' + olM[1] + '</li>');
     } else {
       if (inUl) { out.push('</ul>'); inUl = false; }
       if (inOl) { out.push('</ol>'); inOl = false; }
@@ -1315,81 +1041,51 @@ function formatMessage(raw) {
   }
   if (inUl) out.push('</ul>');
   if (inOl) out.push('</ol>');
-
-  // Collapse runs of 3+ BRs into 2, strip leading/trailing BRs
-  let html = out.join('');
+  var html = out.join('');
   html = html.replace(/(<br\s*\/?>){3,}/gi, '<br><br>');
   html = html.replace(/^(<br\s*\/?>)+/i, '').replace(/(<br\s*\/?>)+$/i, '');
   return html;
 }
 
 function _appendMessage(role, content) {
-  const msgs = document.getElementById('chat-messages');
-  const wrap = document.createElement('div');
-  wrap.className = `chat-message ${role}`;
-
+  var msgs = document.getElementById('chat-messages');
+  var wrap = document.createElement('div');
+  wrap.className = 'chat-message ' + role;
   if (role === 'user') {
-    wrap.innerHTML = `<div class="chat-bubble user">${escHtml(content)}</div>`;
+    wrap.innerHTML = '<div class="chat-bubble user">' + escHtml(content) + '</div>';
   } else {
-    wrap.innerHTML = `<div class="chat-bubble assistant">${formatMessage(content)}</div>`;
+    wrap.innerHTML = '<div class="chat-bubble assistant">' + formatMessage(content) + '</div>';
   }
-
   msgs.appendChild(wrap);
   msgs.scrollTop = msgs.scrollHeight;
 }
 
 async function sendMessage() {
-  const input  = document.getElementById('chat-input');
-  const btn    = document.getElementById('chat-send-btn');
-  const typing = document.getElementById('chat-typing');
-  const msgs   = document.getElementById('chat-messages');
-  const msg    = input.value.trim();
-
+  var input = document.getElementById('chat-input');
+  var btn = document.getElementById('chat-send-btn');
+  var typing = document.getElementById('chat-typing');
+  var msgs = document.getElementById('chat-messages');
+  var msg = input.value.trim();
   if (!msg || input.disabled) return;
-
-  // Lock UI
-  input.value = '';
-  input.style.height = 'auto';
-  input.disabled = true;
-  btn.disabled   = true;
-
+  input.value = ''; input.style.height = 'auto'; input.disabled = true; btn.disabled = true;
   _appendMessage('user', msg);
   typing.style.display = 'block';
   msgs.scrollTop = msgs.scrollHeight;
-
   try {
-    const resp = await fetch('/api/chat', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ session_id: _chatSessionId, message: msg }),
-    });
-
-    const data = await resp.json();
-
-    if (!resp.ok || data.error) {
-      _appendMessage('assistant', `**Error:** ${escHtml(data.error || `HTTP ${resp.status}`)}`);
-    } else {
+    var resp = await fetch('/api/chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ session_id: _chatSessionId, message: msg }) });
+    var data = await resp.json();
+    if (!resp.ok || data.error) { _appendMessage('assistant', '**Error:** ' + escHtml(data.error || 'HTTP ' + resp.status)); }
+    else {
       _appendMessage('assistant', data.reply);
-      // Capture session_id if server issued a new one
-      if (data.session_id && data.session_id !== _chatSessionId) {
-        _chatSessionId = data.session_id;
-        sessionStorage.setItem('pw_session_id', _chatSessionId);
-      }
+      if (data.session_id && data.session_id !== _chatSessionId) { _chatSessionId = data.session_id; sessionStorage.setItem('pw_session_id', _chatSessionId); }
     }
-  } catch (err) {
-    _appendMessage('assistant', `**Connection error:** ${escHtml(err.message)}`);
-  } finally {
-    typing.style.display = 'none';
-    input.disabled = false;
-    btn.disabled   = false;
-    input.focus();
-    msgs.scrollTop = msgs.scrollHeight;
-  }
+  } catch (err) { _appendMessage('assistant', '**Connection error:** ' + escHtml(err.message)); }
+  finally { typing.style.display = 'none'; input.disabled = false; btn.disabled = false; input.focus(); msgs.scrollTop = msgs.scrollHeight; }
 }
 
 function toggleChat() {
-  const panel = document.getElementById('chat-panel');
-  const isCollapsed = panel.classList.toggle('collapsed');
+  var panel = document.getElementById('chat-panel');
+  var isCollapsed = panel.classList.toggle('collapsed');
   document.body.classList.toggle('chat-collapsed', isCollapsed);
   localStorage.setItem('pw_chat_collapsed', isCollapsed ? '1' : '0');
 }
@@ -1402,22 +1098,12 @@ function toggleChat() {
 })();
 
 function clearChat() {
-  const msgs = document.getElementById('chat-messages');
-  msgs.innerHTML = `
-    <div class="chat-welcome">
-      <strong>PartsWatch AI</strong> has live access to your entire operation — alerts, reorders, suppliers, inventory, forecasts, and weather.<br><br>
-      Try asking:<br>
-      · Which locations are critically low on stock?<br>
-      · What should I order from Interstate Batteries today?<br>
-      · Show me all dead stock over $1,000<br>
-      · What's our battery exposure going into next week?
-    </div>`;
-  // New session ID so server history is also abandoned
+  document.getElementById('chat-messages').innerHTML =
+    '<div class="chat-welcome"><strong>PartsWatch AI</strong> has live access to your entire operation &mdash; 317K+ SKUs, 26 locations, alerts, reorders, suppliers, inventory, forecasts, and weather.<br><br>Try asking:<br>&middot; Which locations are critically low on stock?<br>&middot; What should I order from Interstate Batteries today?<br>&middot; Show me all dead stock over $1,000<br>&middot; What\'s our battery exposure going into next week?<br>&middot; Which suppliers are red-flagged right now?</div>';
   sessionStorage.removeItem('pw_session_id');
   _chatSessionId = _initSessionId();
 }
 
-// ── Init ───────────────────────────────────────────────────────────
 setHeaderDate();
 loadData();
 </script>

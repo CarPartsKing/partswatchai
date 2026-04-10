@@ -309,18 +309,29 @@ def _build_forecast_accuracy(client: Any, today: date) -> list[dict]:
 def _build_location_performance(client: Any, today: date) -> dict:
     loc_rows = _paginate(
         client, "locations",
-        "location_id,location_tier,composite_tier_score",
+        "location_id,location_tier,composite_tier_score,"
+        "revenue_score,sku_breadth_score,fill_rate_score,return_rate_score",
     )
-    tiers: dict[int, list[str]] = defaultdict(list)
+    tiers: dict[int, list[dict]] = defaultdict(list)
     scores: dict[str, float] = {}
     for r in loc_rows:
         tier = int(r.get("location_tier") or 2)
         loc_id = r.get("location_id", "?")
-        tiers[tier].append(loc_id)
+        tiers[tier].append({
+            "location_id": loc_id,
+            "composite_tier_score": float(r.get("composite_tier_score") or 0),
+            "revenue_score": float(r.get("revenue_score") or 0),
+            "sku_breadth_score": float(r.get("sku_breadth_score") or 0),
+            "fill_rate_score": float(r.get("fill_rate_score") or 0),
+            "return_rate_score": float(r.get("return_rate_score") or 0),
+        })
         if r.get("composite_tier_score") is not None:
             scores[loc_id] = float(r["composite_tier_score"])
 
-    tier3_locs = tiers.get(3, [])
+    for tier in tiers:
+        tiers[tier].sort(key=lambda x: x["composite_tier_score"], reverse=True)
+
+    tier3_locs = [l["location_id"] for l in tiers.get(3, [])]
     tier3_critical: list[str] = []
     if tier3_locs:
         alert_rows = _paginate(
@@ -342,6 +353,263 @@ def _build_location_performance(client: Any, today: date) -> dict:
         "tier3_critical": tier3_critical,
         "scores": scores,
     }
+
+
+def _build_network_kpis(client: Any, today: date) -> dict:
+    try:
+        sku_total = client.table("sku_master").select("sku_id", count="exact").limit(1).execute()
+        total_skus = sku_total.count or 0
+    except Exception:
+        total_skus = 0
+
+    abc_counts: dict[str, int] = {}
+    for cls in ("A", "B", "C"):
+        try:
+            r = client.table("sku_master").select("sku_id", count="exact").eq("abc_class", cls).limit(1).execute()
+            abc_counts[cls] = r.count or 0
+        except Exception:
+            abc_counts[cls] = 0
+
+    try:
+        anom_r = client.table("sales_transactions").select("transaction_id", count="exact").eq("is_anomaly", True).limit(1).execute()
+        anomaly_count = anom_r.count or 0
+    except Exception:
+        anomaly_count = 0
+
+    loc_rows = _paginate(client, "locations", "location_id")
+    location_count = len(loc_rows)
+
+    try:
+        sup_rows = _paginate(client, "supplier_scores", "supplier_id,score_date")
+        latest: dict[str, str] = {}
+        for r in sup_rows:
+            sid = r.get("supplier_id", "")
+            if sid not in latest or (r.get("score_date") or "") > latest[sid]:
+                latest[sid] = r.get("score_date") or ""
+        supplier_count = len(latest)
+    except Exception:
+        supplier_count = 0
+
+    return {
+        "total_skus": total_skus,
+        "abc_counts": abc_counts,
+        "anomaly_count": anomaly_count,
+        "location_count": location_count,
+        "supplier_count": supplier_count,
+    }
+
+
+def _build_top_skus(client: Any, today: date) -> list[dict]:
+    rows = _paginate(
+        client, "sku_master",
+        "sku_id,abc_class,avg_weekly_units,part_category,brand,description",
+        filters={"abc_class": "A"},
+        order_col="avg_weekly_units",
+        order_desc=True,
+        limit=15,
+    )
+    result = []
+    for r in rows:
+        avg_wk = float(r.get("avg_weekly_units") or 0)
+        result.append({
+            "sku_id": r["sku_id"],
+            "abc_class": r.get("abc_class", "?"),
+            "avg_weekly_units": round(avg_wk, 1),
+            "category": r.get("part_category") or "",
+            "brand": r.get("brand") or "",
+            "description": r.get("description") or "",
+        })
+    return result
+
+
+def _build_anomaly_summary(client: Any, today: date) -> dict:
+    try:
+        anom_r = client.table("sales_transactions").select("transaction_id", count="exact").eq("is_anomaly", True).limit(1).execute()
+        total_flagged = anom_r.count or 0
+    except Exception:
+        total_flagged = 0
+
+    top_high = _paginate(
+        client, "sales_transactions",
+        "sku_id,location_id,transaction_date,qty_sold,unit_price,total_revenue",
+        eq_bool={"is_anomaly": True},
+        order_col="qty_sold",
+        order_desc=True,
+        limit=8,
+    )
+
+    top_low = _paginate(
+        client, "sales_transactions",
+        "sku_id,location_id,transaction_date,qty_sold,unit_price,total_revenue",
+        eq_bool={"is_anomaly": True},
+        order_col="qty_sold",
+        order_desc=False,
+        limit=5,
+    )
+
+    loc_dist: dict[str, int] = {}
+    sample_locs = ["LOC-008", "LOC-025", "LOC-004", "LOC-001", "LOC-005"]
+    for loc in sample_locs:
+        try:
+            r = client.table("sales_transactions").select("transaction_id", count="exact").eq("is_anomaly", True).eq("location_id", loc).limit(1).execute()
+            loc_dist[loc] = r.count or 0
+        except Exception:
+            loc_dist[loc] = 0
+
+    return {
+        "total_flagged": total_flagged,
+        "top_high": [
+            {
+                "sku_id": r["sku_id"],
+                "location_id": r["location_id"],
+                "date": r.get("transaction_date", ""),
+                "qty": float(r.get("qty_sold") or 0),
+                "price": float(r.get("unit_price") or 0),
+                "revenue": float(r.get("total_revenue") or 0),
+            }
+            for r in top_high
+        ],
+        "top_low": [
+            {
+                "sku_id": r["sku_id"],
+                "location_id": r["location_id"],
+                "date": r.get("transaction_date", ""),
+                "qty": float(r.get("qty_sold") or 0),
+                "revenue": float(r.get("total_revenue") or 0),
+            }
+            for r in top_low
+        ],
+        "location_distribution": loc_dist,
+    }
+
+
+def _build_supplier_detail(client: Any, today: date) -> list[dict]:
+    score_rows = _paginate(
+        client, "supplier_scores",
+        "supplier_id,supplier_name,score_date,composite_score,risk_flag,"
+        "fill_rate_pct,on_time_delivery_pct,avg_lead_time_days,lead_time_variance_avg",
+    )
+    latest: dict[str, dict] = {}
+    for r in score_rows:
+        sid = r.get("supplier_id", "")
+        if sid not in latest or (r.get("score_date") or "") > latest[sid].get("score_date", ""):
+            latest[sid] = r
+
+    result = []
+    for sid, s in sorted(latest.items(), key=lambda x: float(x[1].get("composite_score") or 999)):
+        po_rows = _paginate(
+            client, "purchase_orders",
+            "po_number,line_number,sku_id,qty_ordered,qty_received,unit_cost,"
+            "status,expected_delivery_date,lead_time_variance",
+            filters={"supplier_id": sid},
+        )
+        open_pos = [p for p in po_rows if p.get("status") not in ("delivered", "cancelled", "closed")]
+        delivered = [p for p in po_rows if p.get("status") == "delivered"]
+
+        total_ordered = sum(float(p.get("qty_ordered") or 0) for p in delivered)
+        total_received = sum(float(p.get("qty_received") or 0) for p in delivered)
+        actual_fill = (total_received / total_ordered * 100) if total_ordered > 0 else None
+
+        ltv_vals = [float(p.get("lead_time_variance") or 0) for p in delivered if p.get("lead_time_variance") is not None]
+        avg_ltv = (sum(ltv_vals) / len(ltv_vals)) if ltv_vals else None
+
+        open_value = sum(float(p.get("qty_ordered") or 0) * float(p.get("unit_cost") or 0) for p in open_pos)
+
+        open_po_list = []
+        for p in open_pos[:6]:
+            open_po_list.append({
+                "po_number": p.get("po_number", ""),
+                "sku_id": p.get("sku_id", ""),
+                "qty_ordered": float(p.get("qty_ordered") or 0),
+                "status": p.get("status", ""),
+                "expected_delivery": p.get("expected_delivery_date", ""),
+                "value": round(float(p.get("qty_ordered") or 0) * float(p.get("unit_cost") or 0), 2),
+            })
+
+        result.append({
+            "supplier_id": sid,
+            "supplier_name": s.get("supplier_name") or "",
+            "composite_score": float(s.get("composite_score") or 0),
+            "risk_flag": (s.get("risk_flag") or "unknown").lower(),
+            "fill_rate_pct": s.get("fill_rate_pct"),
+            "on_time_delivery_pct": s.get("on_time_delivery_pct"),
+            "avg_lead_time_days": float(s.get("avg_lead_time_days") or 0) if s.get("avg_lead_time_days") else None,
+            "lead_time_variance_avg": float(s.get("lead_time_variance_avg") or 0) if s.get("lead_time_variance_avg") else None,
+            "actual_fill_rate": round(actual_fill, 1) if actual_fill is not None else None,
+            "avg_lead_time_variance": round(avg_ltv, 1) if avg_ltv is not None else None,
+            "open_po_count": len(open_pos),
+            "open_po_value": round(open_value, 2),
+            "delivered_count": len(delivered),
+            "open_pos": open_po_list,
+        })
+    return result
+
+
+def _build_pipeline_status(client: Any, today: date) -> list[dict]:
+    stages = [
+        "extract", "clean", "derive", "location_classify",
+        "anomaly", "forecast_rolling", "forecast_lgbm",
+        "reorder", "alerts", "dead_stock", "accuracy_report",
+    ]
+    try:
+        client.table("pipeline_runs").select("run_id", count="exact").limit(1).execute()
+        table_exists = True
+    except Exception:
+        table_exists = False
+
+    result = []
+    if not table_exists:
+        for stage in stages:
+            result.append({
+                "stage": stage,
+                "status": "no_table",
+                "started_at": None,
+                "ended_at": None,
+                "duration_s": None,
+                "error": "",
+            })
+        return result
+
+    for stage in stages:
+        rows = _paginate(
+            client, "pipeline_runs",
+            "run_id,stage_name,status,started_at,ended_at,error_message",
+            filters={"stage_name": stage},
+            order_col="started_at",
+            order_desc=True,
+            limit=1,
+        )
+        if rows:
+            r = rows[0]
+            started = r.get("started_at") or ""
+            ended = r.get("ended_at") or ""
+            duration_s = None
+            if started and ended:
+                try:
+                    from datetime import datetime as dt
+                    t0 = dt.fromisoformat(started.replace("Z", "+00:00"))
+                    t1 = dt.fromisoformat(ended.replace("Z", "+00:00"))
+                    duration_s = round((t1 - t0).total_seconds())
+                except Exception:
+                    pass
+            result.append({
+                "stage": stage,
+                "status": r.get("status", "unknown"),
+                "started_at": started,
+                "ended_at": ended,
+                "duration_s": duration_s,
+                "error": (r.get("error_message") or "")[:200],
+            })
+        else:
+            result.append({
+                "stage": stage,
+                "status": "never_run",
+                "started_at": None,
+                "ended_at": None,
+                "duration_s": None,
+                "error": "",
+            })
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -370,13 +638,18 @@ def dashboard_data():
     }
 
     sections = [
+        ("network_kpis",         _build_network_kpis),
         ("weather",              _build_weather),
         ("alerts",               _build_alerts),
         ("reorder",              _build_reorder),
         ("supplier_health",      _build_supplier_health),
+        ("supplier_detail",      _build_supplier_detail),
         ("inventory_health",     _build_inventory_health),
         ("forecast_accuracy",    _build_forecast_accuracy),
         ("location_performance", _build_location_performance),
+        ("top_skus",             _build_top_skus),
+        ("anomaly_summary",      _build_anomaly_summary),
+        ("pipeline_status",      _build_pipeline_status),
     ]
 
     for name, fn in sections:

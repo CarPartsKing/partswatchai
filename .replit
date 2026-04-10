@@ -34,6 +34,10 @@ args = "Start application"
 task = "workflow.run"
 args = "Fixed Stages Runner"
 
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "Historical Extract"
+
 [[workflows.workflow]]
 name = "Start application"
 author = "agent"
@@ -53,6 +57,17 @@ author = "agent"
 [[workflows.workflow.tasks]]
 task = "shell.exec"
 args = "python run_fixed_stages.py --only anomaly"
+
+[workflows.workflow.metadata]
+outputType = "console"
+
+[[workflows.workflow]]
+name = "Historical Extract"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "python run_historical_extract.py 2"
 
 [workflows.workflow.metadata]
 outputType = "console"

@@ -9,7 +9,7 @@
     "location_id":      "[Location].[Loc].[Loc]",
     "qty_sold":         "[Measures].[Qty Ship]",
     "unit_price":       "[Measures].[Unit Price]",
-    "total_amount":     "[Measures].[Ext Price]",
+    "total_revenue":    "[Measures].[Ext Price]",
     "cost_per_unit":    "[Measures].[Unit Cost]",
     "ext_cost":         "[Measures].[Ext Cost]",
     "gross_profit":     "[Measures].[Gross Profit]",

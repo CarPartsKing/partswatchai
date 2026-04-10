@@ -98,11 +98,22 @@ Acts as shared foundation code (config, DB connection, logging utilities) and sy
 - LightGBM, Prophet, scikit-learn, mlxtend, Isolation Forest
 - Rich (console output), tenacity (retry logic), python-dotenv
 
+## Autocube Data Pipeline
+- **Source**: AutoCube OLAP (SSAS) via XMLA/SOAP at `/msmdpump.dll` with NTLM auth
+- **Historical Load**: Complete — 8.46M sales_transactions + 317K SKUs (Jul 2022 → Apr 2026)
+- **Incremental**: `python -m extract.autocube_pull --mode incremental` (previous day)
+- **Historical**: `python -m extract.autocube_pull --mode historical` (weekly chunks with resume)
+- **Data Cleaning**: Scientific notation → float, MM/DD/YYYY → ISO, location codes "25-CPW - DC" → LOC-025
+- **Deduplication**: Same SKU×location×date aggregated (sums qty/rev, latest price)
+- **SKU Auto-populate**: New SKUs auto-inserted as stubs into sku_master during extract
+- **Progress Tracking**: `/tmp/historical_progress.json` enables resume on restart
+- **Runner**: `extract/historical_runner.py` — designed to run as a Replit workflow
+
 ## Database Tables
-- `sales_transactions`
+- `sales_transactions` — 8.46M rows (Jul 2022 → present, from Autocube)
 - `inventory_snapshots`
 - `purchase_orders`
-- `sku_master`
+- `sku_master` — 317K SKUs (auto-populated from Autocube + seed data)
 - `weather_log`
 - `forecast_results`
 - `supplier_scores`

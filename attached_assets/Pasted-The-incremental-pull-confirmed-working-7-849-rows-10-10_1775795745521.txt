@@ -1,0 +1,90 @@
+The incremental pull confirmed working — 7,849 rows, 
+10/10 columns matched, 3.1 seconds. Now fix two data 
+format issues and build the chunked full historical load.
+
+FIX 1 — Scientific notation prices:
+Add a clean_numeric() function that converts any 
+value to float:
+- Handles scientific notation: 5.177E1 → 51.77
+- Handles string numbers: "51.77" → 51.77  
+- Handles None/empty → None
+Apply to every numeric field:
+qty_sold, unit_price, total_amount, cost_per_unit, 
+ext_cost, gross_profit, gross_profit_pct
+
+FIX 2 — Date format conversion:
+Convert MM/DD/YYYY → YYYY-MM-DD (ISO 8601) 
+for transaction_date before every Supabase insert.
+Handle edge cases: empty dates, malformed dates, 
+None values — log a warning and skip the row 
+rather than crashing.
+
+FIX 3 — Chunked full historical load:
+The single-shot full query timed out at 2 minutes.
+Build monthly chunking:
+- Loop July 2022 through April 2026 month by month
+  (approximately 46 monthly chunks)
+- Pull one month at a time (~5,250 rows per month)
+- Apply clean_numeric() and date conversion 
+  to every row before loading
+- Deduplicate against existing Supabase rows 
+  before inserting each chunk
+- Load each chunk to Supabase immediately 
+  after pulling — do not accumulate in memory
+- Log progress after every chunk:
+  [AUTOCUBE] Month 3/46 complete — 5,247 rows 
+  loaded — elapsed 4m 12s — estimated 28m remaining
+- If any single month fails, log the error 
+  and continue to the next month — never stop 
+  the full run because one month failed
+- Track failed months in a list
+- At completion report:
+  Total months attempted: 46
+  Total months succeeded: X
+  Total months failed: Y (list which ones)
+  Total rows loaded: X
+  Total runtime: Xm Xs
+  Failed months to retry: [list]
+
+Add --mode historical as a new run mode:
+python -m extract.autocube_pull --mode historical
+
+Also add --retry-failed mode that accepts a 
+list of YYYY-MM months and re-runs only those:
+python -m extract.autocube_pull --mode retry-failed 
+--months 2023-06 2024-11
+
+After all three fixes are implemented:
+
+STEP 1 — Dry run first to confirm fixes work:
+python -m extract.autocube_pull --mode incremental 
+--dry-run
+Show me the first 5 rows with clean numeric values 
+and properly formatted dates. Confirm no scientific 
+notation and no MM/DD/YYYY dates in the output.
+
+STEP 2 — If dry run looks clean, run the 
+full historical load:
+python -m extract.autocube_pull --mode historical
+
+Log every month as it completes.
+Show me the final completion summary.
+
+STEP 3 — After historical load completes:
+Run a Supabase row count confirmation:
+SELECT COUNT(*) FROM sales_transactions
+Log the total and confirm it matches the 
+expected ~5.1 million rows.
+
+STEP 4 — Run the full pipeline dry run:
+python main.py --dry-run
+Confirm every stage sees real data and 
+processes correctly.
+
+This historical load is a one-time operation.
+Once complete the nightly incremental at 2am 
+handles everything going forward automatically.
+
+Follow all coding standards.
+Log everything — this is the most important 
+data operation we have run.

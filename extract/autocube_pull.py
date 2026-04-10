@@ -159,43 +159,45 @@ def query_validator(query: str) -> None:
 # Hardcoded MDX queries — no dynamic construction from external input
 # ---------------------------------------------------------------------------
 
-MDX_FULL_SALES = """\
-SELECT
-  NON EMPTY {{
+_MEASURES_BLOCK = """\
     [Measures].[Qty Ship],
     [Measures].[Unit Price],
     [Measures].[Ext Price],
     [Measures].[Unit Cost],
     [Measures].[Ext Cost],
     [Measures].[Gross Profit],
-    [Measures].[Gross Profit %]
-  }} ON COLUMNS,
-  NON EMPTY CROSSJOIN(
-    [Sales Date].[Invoice Date].[Inv Date].MEMBERS,
-    [Product].[Prod Code].[Prod Code].MEMBERS,
-    [Location].[Loc].[Loc].MEMBERS
-  ) ON ROWS
-FROM [{cube}]
-"""
+    [Measures].[Gross Profit %]"""
 
-MDX_INCREMENTAL_DAY = """\
-SELECT
-  NON EMPTY {{
-    [Measures].[Qty Ship],
-    [Measures].[Unit Price],
-    [Measures].[Ext Price],
-    [Measures].[Unit Cost],
-    [Measures].[Ext Cost],
-    [Measures].[Gross Profit],
-    [Measures].[Gross Profit %]
-  }} ON COLUMNS,
-  NON EMPTY CROSSJOIN(
-    {{ [Sales Date].[Invoice Date].[Inv Date].&[{date_key}] }},
-    [Product].[Prod Code].[Prod Code].MEMBERS,
-    [Location].[Loc].[Loc].MEMBERS
-  ) ON ROWS
-FROM [{cube}]
-"""
+MDX_FULL_SALES = (
+    "SELECT\n  NON EMPTY {{\n" + _MEASURES_BLOCK + "\n  }} ON COLUMNS,\n"
+    "  NON EMPTY CROSSJOIN(\n"
+    "    [Sales Date].[Invoice Date].[Inv Date].MEMBERS,\n"
+    "    [Product].[Prod Code].[Prod Code].MEMBERS,\n"
+    "    [Location].[Loc].[Loc].MEMBERS\n"
+    "  ) ON ROWS\n"
+    "FROM [{cube}]\n"
+)
+
+MDX_INCREMENTAL_DAY = (
+    "SELECT\n  NON EMPTY {{\n" + _MEASURES_BLOCK + "\n  }} ON COLUMNS,\n"
+    "  NON EMPTY CROSSJOIN(\n"
+    "    {{ [Sales Date].[Invoice Date].[Inv Date].&[{date_key}] }},\n"
+    "    [Product].[Prod Code].[Prod Code].MEMBERS,\n"
+    "    [Location].[Loc].[Loc].MEMBERS\n"
+    "  ) ON ROWS\n"
+    "FROM [{cube}]\n"
+)
+
+MDX_MONTHLY_RANGE = (
+    "SELECT\n  NON EMPTY {{\n" + _MEASURES_BLOCK + "\n  }} ON COLUMNS,\n"
+    "  NON EMPTY CROSSJOIN(\n"
+    "    {{ [Sales Date].[Invoice Date].[Inv Date].&[{start_key}]"
+    " : [Sales Date].[Invoice Date].[Inv Date].&[{end_key}] }},\n"
+    "    [Product].[Prod Code].[Prod Code].MEMBERS,\n"
+    "    [Location].[Loc].[Loc].MEMBERS\n"
+    "  ) ON ROWS\n"
+    "FROM [{cube}]\n"
+)
 
 
 # ---------------------------------------------------------------------------
@@ -751,61 +753,256 @@ def run_connection_test() -> int:
 
 
 # ---------------------------------------------------------------------------
-# Mode: FULL — 3 years of sales history
+# Data cleaning — scientific notation + date formatting
 # ---------------------------------------------------------------------------
 
-def run_full_extract() -> int:
-    """Pull 3 years of sales data from the cube and load to Supabase.
+_NUMERIC_FIELDS = frozenset({
+    "qty_sold", "unit_price", "total_revenue",
+    "cost_per_unit", "ext_cost", "gross_profit", "gross_profit_pct",
+})
 
-    Returns 0 on success, 1 on failure.
+_DB_COLUMNS = frozenset({
+    "transaction_id", "sku_id", "location_id", "transaction_date",
+    "qty_sold", "unit_price", "total_revenue",
+})
+
+_GENERATED_COLS = frozenset({
+    "is_stockout", "lead_time_variance", "fill_rate_pct",
+})
+
+_BATCH_SIZE = 500
+
+
+def clean_numeric(value: Any) -> float | None:
+    """Convert a value to float, handling scientific notation.
+
+    Handles: '5.177E1' → 51.77, '51.77' → 51.77, '' → None, None → None.
     """
-    t0 = time.perf_counter()
-    log.info("=" * 60)
-    log.info("  AUTOCUBE FULL EXTRACT — 3 years")
-    log.info("=" * 60)
+    if value is None:
+        return None
+    s = str(value).strip()
+    if not s:
+        return None
+    try:
+        return float(s)
+    except (ValueError, TypeError):
+        log.warning("Cannot convert to float: %r", value)
+        return None
+
+
+def clean_date(value: Any) -> str | None:
+    """Convert MM/DD/YYYY → YYYY-MM-DD (ISO 8601).
+
+    Returns None for empty/malformed dates.
+    """
+    if value is None:
+        return None
+    s = str(value).strip()
+    if not s:
+        return None
+    if re.match(r"^\d{4}-\d{2}-\d{2}$", s):
+        return s
+    m = re.match(r"^(\d{1,2})/(\d{1,2})/(\d{4})$", s)
+    if m:
+        month, day, year = m.groups()
+        return f"{year}-{int(month):02d}-{int(day):02d}"
+    log.warning("Unrecognised date format: %r", value)
+    return None
+
+
+def _generate_transaction_id(row: dict[str, Any]) -> str:
+    """Generate a deterministic transaction ID from date + SKU + location."""
+    dt = row.get("transaction_date", "")
+    sku = row.get("sku_id", "")
+    loc = row.get("location_id", "")
+    return f"AC-{dt}-{sku}-{loc}"
+
+
+def _extract_location_code(raw: str) -> str:
+    """Extract the numeric location code from '25-CPW - DC' → 'LOC-25'.
+
+    Converts Autocube format (e.g. '1 -CPW - BROOKPARK') to PartsWatch
+    location ID format (e.g. 'LOC-001') matching existing DB convention.
+    """
+    if not raw:
+        return raw
+    code = raw.split("-", 1)[0].strip()
+    try:
+        return f"LOC-{int(code):03d}"
+    except ValueError:
+        return raw
+
+
+# ---------------------------------------------------------------------------
+# Row mapping + cleaning pipeline
+# ---------------------------------------------------------------------------
+
+def _map_and_clean_rows(
+    rows: list[dict],
+    column_map: dict,
+) -> list[dict[str, Any]]:
+    """Map raw XMLA rows to Supabase schema with data cleaning.
+
+    Applies clean_numeric to numeric fields, clean_date to dates,
+    generates transaction_id, and filters to DB-safe columns only.
+    Returns list of cleaned, DB-ready dicts.
+    """
+    mapping = column_map.get("sales_transactions", {})
+    active_mapping = {
+        k: v for k, v in mapping.items()
+        if v is not None and not k.startswith("_")
+    }
+
+    if not active_mapping:
+        log.warning("No active column mappings — run --test first.")
+        return []
+
+    reverse_map = {v: k for k, v in active_mapping.items()}
+
+    cleaned: list[dict[str, Any]] = []
+    skipped = 0
+
+    for row in rows:
+        mapped: dict[str, Any] = {}
+        for source_col, target_col in reverse_map.items():
+            if source_col in row:
+                mapped[target_col] = row[source_col]
+
+        for col in _GENERATED_COLS:
+            mapped.pop(col, None)
+
+        if not mapped:
+            skipped += 1
+            continue
+
+        if "transaction_date" in mapped:
+            iso_date = clean_date(mapped["transaction_date"])
+            if iso_date is None:
+                log.debug("Skipping row with bad date: %r", mapped.get("transaction_date"))
+                skipped += 1
+                continue
+            mapped["transaction_date"] = iso_date
+
+        for field in _NUMERIC_FIELDS:
+            if field in mapped:
+                mapped[field] = clean_numeric(mapped[field])
+
+        if "location_id" in mapped:
+            mapped["location_id"] = _extract_location_code(mapped["location_id"])
+
+        mapped["transaction_id"] = _generate_transaction_id(mapped)
+
+        db_row = {k: v for k, v in mapped.items() if k in _DB_COLUMNS}
+        if db_row:
+            cleaned.append(db_row)
+        else:
+            skipped += 1
+
+    if skipped:
+        log.debug("Skipped %d rows during mapping/cleaning.", skipped)
+
+    return cleaned
+
+
+# ---------------------------------------------------------------------------
+# Supabase loader
+# ---------------------------------------------------------------------------
+
+def _deduplicate_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Aggregate rows with the same transaction_id.
+
+    Sums qty_sold, total_revenue.  Takes the latest unit_price per group.
+    This handles the case where the cube returns multiple invoice lines
+    for the same SKU × location × date combination.
+    """
+    groups: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        tid = row.get("transaction_id", "")
+        if tid in groups:
+            existing = groups[tid]
+            existing["qty_sold"] = (existing.get("qty_sold") or 0) + (row.get("qty_sold") or 0)
+            existing["total_revenue"] = (existing.get("total_revenue") or 0) + (row.get("total_revenue") or 0)
+            if row.get("unit_price") is not None:
+                existing["unit_price"] = row["unit_price"]
+        else:
+            groups[tid] = dict(row)
+    return list(groups.values())
+
+
+def _load_to_supabase(
+    rows: list[dict],
+    column_map: dict,
+    dry_run: bool = False,
+) -> int:
+    """Map, clean, deduplicate, and upsert rows into sales_transactions.
+
+    If dry_run is True, maps and cleans but does not write to Supabase.
+    Returns the count of rows that would be (or were) loaded.
+    """
+    cleaned = _map_and_clean_rows(rows, column_map)
+
+    if not cleaned:
+        log.warning("No rows survived column mapping and cleaning.")
+        return 0
+
+    pre_dedup = len(cleaned)
+    cleaned = _deduplicate_rows(cleaned)
+    if len(cleaned) < pre_dedup:
+        log.info("Deduplicated %d → %d rows (aggregated %d duplicates).",
+                 pre_dedup, len(cleaned), pre_dedup - len(cleaned))
+
+    if dry_run:
+        log.info("[DRY RUN] %d rows cleaned and ready (not loaded).", len(cleaned))
+        for i, r in enumerate(cleaned[:5]):
+            log.info("[DRY RUN]   Row %d: %s", i + 1, r)
+        return len(cleaned)
+
+    from db.connection import get_client as get_db_client
+
+    log.info("Loading %d cleaned rows to sales_transactions …", len(cleaned))
 
     try:
-        client = get_client()
-        client.connect()
+        db = get_db_client()
     except Exception:
-        log.exception("Connection failed.")
-        return 1
+        log.exception("Supabase connection failed.")
+        raise
 
-    column_map = load_column_map()
-    cube = config.AUTOCUBE_CUBE
-    today = date.today()
-    total_rows = 0
+    unique_skus = sorted({r["sku_id"] for r in cleaned})
+    log.info("Ensuring %d unique SKUs exist in sku_master …", len(unique_skus))
+    for i in range(0, len(unique_skus), _BATCH_SIZE):
+        sku_batch = [{"sku_id": s} for s in unique_skus[i : i + _BATCH_SIZE]]
+        try:
+            db.table("sku_master").upsert(
+                sku_batch, on_conflict="sku_id", ignore_duplicates=True
+            ).execute()
+        except Exception:
+            log.exception("sku_master upsert failed at offset %d.", i)
+            raise
+    log.info("sku_master populated.")
 
-    mdx = MDX_FULL_SALES.format(cube=cube)
+    loaded = 0
+    for i in range(0, len(cleaned), _BATCH_SIZE):
+        batch = cleaned[i : i + _BATCH_SIZE]
+        try:
+            db.table("sales_transactions").upsert(
+                batch, on_conflict="transaction_id"
+            ).execute()
+            loaded += len(batch)
+            if (i // _BATCH_SIZE) % 10 == 0:
+                log.debug("  Batch %d–%d upserted.", i, i + len(batch))
+        except Exception:
+            log.exception("Upsert failed at batch offset %d.", i)
+            raise
 
-    try:
-        rows = client.execute_mdx(mdx)
-        log.info("Full extract: %d rows returned.", len(rows))
-        total_rows = len(rows)
-
-        if rows:
-            _load_to_supabase(rows, column_map)
-
-    except SecurityError:
-        log.exception("Security violation — aborting.")
-        return 1
-    except Exception:
-        log.exception("Full extract failed.")
-        return 1
-
-    elapsed = time.perf_counter() - t0
-    log.info(
-        "Full extract complete: %d total rows in %.1fs",
-        total_rows, elapsed,
-    )
-    return 0
+    log.info("Loaded %d rows to Supabase.", loaded)
+    return loaded
 
 
 # ---------------------------------------------------------------------------
 # Mode: INCREMENTAL — previous day
 # ---------------------------------------------------------------------------
 
-def run_incremental_extract() -> int:
+def run_incremental_extract(dry_run: bool = False) -> int:
     """Pull the previous day's sales and load to Supabase.
 
     Returns 0 on success, 1 on failure.
@@ -815,7 +1012,8 @@ def run_incremental_extract() -> int:
     date_key = yesterday.strftime("%Y%m%d")
 
     log.info("=" * 60)
-    log.info("  AUTOCUBE INCREMENTAL EXTRACT — %s", date_key)
+    log.info("  AUTOCUBE INCREMENTAL EXTRACT — %s%s",
+             date_key, " [DRY RUN]" if dry_run else "")
     log.info("=" * 60)
 
     try:
@@ -841,90 +1039,242 @@ def run_incremental_extract() -> int:
         return 1
 
     if rows:
-        _load_to_supabase(rows, column_map)
+        _load_to_supabase(rows, column_map, dry_run=dry_run)
+    else:
+        log.info("No data for %s — may be weekend/holiday or data not yet loaded.",
+                 yesterday.isoformat())
 
     elapsed = time.perf_counter() - t0
-    log.info(
-        "Incremental extract complete: %d rows in %.1fs",
-        len(rows), elapsed,
-    )
+    log.info("Incremental extract complete: %d rows in %.1fs", len(rows), elapsed)
     return 0
 
 
 # ---------------------------------------------------------------------------
-# Supabase loader
+# Mode: FULL — single-shot (kept for backwards compat, prefer historical)
 # ---------------------------------------------------------------------------
 
-_BATCH_SIZE = 500
+def run_full_extract(dry_run: bool = False) -> int:
+    """Pull all sales data in one query. May timeout on large datasets.
 
-_GENERATED_COLS = frozenset({
-    "is_stockout",
-    "lead_time_variance",
-    "fill_rate_pct",
-})
-
-
-def _load_to_supabase(
-    rows: list[dict],
-    column_map: dict,
-) -> int:
-    """Map, clean, and upsert rows into sales_transactions.
-
-    Returns the count of rows loaded.
+    For production use, prefer run_historical_extract() which chunks by month.
+    Returns 0 on success, 1 on failure.
     """
-    from db.connection import get_client as get_db_client
-
-    mapping = column_map.get("sales_transactions", {})
-    active_mapping = {k: v for k, v in mapping.items() if v is not None}
-
-    if not active_mapping:
-        log.warning(
-            "No active column mappings in autocube_column_map.json — "
-            "run --test first to discover available fields, then update "
-            "the mapping file."
-        )
-        return 0
-
-    reverse_map = {v: k for k, v in active_mapping.items()}
-
-    mapped_rows: list[dict] = []
-    for row in rows:
-        mapped: dict[str, Any] = {}
-        for source_col, target_col in reverse_map.items():
-            if source_col in row:
-                mapped[target_col] = row[source_col]
-        for col in _GENERATED_COLS:
-            mapped.pop(col, None)
-        if mapped:
-            mapped_rows.append(mapped)
-
-    if not mapped_rows:
-        log.warning("No rows survived column mapping.")
-        return 0
-
-    log.info("Loading %d mapped rows to sales_transactions …", len(mapped_rows))
+    t0 = time.perf_counter()
+    log.info("=" * 60)
+    log.info("  AUTOCUBE FULL EXTRACT%s", " [DRY RUN]" if dry_run else "")
+    log.info("=" * 60)
 
     try:
-        db = get_db_client()
+        client = get_client()
+        client.connect()
     except Exception:
-        log.exception("Supabase connection failed.")
-        raise
+        log.exception("Connection failed.")
+        return 1
+
+    column_map = load_column_map()
+    cube = config.AUTOCUBE_CUBE
+
+    mdx = MDX_FULL_SALES.format(cube=cube)
+
+    try:
+        rows = client.execute_mdx(mdx)
+        log.info("Full extract: %d rows returned.", len(rows))
+    except SecurityError:
+        log.exception("Security violation — aborting.")
+        return 1
+    except Exception:
+        log.exception("Full extract failed.")
+        return 1
 
     loaded = 0
-    for i in range(0, len(mapped_rows), _BATCH_SIZE):
-        batch = mapped_rows[i : i + _BATCH_SIZE]
-        try:
-            db.table("sales_transactions").upsert(
-                batch, on_conflict="transaction_id"
-            ).execute()
-            loaded += len(batch)
-            log.debug("  Batch %d–%d upserted.", i, i + len(batch))
-        except Exception:
-            log.exception("Upsert failed at batch offset %d.", i)
-            raise
+    if rows:
+        loaded = _load_to_supabase(rows, column_map, dry_run=dry_run)
 
-    log.info("Loaded %d rows to Supabase.", loaded)
-    return loaded
+    elapsed = time.perf_counter() - t0
+    log.info("Full extract complete: %d rows in %.1fs", loaded, elapsed)
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# Mode: HISTORICAL — monthly-chunked full load (Jul 2022 → present)
+# ---------------------------------------------------------------------------
+
+_HISTORY_START = date(2022, 7, 1)
+
+_CHUNK_DAYS = 7
+
+
+def _generate_chunk_ranges(
+    start: date,
+    end: date,
+) -> list[tuple[str, str, str]]:
+    """Generate (label, start_key, end_key) tuples for weekly chunks.
+
+    Uses 7-day chunks to keep XMLA responses under ~50K rows,
+    avoiding OOM on memory-constrained environments.
+    Keys are in YYYYMMDD format matching SSAS date member keys.
+    """
+    chunks: list[tuple[str, str, str]] = []
+    current = start
+    while current <= end:
+        chunk_end = min(current + timedelta(days=_CHUNK_DAYS - 1), end)
+        label = f"{current.isoformat()}..{chunk_end.isoformat()}"
+        start_key = current.strftime("%Y%m%d")
+        end_key = chunk_end.strftime("%Y%m%d")
+        chunks.append((label, start_key, end_key))
+        current = chunk_end + timedelta(days=1)
+    return chunks
+
+
+def _label_to_months(label: str) -> set[str]:
+    """Extract all YYYY-MM values covered by a chunk label.
+
+    A label like '2022-07-29..2022-08-04' spans two months,
+    so both '2022-07' and '2022-08' are returned.
+    """
+    parts = label.split("..")
+    months = {parts[0][:7]}
+    if len(parts) == 2:
+        months.add(parts[1][:7])
+    return months
+
+
+def run_historical_extract(
+    dry_run: bool = False,
+    start_chunk: int = 0,
+    max_chunks: int = 0,
+    months_filter: list[str] | None = None,
+) -> int:
+    """Pull historical data month by month and load to Supabase.
+
+    Args:
+        dry_run: If True, pull and clean but do not write to Supabase.
+        months_filter: If provided, only process these months (YYYY-MM format).
+                       Used by --mode retry-failed.
+
+    Returns 0 if all months succeeded, 1 if any failed.
+    """
+    t0 = time.perf_counter()
+
+    log.info("=" * 60)
+    log.info("  AUTOCUBE HISTORICAL EXTRACT%s",
+             " [DRY RUN]" if dry_run else "")
+    log.info("=" * 60)
+
+    try:
+        client = get_client()
+        client.connect()
+    except Exception:
+        log.exception("Connection failed.")
+        return 1
+
+    column_map = load_column_map()
+    cube = config.AUTOCUBE_CUBE
+
+    end_date = date.today() - timedelta(days=1)
+    all_chunks = _generate_chunk_ranges(_HISTORY_START, end_date)
+
+    if months_filter:
+        filter_set = set(months_filter)
+        all_chunks = [
+            (l, s, e) for l, s, e in all_chunks
+            if _label_to_months(l) & filter_set
+        ]
+        if not all_chunks:
+            log.error("None of the requested months %s are in range.", months_filter)
+            return 1
+        log.info("Retry mode: processing %d chunk(s) for months: %s",
+                 len(all_chunks), ", ".join(months_filter))
+
+    if start_chunk > 0:
+        all_chunks = all_chunks[start_chunk:]
+    if max_chunks > 0:
+        all_chunks = all_chunks[:max_chunks]
+
+    if not all_chunks:
+        log.info("No chunks to process after filtering (start_chunk=%d, max_chunks=%d).",
+                 start_chunk, max_chunks)
+        return 0
+
+    total_chunks = len(all_chunks)
+    log.info("Processing %d weekly chunks (start_chunk=%d) from %s to %s",
+             total_chunks, start_chunk, all_chunks[0][0], all_chunks[-1][0])
+
+    succeeded = 0
+    failed_chunks: list[str] = []
+    total_rows = 0
+
+    for idx, (label, start_key, end_key) in enumerate(all_chunks, 1):
+        chunk_t0 = time.perf_counter()
+        log.info("[AUTOCUBE] Chunk %d/%d: %s (keys %s–%s)",
+                 idx, total_chunks, label, start_key, end_key)
+
+        mdx = MDX_MONTHLY_RANGE.format(
+            cube=cube, start_key=start_key, end_key=end_key
+        )
+
+        try:
+            rows = client.execute_mdx(mdx)
+        except SecurityError:
+            log.exception("Security violation in chunk %s — aborting entire run.", label)
+            return 1
+        except Exception:
+            log.exception("Failed to extract chunk %s — continuing.", label)
+            failed_chunks.append(label)
+            continue
+
+        chunk_rows = 0
+        if rows:
+            try:
+                chunk_rows = _load_to_supabase(rows, column_map, dry_run=dry_run)
+            except Exception:
+                log.exception("Failed to load chunk %s — continuing.", label)
+                failed_chunks.append(label)
+                continue
+
+        del rows
+
+        total_rows += chunk_rows
+        succeeded += 1
+        chunk_elapsed = time.perf_counter() - chunk_t0
+        total_elapsed = time.perf_counter() - t0
+
+        avg_per_chunk = total_elapsed / idx
+        remaining_est = avg_per_chunk * (total_chunks - idx)
+        remaining_min = int(remaining_est // 60)
+        remaining_sec = int(remaining_est % 60)
+
+        log.info(
+            "[AUTOCUBE] Chunk %d/%d complete — %s — %d rows loaded — "
+            "elapsed %dm %ds — estimated %dm %ds remaining",
+            idx, total_chunks, label, chunk_rows,
+            int(total_elapsed // 60), int(total_elapsed % 60),
+            remaining_min, remaining_sec,
+        )
+
+    total_elapsed = time.perf_counter() - t0
+    total_min = int(total_elapsed // 60)
+    total_sec = int(total_elapsed % 60)
+
+    failed_months = sorted(set(
+        m for l in failed_chunks for m in _label_to_months(l)
+    ))
+
+    log.info("=" * 60)
+    log.info("  HISTORICAL EXTRACT COMPLETE")
+    log.info("=" * 60)
+    log.info("  Total chunks attempted: %d", total_chunks)
+    log.info("  Total chunks succeeded: %d", succeeded)
+    log.info("  Total chunks failed:    %d", len(failed_chunks))
+    log.info("  Total rows loaded:      %d", total_rows)
+    log.info("  Total runtime:          %dm %ds", total_min, total_sec)
+
+    if failed_months:
+        log.warning("  Failed months to retry: %s", ", ".join(failed_months))
+        log.warning("  Retry command: python -m extract.autocube_pull "
+                     "--mode retry-failed --months %s", " ".join(failed_months))
+
+    return 1 if failed_chunks else 0
 
 
 # ---------------------------------------------------------------------------
@@ -932,6 +1282,7 @@ def _load_to_supabase(
 # ---------------------------------------------------------------------------
 
 def main() -> int:
+    """Parse arguments and dispatch to the appropriate extract mode."""
     parser = argparse.ArgumentParser(
         description="Autocube OLAP extraction via XMLA/SOAP",
     )
@@ -942,8 +1293,31 @@ def main() -> int:
     )
     parser.add_argument(
         "--mode",
-        choices=["full", "incremental"],
-        help="Extract mode: full (3 years) or incremental (yesterday)",
+        choices=["full", "incremental", "historical", "retry-failed"],
+        help="Extract mode",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Pull and clean data but do not write to Supabase",
+    )
+    parser.add_argument(
+        "--months",
+        nargs="+",
+        metavar="YYYY-MM",
+        help="Specific months to process (used with --mode retry-failed)",
+    )
+    parser.add_argument(
+        "--start-chunk",
+        type=int,
+        default=0,
+        help="Skip the first N chunks (resume from chunk N)",
+    )
+    parser.add_argument(
+        "--max-chunks",
+        type=int,
+        default=0,
+        help="Process at most N chunks (0 = all remaining)",
     )
     args = parser.parse_args()
 
@@ -955,10 +1329,28 @@ def main() -> int:
         return run_connection_test()
 
     if args.mode == "full":
-        return run_full_extract()
+        return run_full_extract(dry_run=args.dry_run)
 
     if args.mode == "incremental":
-        return run_incremental_extract()
+        return run_incremental_extract(dry_run=args.dry_run)
+
+    if args.mode == "historical":
+        return run_historical_extract(
+            dry_run=args.dry_run,
+            start_chunk=args.start_chunk,
+            max_chunks=args.max_chunks,
+        )
+
+    if args.mode == "retry-failed":
+        if not args.months:
+            log.error("--mode retry-failed requires --months YYYY-MM [YYYY-MM ...]")
+            return 1
+        return run_historical_extract(
+            dry_run=args.dry_run,
+            start_chunk=args.start_chunk,
+            max_chunks=args.max_chunks,
+            months_filter=args.months,
+        )
 
     return 1
 

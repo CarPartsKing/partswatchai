@@ -421,6 +421,65 @@
     display: flex;
     flex-direction: column;
     z-index: 99;
+    transition: transform 0.25s ease;
+  }
+  .chat-panel.collapsed {
+    transform: translateX(100%);
+  }
+  body.chat-collapsed {
+    padding-right: 0;
+  }
+
+  .chat-toggle-tab {
+    position: fixed;
+    right: 0;
+    top: 50%;
+    transform: translateY(-50%);
+    z-index: 98;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-right: none;
+    border-radius: 8px 0 0 8px;
+    padding: 12px 6px;
+    cursor: pointer;
+    color: var(--blue);
+    font-size: 16px;
+    line-height: 1;
+    display: none;
+    writing-mode: vertical-lr;
+    letter-spacing: 1px;
+    font-weight: 600;
+    font-size: 11px;
+    gap: 6px;
+    align-items: center;
+    transition: background 0.15s ease;
+  }
+  .chat-toggle-tab:hover {
+    background: var(--surface2);
+  }
+  .chat-toggle-tab .toggle-icon {
+    font-size: 14px;
+    writing-mode: horizontal-tb;
+    margin-bottom: 4px;
+  }
+  body.chat-collapsed .chat-toggle-tab {
+    display: flex;
+  }
+
+  .chat-collapse-btn {
+    background: none;
+    border: none;
+    color: var(--muted);
+    cursor: pointer;
+    font-size: 16px;
+    padding: 4px 6px;
+    border-radius: 4px;
+    line-height: 1;
+    transition: color 0.15s, background 0.15s;
+  }
+  .chat-collapse-btn:hover {
+    color: var(--text);
+    background: var(--surface2);
   }
 
   .chat-panel-header {
@@ -625,6 +684,7 @@
     .data-table th, .data-table td { padding: 8px; }
     body { padding-right: 0; }
     .chat-panel { display: none; }
+    .chat-toggle-tab { display: none !important; }
   }
   @media (max-width: 1024px) {
     .panels-grid { grid-template-columns: repeat(2, 1fr); }
@@ -749,6 +809,12 @@
 
 </main>
 
+<!-- ── AI Chat Toggle Tab (visible when collapsed) ────────────────── -->
+<button class="chat-toggle-tab" id="chat-toggle-tab" onclick="toggleChat()" title="Open AI Assistant">
+  <span class="toggle-icon">◆</span>
+  AI Assistant
+</button>
+
 <!-- ── AI Chat Panel ───────────────────────────────────────────────── -->
 <div class="chat-panel" id="chat-panel">
 
@@ -758,7 +824,10 @@
       AI Assistant
       <span class="chat-title-sub">powered by Claude</span>
     </div>
-    <button class="chat-clear-btn" onclick="clearChat()" title="Clear conversation">Clear</button>
+    <div style="display:flex;align-items:center;gap:6px;">
+      <button class="chat-clear-btn" onclick="clearChat()" title="Clear conversation">Clear</button>
+      <button class="chat-collapse-btn" onclick="toggleChat()" title="Collapse panel">✕</button>
+    </div>
   </div>
 
   <div class="chat-messages" id="chat-messages">
@@ -1317,6 +1386,20 @@ async function sendMessage() {
     msgs.scrollTop = msgs.scrollHeight;
   }
 }
+
+function toggleChat() {
+  const panel = document.getElementById('chat-panel');
+  const isCollapsed = panel.classList.toggle('collapsed');
+  document.body.classList.toggle('chat-collapsed', isCollapsed);
+  localStorage.setItem('pw_chat_collapsed', isCollapsed ? '1' : '0');
+}
+
+(function restoreChatState() {
+  if (localStorage.getItem('pw_chat_collapsed') === '1') {
+    document.getElementById('chat-panel').classList.add('collapsed');
+    document.body.classList.add('chat-collapsed');
+  }
+})();
 
 function clearChat() {
   const msgs = document.getElementById('chat-messages');

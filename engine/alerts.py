@@ -131,6 +131,37 @@ def _paginate(
     return rows
 
 
+_LOCATION_NAMES: dict[str, str] = {
+    "LOC-001": "BROOKPARK",
+    "LOC-002": "NOLMSTEAD",
+    "LOC-003": "S.EUCLID",
+    "LOC-004": "CLARK AUTO",
+    "LOC-005": "PARMA",
+    "LOC-006": "MEDINA",
+    "LOC-007": "BOARDMAN",
+    "LOC-008": "ELYRIA",
+    "LOC-009": "AKRON-GRANT",
+    "LOC-010": "MIDWAY CROSSINGS",
+    "LOC-011": "ERIE ST",
+    "LOC-012": "MAYFIELD",
+    "LOC-013": "CANTON",
+    "LOC-015": "JUNIATA",
+    "LOC-016": "ARCHWOOD",
+    "LOC-017": "EUCLID",
+    "LOC-018": "WARREN",
+    "LOC-020": "ROOTSTOWN",
+    "LOC-021": "INTERNET",
+    "LOC-024": "MENTOR",
+    "LOC-025": "MAIN DC",
+    "LOC-026": "COPLEY",
+    "LOC-027": "CHARDON",
+    "LOC-028": "STRONGSVILLE",
+    "LOC-029": "MIDDLEBURG",
+    "LOC-032": "PERRY",
+    "LOC-033": "CRYSTAL",
+}
+
+
 def _make_alert(
     alert_date: date,
     alert_type: str,
@@ -162,6 +193,7 @@ def _make_alert(
         "severity":        severity,
         "sku_id":          sku_id,
         "location_id":     location_id,
+        "location_name":   _LOCATION_NAMES.get(location_id or "") or None,
         "supplier_id":     supplier_id,
         "message":         message,
         "alert_key":       alert_key,
@@ -688,9 +720,25 @@ def run_alerts(dry_run: bool = False) -> int:
                 "  Rows inserted (new): %d  (existing acknowledged alerts preserved)",
                 rows_written,
             )
-        except Exception:
-            log.exception("Failed to write alerts to database.")
-            return 1
+        except Exception as exc:
+            if "location_name" in str(exc):
+                log.warning("location_name column missing — retrying without it.")
+                for a in all_alerts:
+                    a.pop("location_name", None)
+                try:
+                    resp = (
+                        client.table("alerts")
+                        .upsert(all_alerts, on_conflict="alert_date,alert_key", ignore_duplicates=True)
+                        .execute()
+                    )
+                    rows_written = len(resp.data or [])
+                    log.info("  Rows inserted (retry): %d", rows_written)
+                except Exception:
+                    log.exception("Failed to write alerts (retry) to database.")
+                    return 1
+            else:
+                log.exception("Failed to write alerts to database.")
+                return 1
     elif dry_run:
         rows_written = len(all_alerts)
 

@@ -48,6 +48,43 @@ _FREEZE_THRESHOLD_F = 32.0
 _WEATHER_LOOKAHEAD_DAYS = 7
 _MAPE_LOOKBACK_DAYS = 7
 
+LOCATION_NAMES: dict[str, str] = {
+    "LOC-001": "BROOKPARK",
+    "LOC-002": "NOLMSTEAD",
+    "LOC-003": "S.EUCLID",
+    "LOC-004": "CLARK AUTO",
+    "LOC-005": "PARMA",
+    "LOC-006": "MEDINA",
+    "LOC-007": "BOARDMAN",
+    "LOC-008": "ELYRIA",
+    "LOC-009": "AKRON-GRANT",
+    "LOC-010": "MIDWAY CROSSINGS",
+    "LOC-011": "ERIE ST",
+    "LOC-012": "MAYFIELD",
+    "LOC-013": "CANTON",
+    "LOC-015": "JUNIATA",
+    "LOC-016": "ARCHWOOD",
+    "LOC-017": "EUCLID",
+    "LOC-018": "WARREN",
+    "LOC-020": "ROOTSTOWN",
+    "LOC-021": "INTERNET",
+    "LOC-024": "MENTOR",
+    "LOC-025": "MAIN DC",
+    "LOC-026": "COPLEY",
+    "LOC-027": "CHARDON",
+    "LOC-028": "STRONGSVILLE",
+    "LOC-029": "MIDDLEBURG",
+    "LOC-032": "PERRY",
+    "LOC-033": "CRYSTAL",
+}
+
+RETIRED_LOCATIONS = {"LOC-014", "LOC-019", "LOC-022", "LOC-023", "LOC-030", "LOC-031"}
+
+
+def _loc_display(loc_id: str) -> str:
+    name = LOCATION_NAMES.get(loc_id)
+    return f"{name} ({loc_id})" if name else loc_id
+
 
 # ---------------------------------------------------------------------------
 # Pagination helper
@@ -142,6 +179,7 @@ def _build_alerts(client: Any, today: date) -> dict:
         sev = r.get("severity", "info")
         if sev in summary:
             summary[sev] += 1
+        r["location_display"] = _loc_display(r["location_id"]) if r.get("location_id") else ""
 
     return {
         "summary": summary,
@@ -160,6 +198,10 @@ def _build_reorder(client: Any, today: date) -> list[dict]:
     )
     urgency_order = {"critical": 0, "high": 1, "medium": 2, "low": 3}
     rows.sort(key=lambda r: urgency_order.get(r.get("urgency", "low"), 9))
+    for r in rows:
+        r["location_display"] = _loc_display(r.get("location_id", ""))
+        if r.get("transfer_from_location"):
+            r["transfer_from_display"] = _loc_display(r["transfer_from_location"])
     return rows[:10]
 
 
@@ -229,7 +271,8 @@ def _build_inventory_health(client: Any, today: date) -> dict:
         "low_supply_count": len(low_supply),
         "snapshot_count": len(latest),
         "stockout_pairs": [
-            {"sku_id": r["sku_id"], "location_id": r["location_id"]}
+            {"sku_id": r["sku_id"], "location_id": r["location_id"],
+             "location_display": _loc_display(r["location_id"])}
             for r in stockouts[:10]
         ],
     }
@@ -307,18 +350,30 @@ def _build_forecast_accuracy(client: Any, today: date) -> list[dict]:
 
 
 def _build_location_performance(client: Any, today: date) -> dict:
-    loc_rows = _paginate(
-        client, "locations",
-        "location_id,location_tier,composite_tier_score,"
-        "revenue_score,sku_breadth_score,fill_rate_score,return_rate_score",
-    )
+    try:
+        loc_rows = _paginate(
+            client, "locations",
+            "location_id,location_name,location_tier,composite_tier_score,"
+            "revenue_score,sku_breadth_score,fill_rate_score,return_rate_score,is_active",
+        )
+    except Exception:
+        loc_rows = _paginate(
+            client, "locations",
+            "location_id,location_tier,composite_tier_score,"
+            "revenue_score,sku_breadth_score,fill_rate_score,return_rate_score",
+        )
     tiers: dict[int, list[dict]] = defaultdict(list)
     scores: dict[str, float] = {}
     for r in loc_rows:
+        if r.get("is_active") is False:
+            continue
         tier = int(r.get("location_tier") or 2)
         loc_id = r.get("location_id", "?")
+        loc_name = r.get("location_name") or LOCATION_NAMES.get(loc_id) or loc_id
         tiers[tier].append({
             "location_id": loc_id,
+            "location_name": loc_name,
+            "location_display": f"{loc_name} ({loc_id})",
             "composite_tier_score": float(r.get("composite_tier_score") or 0),
             "revenue_score": float(r.get("revenue_score") or 0),
             "sku_breadth_score": float(r.get("sku_breadth_score") or 0),
@@ -376,8 +431,12 @@ def _build_network_kpis(client: Any, today: date) -> dict:
     except Exception:
         anomaly_count = 0
 
-    loc_rows = _paginate(client, "locations", "location_id")
-    location_count = len(loc_rows)
+    try:
+        loc_rows = _paginate(client, "locations", "location_id,is_active")
+        location_count = sum(1 for r in loc_rows if r.get("is_active") is not False)
+    except Exception:
+        loc_rows = _paginate(client, "locations", "location_id")
+        location_count = len(loc_rows)
 
     try:
         sup_rows = _paginate(client, "supplier_scores", "supplier_id,score_date")
@@ -458,14 +517,14 @@ def _build_anomaly_summary(client: Any, today: date) -> dict:
     except Exception:
         top_low = []
 
-    loc_dist: dict[str, int] = {}
+    loc_dist: dict[str, dict] = {}
     sample_locs = ["LOC-008", "LOC-025", "LOC-004", "LOC-001", "LOC-005"]
     for loc in sample_locs:
         try:
             r = client.table("sales_transactions").select("transaction_id", count="exact").eq("is_anomaly", True).eq("location_id", loc).gte("transaction_date", cutoff).limit(1).execute()
-            loc_dist[loc] = r.count or 0
+            loc_dist[loc] = {"count": r.count or 0, "display": _loc_display(loc)}
         except Exception:
-            loc_dist[loc] = 0
+            loc_dist[loc] = {"count": 0, "display": _loc_display(loc)}
 
     return {
         "total_flagged": total_flagged,
@@ -473,6 +532,7 @@ def _build_anomaly_summary(client: Any, today: date) -> dict:
             {
                 "sku_id": r["sku_id"],
                 "location_id": r["location_id"],
+                "location_display": _loc_display(r["location_id"]),
                 "date": r.get("transaction_date", ""),
                 "qty": float(r.get("qty_sold") or 0),
                 "price": float(r.get("unit_price") or 0),
@@ -484,6 +544,7 @@ def _build_anomaly_summary(client: Any, today: date) -> dict:
             {
                 "sku_id": r["sku_id"],
                 "location_id": r["location_id"],
+                "location_display": _loc_display(r["location_id"]),
                 "date": r.get("transaction_date", ""),
                 "qty": float(r.get("qty_sold") or 0),
                 "revenue": float(r.get("total_revenue") or 0),

@@ -60,6 +60,41 @@ _WEATHER_LOOKAHEAD_DAYS: int = 7
 # Freeze threshold (°F) for weather highlights
 _FREEZE_THRESHOLD_F: float = 20.0
 
+LOCATION_NAMES: dict[str, str] = {
+    "LOC-001": "BROOKPARK",
+    "LOC-002": "NOLMSTEAD",
+    "LOC-003": "S.EUCLID",
+    "LOC-004": "CLARK AUTO",
+    "LOC-005": "PARMA",
+    "LOC-006": "MEDINA",
+    "LOC-007": "BOARDMAN",
+    "LOC-008": "ELYRIA",
+    "LOC-009": "AKRON-GRANT",
+    "LOC-010": "MIDWAY CROSSINGS",
+    "LOC-011": "ERIE ST",
+    "LOC-012": "MAYFIELD",
+    "LOC-013": "CANTON",
+    "LOC-015": "JUNIATA",
+    "LOC-016": "ARCHWOOD",
+    "LOC-017": "EUCLID",
+    "LOC-018": "WARREN",
+    "LOC-020": "ROOTSTOWN",
+    "LOC-021": "INTERNET",
+    "LOC-024": "MENTOR",
+    "LOC-025": "MAIN DC",
+    "LOC-026": "COPLEY",
+    "LOC-027": "CHARDON",
+    "LOC-028": "STRONGSVILLE",
+    "LOC-029": "MIDDLEBURG",
+    "LOC-032": "PERRY",
+    "LOC-033": "CRYSTAL",
+}
+
+
+def _loc_display(loc_id: str) -> str:
+    name = LOCATION_NAMES.get(loc_id)
+    return f"{name} ({loc_id})" if name else loc_id
+
 
 # ---------------------------------------------------------------------------
 # Shared pagination helper
@@ -156,8 +191,9 @@ def _section_alerts(client: Any, today: date) -> str:
     for r in shown:
         sev  = (r.get("severity") or "?").upper()[:8]
         atype = (r.get("alert_type") or "?")[:25]
+        loc_id = r.get("location_id")
         ctx_parts = [p for p in [
-            r.get("sku_id"), r.get("location_id"), r.get("supplier_id")
+            r.get("sku_id"), _loc_display(loc_id) if loc_id else None, r.get("supplier_id")
         ] if p]
         ctx = "  " + " | ".join(ctx_parts) if ctx_parts else ""
         msg = (r.get("message") or "")[:120]
@@ -200,7 +236,7 @@ def _section_reorder(client: Any, today: date) -> str:
     lines = [f"[REORDER — {total} total today, top 10 shown]"]
     for r in top10:
         sku   = r.get("sku_id", "?")
-        loc   = r.get("location_id", "?")
+        loc   = _loc_display(r.get("location_id", "?"))
         rtype = (r.get("recommendation_type") or "po").upper()[:8]
         urg   = (r.get("urgency") or "?").upper()[:8]
         qty   = r.get("qty_to_order") or 0
@@ -208,9 +244,9 @@ def _section_reorder(client: Any, today: date) -> str:
         model = (r.get("forecast_model_used") or "?")[:12]
         days_str = f"{float(days):.1f}d" if days is not None else "N/A"
         from_loc = r.get("transfer_from_location")
-        transfer_str = f"  ← from {from_loc}" if from_loc and rtype == "TRANSFER" else ""
+        transfer_str = f"  ← from {_loc_display(from_loc)}" if from_loc and rtype == "TRANSFER" else ""
         lines.append(
-            f"  {urg:<8}  {sku:<14}  {loc:<10}  "
+            f"  {urg:<8}  {sku:<14}  {loc:<20}  "
             f"{rtype:<8}  qty={qty}  supply={days_str}  [{model}]{transfer_str}"
         )
 
@@ -381,7 +417,7 @@ def _section_inventory_health(client: Any, today: date) -> str:
     if stockout_pairs:
         sample = stockout_pairs[:5]
         sample_str = "  Stockout sample: " + ", ".join(
-            f"{k[0]}@{k[1]}" for k, _ in sample
+            f"{k[0]}@{_loc_display(k[1])}" for k, _ in sample
         )
         if len(stockout_pairs) > 5:
             sample_str += f" (+{len(stockout_pairs) - 5} more)"
@@ -483,10 +519,16 @@ def _section_forecast_accuracy(client: Any, today: date) -> str:
 
 def _section_location_performance(client: Any, today: date) -> str:
     """Tier 1/2/3 counts and any tier-3 locations with critical alerts today."""
-    loc_rows = _paginate(
-        client, "locations",
-        "location_id,location_tier,composite_tier_score",
-    )
+    try:
+        loc_rows = _paginate(
+            client, "locations",
+            "location_id,location_name,location_tier,composite_tier_score,is_active",
+        )
+    except Exception:
+        loc_rows = _paginate(
+            client, "locations",
+            "location_id,location_tier,composite_tier_score",
+        )
 
     if not loc_rows:
         return (
@@ -497,9 +539,13 @@ def _section_location_performance(client: Any, today: date) -> str:
     tiers: dict[int, list[str]] = defaultdict(list)
     tier_scores: dict[str, float] = {}
     for r in loc_rows:
+        if r.get("is_active") is False:
+            continue
         tier = int(r.get("location_tier") or 2)
         loc_id = r.get("location_id", "?")
-        tiers[tier].append(loc_id)
+        loc_name = r.get("location_name") or LOCATION_NAMES.get(loc_id) or loc_id
+        display = f"{loc_name} ({loc_id})"
+        tiers[tier].append(display)
         score = r.get("composite_tier_score")
         if score is not None:
             tier_scores[loc_id] = float(score)
@@ -514,21 +560,24 @@ def _section_location_performance(client: Any, today: date) -> str:
         f"{', '.join(tiers.get(3, []))}",
     ]
 
-    tier3_locs = tiers.get(3, [])
-    if tier3_locs:
+    tier3_loc_ids = [
+        r.get("location_id", "?") for r in loc_rows
+        if int(r.get("location_tier") or 2) == 3 and r.get("is_active") is not False
+    ]
+    if tier3_loc_ids:
         alert_rows = _paginate(
             client, "alerts",
             "location_id,severity,alert_type",
             filters={"alert_date": today.isoformat()},
             eq_bool={"is_acknowledged": False},
-            in_filters={"location_id": tier3_locs},
+            in_filters={"location_id": tier3_loc_ids},
         )
         critical_t3 = [
             r for r in alert_rows
             if r.get("severity") == "critical"
         ]
         if critical_t3:
-            locs_with_crit = sorted({r["location_id"] for r in critical_t3})
+            locs_with_crit = sorted({_loc_display(r["location_id"]) for r in critical_t3})
             lines.append(
                 f"  ** Tier 3 locations with critical alerts: "
                 f"{', '.join(locs_with_crit)} **"

@@ -223,7 +223,7 @@
 
   .tier-grid { display: flex; flex-direction: column; gap: 6px; }
   .loc-row {
-    display: grid; grid-template-columns: 90px 1fr 60px; align-items: center; gap: 10px;
+    display: grid; grid-template-columns: 140px 1fr 60px; align-items: center; gap: 10px;
     padding: 8px 12px; border-radius: var(--radius); background: var(--surface2);
     border: 1px solid var(--border2); font-size: 13px;
   }
@@ -701,7 +701,7 @@ function renderAlerts(items) {
     var sev = a.severity === 'critical' ? badge('critical','CRITICAL') : badge('warning','WARNING');
     var type = escHtml(a.alert_type || '').replace(/_/g,' ');
     var sku = a.sku_id ? '<span class="sku-id">' + escHtml(a.sku_id) + '</span>' : '';
-    var loc = a.location_id ? '<span class="loc-id">' + escHtml(a.location_id) + '</span>' : '';
+    var loc = a.location_display ? '<span class="loc-id">' + escHtml(a.location_display) + '</span>' : (a.location_id ? '<span class="loc-id">' + escHtml(a.location_id) + '</span>' : '');
     var sup = a.supplier_id ? '<span class="loc-id">' + escHtml(a.supplier_id) + '</span>' : '';
     var ctx = [sku, loc, sup].filter(function(s) { return s; }).join(' ');
     var msg = escHtml((a.message || '').substring(0, 140));
@@ -767,9 +767,10 @@ function renderReorder(items) {
     var rtype = (r.recommendation_type || 'po').toUpperCase();
     var tb = rtype === 'TRANSFER' ? badge('transfer','TRANSFER') : badge('po','PO');
     var days = r.days_of_supply_remaining != null ? fmtNum(r.days_of_supply_remaining,1) + 'd' : '\u2014';
-    var fromLoc = r.transfer_from_location ? '\u2190 ' + escHtml(r.transfer_from_location) : '';
+    var fromLoc = r.transfer_from_display ? '\u2190 ' + escHtml(r.transfer_from_display) : (r.transfer_from_location ? '\u2190 ' + escHtml(r.transfer_from_location) : '');
+    var locLabel = r.location_display || r.location_id;
     return '<tr><td>' + ub + '</td><td><span class="sku-id">' + escHtml(r.sku_id) + '</span></td>' +
-      '<td><span class="loc-id">' + escHtml(r.location_id) + '</span> <span style="color:var(--muted);font-size:11px">' + fromLoc + '</span></td>' +
+      '<td><span class="loc-id">' + escHtml(locLabel) + '</span> <span style="color:var(--muted);font-size:11px">' + fromLoc + '</span></td>' +
       '<td style="font-weight:600">' + fmtNum(r.qty_to_order) + ' units</td><td>' + days + ' supply</td><td>' + tb + '</td></tr>';
   }).join('');
   document.getElementById('reorder-body').innerHTML =
@@ -823,7 +824,7 @@ function renderSupplierDetail(items) {
 function renderInventoryHealth(data) {
   document.getElementById('inventory-updated').textContent = 'Updated ' + nowStr();
   var pairs = (data.stockout_pairs || []).slice(0,5).map(function(p) {
-    return '<span class="sku-id" style="font-size:11px">' + escHtml(p.sku_id) + '@' + escHtml(p.location_id) + '</span>';
+    return '<span class="sku-id" style="font-size:11px">' + escHtml(p.sku_id) + '@' + escHtml(p.location_display || p.location_id) + '</span>';
   }).join(', ');
   document.getElementById('inventory-body').innerHTML =
     '<div class="stat-block">' +
@@ -863,7 +864,10 @@ function renderAnomalySummary(data) {
 
   if (data.location_distribution) {
     var locHtml = Object.keys(data.location_distribution).map(function(loc) {
-      return '<span style="font-size:11px"><span class="loc-id">' + escHtml(loc) + '</span> ' + fmtNum(data.location_distribution[loc]) + '</span>';
+      var ld = data.location_distribution[loc];
+      var display = (typeof ld === 'object') ? ld.display || loc : loc;
+      var count = (typeof ld === 'object') ? ld.count : ld;
+      return '<span style="font-size:11px"><span class="loc-id">' + escHtml(display) + '</span> ' + fmtNum(count) + '</span>';
     }).join(' &nbsp; ');
     statsHtml += '<div style="flex:1"><div style="font-size:11px;color:var(--muted);text-transform:uppercase;margin-bottom:4px">By Location (sample)</div>' + locHtml + '</div>';
   }
@@ -875,7 +879,7 @@ function renderAnomalySummary(data) {
       '<table class="data-table"><thead><tr><th>SKU</th><th>Location</th><th>Date</th><th class="right">Qty</th><th class="right">Revenue</th></tr></thead><tbody>' +
       data.top_high.slice(0, 6).map(function(r) {
         return '<tr><td><span class="sku-id">' + escHtml(r.sku_id) + '</span></td>' +
-          '<td><span class="loc-id">' + escHtml(r.location_id) + '</span></td>' +
+          '<td><span class="loc-id">' + escHtml(r.location_display || r.location_id) + '</span></td>' +
           '<td style="font-size:12px">' + (r.date || '\u2014') + '</td>' +
           '<td class="right anomaly-high" style="font-weight:600">' + fmtNum(r.qty) + '</td>' +
           '<td class="right">' + fmtMoney(r.revenue) + '</td></tr>';
@@ -889,7 +893,7 @@ function renderAnomalySummary(data) {
       '<table class="data-table"><thead><tr><th>SKU</th><th>Location</th><th>Date</th><th class="right">Qty</th><th class="right">Revenue</th></tr></thead><tbody>' +
       data.top_low.slice(0, 5).map(function(r) {
         return '<tr><td><span class="sku-id">' + escHtml(r.sku_id) + '</span></td>' +
-          '<td><span class="loc-id">' + escHtml(r.location_id) + '</span></td>' +
+          '<td><span class="loc-id">' + escHtml(r.location_display || r.location_id) + '</span></td>' +
           '<td style="font-size:12px">' + (r.date || '\u2014') + '</td>' +
           '<td class="right anomaly-neg" style="font-weight:600">' + fmtNum(r.qty) + '</td>' +
           '<td class="right">' + fmtMoney(r.revenue) + '</td></tr>';
@@ -922,9 +926,10 @@ function renderLocations(data) {
       var score = l.composite_tier_score || 0;
       var scoreColor = score > 0.5 ? 'var(--success)' : score > 0.25 ? 'var(--info)' : 'var(--warning)';
       var barPct = Math.min(score * 100 / 0.8, 100);
+      var locLabel = l.location_name || l.location_display || l.location_id;
 
       return '<div class="loc-row ' + (isCrit ? 'critical-loc' : '') + '">' +
-        '<div class="loc-name">' + escHtml(l.location_id) + '</div>' +
+        '<div class="loc-name">' + escHtml(locLabel) + '</div>' +
         '<div><div style="display:flex;align-items:center;gap:8px">' +
         '<div class="score-bar-bg" style="flex:1"><div class="score-bar-fill" style="width:' + barPct + '%;background:' + scoreColor + '"></div></div>' +
         '<span style="font-size:10px;color:var(--muted)">' +

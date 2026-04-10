@@ -319,8 +319,10 @@ Live connection to Autologue's Autocube data warehouse via XMLA/SOAP protocol.
 | 32 | LOC-032 | PERRY | 100,139 | |
 | 33 | LOC-033 | CRYSTAL | 28,615 | |
 
-**Gap numbers** (not in Product cube): 14, 19, 22, 23, 30, 31 — likely closed/retired locations.
-**Special locations**: LOC-021 (INTERNET) has negative on-hand (returns/adjustments). LOC-025 (DC) is the main distribution center with 585K items.
+**Gap numbers** (not in Product cube): 14, 19, 22, 23, 30, 31 — closed/retired locations (is_active=FALSE in migration 016).
+**Special locations**: LOC-021 (INTERNET) has negative on-hand (-1,795 units) — flagged as data_quality_issue (severity=warning). LOC-025 (MAIN DC) is the main distribution center with 585K items.
+
+**Migration 016** (`db/migrations/016_location_names.sql`): Adds `location_name` and `is_active` to `locations` table, adds `location_name` to `alerts` table, populates all 27 location names, inserts retired locations as is_active=FALSE, backfills existing alert location names, inserts LOC-021 DQI entry. Dashboard and context_builder use LOCATION_NAMES fallback mapping so they work before and after migration is applied.
 
 ## Environment Variables (.env)
 | Variable | Required | Description |
@@ -358,9 +360,9 @@ All DDL is idempotent (IF NOT EXISTS) — safe to re-run.
 | `forecast_results` | sku_id, forecast_date, model_type (prophet/lightgbm/rolling_avg) | Live |
 | `supplier_scores` | supplier_id, score_date, composite_score, risk_flag | Live |
 | `reorder_recommendations` | sku_id, location_id, recommendation_date, qty_to_order, recommendation_type (po/transfer), urgency, is_approved | Live |
-| `alerts` | alert_id, alert_type, sku_id, location_id, severity, is_acknowledged | Live (migration 008) |
+| `alerts` | alert_id, alert_type, sku_id, location_id, location_name, severity, is_acknowledged | Live (migration 008, 016 adds location_name) |
 | `accuracy_reports` | report_date, model_type, abc_class, avg_mape, avg_mae, bias, hit_rate_20pct | Pending migration 011 |
-| `locations` | location_id, location_tier (1/2/3), composite_score, fill_rate, revenue_rank, sku_breadth, return_rate | Pending migration 009 |
+| `locations` | location_id, location_name, is_active, location_tier (1/2/3), composite_score, fill_rate, revenue_rank, sku_breadth, return_rate | Pending migrations 009, 016 |
 | `sku_location_demand_quality` | sku_id, location_id, demand_quality_score (0.0–1.0), residual_event_count, quality_tier | Pending migration 009 |
 
 ## Nightly Pipeline Execution Order

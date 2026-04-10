@@ -58,6 +58,7 @@ Acts as shared foundation code (config, DB connection, logging utilities) and sy
 - Basket analysis (mlxtend) — co-purchase signals ← *WEEKLY PIPELINE (Phase 2)*
 - Customer churn predictor
 - Dead stock classifier ← *COMPLETE* (see `ml/dead_stock.py`)
+- Forecast accuracy feedback loop ← *COMPLETE* (see `ml/accuracy.py`)
 - What-if scenario engine
 
 ### Phase 3 — Strategy layer (months 6–12)
@@ -162,6 +163,7 @@ partswatch-ai/
 ├── ml/
 │   ├── __init__.py
 │   ├── anomaly.py                   # Isolation Forest — flags anomalous sales days
+│   ├── accuracy.py                  # Forecast accuracy measurement — MAPE/MAE/bias/hit-rate
 │   ├── forecast_rolling.py          # 13-week rolling avg — C-class SKU forecasts
 │   └── forecast_lgbm.py             # LightGBM gradient-boosted demand forecast — B-class SKUs
 ├── engine/
@@ -316,6 +318,7 @@ All DDL is idempotent (IF NOT EXISTS) — safe to re-run.
 | `supplier_scores` | supplier_id, score_date, composite_score, risk_flag | Live |
 | `reorder_recommendations` | sku_id, location_id, recommendation_date, qty_to_order, recommendation_type (po/transfer), urgency, is_approved | Live |
 | `alerts` | alert_id, alert_type, sku_id, location_id, severity, is_acknowledged | Live (migration 008) |
+| `accuracy_reports` | report_date, model_type, abc_class, avg_mape, avg_mae, bias, hit_rate_20pct | Pending migration 011 |
 | `locations` | location_id, location_tier (1/2/3), composite_score, fill_rate, revenue_rank, sku_breadth, return_rate | Pending migration 009 |
 | `sku_location_demand_quality` | sku_id, location_id, demand_quality_score (0.0–1.0), residual_event_count, quality_tier | Pending migration 009 |
 

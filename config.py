@@ -79,10 +79,21 @@ ABC_CLASS_B_TOP_N: int = 40_000    # Next 30K SKUs → LightGBM
 ROLLING_AVERAGE_WEEKS: int = 13    # C-class rolling window
 
 # ---------------------------------------------------------------------------
+# Autocube (Autologue-hosted OLAP cube via XMLA/SOAP over HTTPS)
+# ---------------------------------------------------------------------------
+AUTOCUBE_SERVER: str = _optional("AUTOCUBE_SERVER", "")
+AUTOCUBE_USER: str = _optional("AUTOCUBE_USER", "")
+AUTOCUBE_PASSWORD: str = _optional("AUTOCUBE_PASSWORD", "")
+AUTOCUBE_CATALOG: str = _optional("AUTOCUBE_CATALOG", "")
+AUTOCUBE_CUBE: str = _optional("AUTOCUBE_CUBE", "Sales Detail")
+AUTOCUBE_XMLA_PATH: str = _optional("AUTOCUBE_XMLA_PATH", "/msmdpump.dll")
+AUTOCUBE_COLUMN_MAP_PATH: str = "config/autocube_column_map.json"
+
+# ---------------------------------------------------------------------------
 # PartsWatch data extraction
 # ---------------------------------------------------------------------------
 
-# Which data source to use: csv | odbc | api
+# Which data source to use: csv | odbc | api | autocube
 # Switching sources = change this one variable. Nothing else changes.
 PARTSWATCH_SOURCE: str = _optional("PARTSWATCH_SOURCE", "csv").lower()
 

@@ -9,9 +9,10 @@ tomorrow requires changing exactly ONE environment variable — PARTSWATCH_SOURC
 Nothing else in the codebase changes.
 
 DATA SOURCES
-    csv   — reads CSV or Excel files from a local folder (default)
-    odbc  — direct ODBC connection to PartsWatch DB (stub; ready to implement)
-    api   — REST API connection to PartsWatch (stub; ready to implement)
+    csv      — reads CSV or Excel files from a local folder (default)
+    odbc     — direct ODBC connection to PartsWatch DB (stub; ready to implement)
+    api      — REST API connection to PartsWatch (stub; ready to implement)
+    autocube — Autologue-hosted OLAP cube via XMLA/SOAP (extract/autocube_pull.py)
 
 COLUMN MAPPING
     config/partswatch_column_map.json maps our schema field names to whatever
@@ -351,8 +352,12 @@ def get_data_source() -> DataSource:
         from config import PARTSWATCH_API_URL, PARTSWATCH_API_KEY
         return APIDataSource(PARTSWATCH_API_URL, PARTSWATCH_API_KEY)
 
+    if source == "autocube":
+        from extract.autocube_pull import AutocubeDataSource
+        return AutocubeDataSource()
+
     raise ValueError(
-        f"Unknown PARTSWATCH_SOURCE='{source}'. Valid values: csv | odbc | api"
+        f"Unknown PARTSWATCH_SOURCE='{source}'. Valid values: csv | odbc | api | autocube"
     )
 
 

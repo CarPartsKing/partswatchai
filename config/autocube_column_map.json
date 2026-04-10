@@ -1,0 +1,34 @@
+{
+  "_comment": "Mapping from Autocube Sales Detail cube dimension/measure names to PartsWatch schema columns.",
+  "_cube": "Sales Detail",
+  "_endpoint": "/msmdpump.dll",
+  "_auth": "NTLM",
+  "sales_transactions": {
+    "transaction_date": "[Sales Date].[Invoice Date].[Inv Date]",
+    "sku_id":           "[Product].[Prod Code].[Prod Code]",
+    "location_id":      "[Location].[Loc].[Loc]",
+    "qty_sold":         "[Measures].[Qty Ship]",
+    "unit_price":       "[Measures].[Unit Price]",
+    "total_amount":     "[Measures].[Ext Price]",
+    "cost_per_unit":    "[Measures].[Unit Cost]",
+    "ext_cost":         "[Measures].[Ext Cost]",
+    "gross_profit":     "[Measures].[Gross Profit]",
+    "gross_profit_pct": "[Measures].[Gross Profit %]"
+  },
+  "supplemental_dimensions": {
+    "product_line":     "[Product].[Prod Line].[Prod Line]",
+    "product_vendor":   "[Product].[Vendor 1].[Vendor 1]",
+    "product_status":   "[Product].[Status].[Status]",
+    "customer_number":  "[Customer].[Cust No].[Cust No]",
+    "customer_type":    "[Customer].[Customer Type].[Customer Type]",
+    "tran_code":        "[Tran Code].[Tran Code].[Tran Code]"
+  },
+  "inventory_measures": {
+    "on_hand_qty":      "[Measures].[On Hand Qty]",
+    "min_qty":          "[Measures].[Min Qty]",
+    "max_qty":          "[Measures].[Max Qty]",
+    "qty_on_order":     "[Measures].[Qty On Order]",
+    "stock_qty":        "[Measures].[Stock Qty]",
+    "ext_cost_on_hand": "[Measures].[Ext Cost On Hand]"
+  }
+}

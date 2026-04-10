@@ -1,0 +1,119 @@
+New highest priority task — build our primary 
+data source connection.
+
+We have discovered our Datatron data is available 
+via an Autologue-hosted OLAP cube. This replaces 
+all CSV/Datatron approaches and becomes our 
+primary data pipeline.
+
+CONNECTION DETAILS (loaded from Replit Secrets):
+AUTOCUBE_SERVER=https://autocubedata.autologue.com
+AUTOCUBE_USER=AUTOCUBE\CPW001
+AUTOCUBE_PASSWORD=[from AUTOCUBE_PASSWORD secret]
+AUTOCUBE_CATALOG=AutoCube_DTR_23160
+Cube name: Sales Detail
+Command type: Cube
+
+CRITICAL SECURITY REQUIREMENTS — implement all 
+of these before anything else:
+
+1. The script ONLY ever executes MDX SELECT 
+   queries — never INSERT, UPDATE, DELETE, 
+   DROP, or CREATE under any circumstances
+
+2. Add a query_validator() function that checks 
+   every query string before execution. If the 
+   query contains anything other than SELECT, 
+   WITH, FROM, WHERE, ON, MEMBERS, CHILDREN — 
+   raise a SecurityException and refuse to run. 
+   Log the attempt.
+
+3. All MDX queries are hardcoded constants at 
+   the top of the file — no dynamic query 
+   construction from external input
+
+4. Add 'Mode=Read' to the connection string 
+   where the MSOLAP provider supports it
+
+5. Wrap every database operation in try/except — 
+   on any unexpected error, log it and exit 
+   cleanly. Never retry automatically.
+
+6. Never write anything back to the Autocube 
+   connection — all writes go to Supabase only
+
+7. Log every query executed with full timestamp 
+   and row count returned — complete audit trail
+
+8. Add a CONNECTION_TEST mode that verifies 
+   connectivity and lists available dimensions 
+   without pulling any data
+
+IMPORTANT TECHNICAL NOTE:
+MSOLAP is a Windows COM provider and will NOT 
+work on Linux (Replit runs Linux). The connection 
+must use the XMLA/SOAP HTTP endpoint that 
+Microsoft Analysis Services exposes over HTTPS.
+
+Research and evaluate these Python options:
+- xmla library (Python XMLA client)
+- pyadomd (Python ADO.MD)
+- requests with raw XMLA/SOAP HTTP calls
+- adomd via Python
+
+Pick the most reliable option that works on 
+Linux without Windows COM dependencies.
+If none work reliably on Linux, fall back to 
+running this extraction on Windows (local 
+machine) and pushing results to Supabase — 
+document this clearly.
+
+BUILD extract/autocube_pull.py to:
+
+1. CONNECTION_TEST mode first:
+   python -m extract.autocube_pull --test
+   Verify connection, list available dimensions 
+   and measures in Sales Detail cube, log 
+   everything found, do not pull data
+
+2. FULL mode (run once for history):
+   python -m extract.autocube_pull --mode full
+   Pull 3 years of sales history from the 
+   Sales Detail cube
+   Map fields to our schema via 
+   config/autocube_column_map.json
+   Load into sales_transactions in Supabase
+   Log: rows pulled, rows loaded, runtime
+
+3. INCREMENTAL mode (nightly):
+   python -m extract.autocube_pull --mode incremental
+   Pull previous day only
+   Deduplicate before inserting
+   Log: rows pulled, rows loaded, runtime
+
+4. Add AUTOCUBE as a new source type in the 
+   DataSource factory in partswatch_pull.py
+   PARTSWATCH_SOURCE=autocube routes to this file
+
+BUILD config/autocube_column_map.json:
+Placeholder mapping — we will update field 
+names after the --test mode reveals what 
+dimensions are actually available in the cube
+
+UPDATE .env.example with new variables:
+AUTOCUBE_SERVER=https://autocubedata.autologue.com
+AUTOCUBE_USER=
+AUTOCUBE_PASSWORD=
+AUTOCUBE_CATALOG=AutoCube_DTR_23160
+
+AFTER BUILDING:
+Run python -m extract.autocube_pull --test
+Show me exactly what dimensions and measures 
+are available in the Sales Detail cube.
+That output tells us what data we actually 
+have access to before we write the main 
+data pull queries.
+
+Follow all coding standards — logging, 
+error handling, docstrings, audit trail.
+New capability = new file.

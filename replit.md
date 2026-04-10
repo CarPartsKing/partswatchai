@@ -138,7 +138,8 @@ partswatch-ai/
 ├── extract/
 │   ├── __init__.py
 │   ├── weather_pull.py              # Open-Meteo → weather_log (1,110 rows live)
-│   └── partswatch_pull.py          # PartsWatch → 4 Supabase tables
+│   ├── partswatch_pull.py          # PartsWatch → 4 Supabase tables
+│   └── autocube_pull.py            # Autocube XMLA/SOAP OLAP extraction (NTLM auth)
 ├── sample_data/                     # Realistic test CSVs (15 SKUs, 5 locations)
 │   ├── sku_master.csv
 │   ├── sales_transactions.csv       # 55 transactions Jan–Mar 2026
@@ -201,11 +202,52 @@ Change ONE environment variable — nothing else in the codebase changes:
 | `datatron` | **Current** — Datatron extraction (pre-PartsWatch system) |
 | `csv` | Reads CSV/Excel exports from `PARTSWATCH_CSV_PATH` folder (when PartsWatch goes live) |
 | `api` | REST API (stub — ready to implement when Autologue provides credentials) |
+| `autocube` | **Autocube OLAP** — XMLA/SOAP via NTLM auth against Autologue's SSAS cube |
 
 When real PartsWatch exports arrive from Autologue:
 1. Update column values in `config/partswatch_column_map.json`
 2. Drop real export files into `PARTSWATCH_CSV_PATH`
 3. Run `python -m extract.partswatch_pull`
+
+## Autocube OLAP Integration
+Live connection to Autologue's Autocube data warehouse via XMLA/SOAP protocol.
+
+**Connection (verified):**
+- Endpoint: `https://autocubedata.autologue.com/msmdpump.dll`
+- Auth: NTLM (`AUTOCUBE\CPW001`)
+- Catalog: `AutoCube_DTR_23160`
+- Cubes: Product, **Sales Detail** (primary), Sales Summary
+
+**Key Dimensions (Sales Detail cube):**
+| Dimension | Hierarchy | Levels |
+|-----------|-----------|--------|
+| Sales Date | Invoice Date | Year → Qtr → Month → Inv Date |
+| Product | Prod Code | flat (part number) |
+| Product | Prod Line PN | Prod Line → Prod Code |
+| Product | Prod PN Loc | Prod Line → Subline → Product ID |
+| Product | Vendor 1 | flat (primary vendor) |
+| Location | Loc | flat (store code) |
+| Customer | Customer | flat |
+| Customer | Cust No | flat |
+| Tran Code | Tran Code | flat |
+
+**Key Measures (Sales Detail):**
+- Sales: Qty Ship, Unit Price, Ext Price, Unit Cost, Ext Cost, Gross Profit, Gross Profit %
+- Inventory: On Hand Qty, Min Qty, Max Qty, Stock Qty, Qty On Order, Ext Cost On Hand
+- Trending: MTD/YTD/Prev 12 Mo for Qty, Sales, Cost, GP$ — all with LY comparison and % change
+- Period: 1M Ago through 6M Ago for Qty, Sales, Cost, GP$
+
+**Column map:** `config/autocube_column_map.json` — maps cube dimension/measure names to PartsWatch schema fields
+
+**MDX Queries (hardcoded, no dynamic construction):**
+- `MDX_FULL_SALES` — full extract: date × product × location with 7 core measures
+- `MDX_INCREMENTAL_DAY` — single-day extract by date key
+
+**Security:**
+- `query_validator()` blocks INSERT/UPDATE/DELETE/DROP/ALTER/CREATE/EXEC/GRANT/REVOKE
+- Only hardcoded MDX templates used (date_key is the only parameterized value)
+
+**Secrets required:** `AUTOCUBE_SERVER`, `AUTOCUBE_USER`, `AUTOCUBE_PASSWORD`, `AUTOCUBE_CATALOG`
 
 ## Environment Variables (.env)
 | Variable | Required | Description |
@@ -220,6 +262,12 @@ When real PartsWatch exports arrive from Autologue:
 | `PARTSWATCH_API_KEY` | No | API key (only if SOURCE=api) |
 | `WEATHER_LAT` | No | NE Ohio latitude (default: 41.4993) |
 | `WEATHER_LON` | No | NE Ohio longitude (default: -81.6944) |
+| `AUTOCUBE_SERVER` | No | Autocube XMLA server URL (only if SOURCE=autocube) |
+| `AUTOCUBE_USER` | No | Autocube NTLM username (DOMAIN\\user format) |
+| `AUTOCUBE_PASSWORD` | No | Autocube NTLM password |
+| `AUTOCUBE_CATALOG` | No | Autocube catalog name |
+| `AUTOCUBE_CUBE` | No | Cube name (default: Sales Detail) |
+| `AUTOCUBE_XMLA_PATH` | No | XMLA endpoint path (default: /msmdpump.dll) |
 | `LOG_LEVEL` | No | INFO / DEBUG / WARNING (default: INFO) |
 | `ENVIRONMENT` | No | development / production (default: development) |
 

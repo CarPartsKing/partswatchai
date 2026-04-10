@@ -429,29 +429,40 @@ def _build_anomaly_summary(client: Any, today: date) -> dict:
     except Exception:
         total_flagged = 0
 
-    top_high = _paginate(
-        client, "sales_transactions",
-        "sku_id,location_id,transaction_date,qty_sold,unit_price,total_revenue",
-        eq_bool={"is_anomaly": True},
-        order_col="qty_sold",
-        order_desc=True,
-        limit=8,
-    )
+    cutoff = (today - timedelta(days=90)).isoformat()
+    try:
+        top_high = (
+            client.table("sales_transactions")
+            .select("sku_id,location_id,transaction_date,qty_sold,unit_price,total_revenue")
+            .eq("is_anomaly", True)
+            .gte("transaction_date", cutoff)
+            .order("qty_sold", desc=True)
+            .limit(8)
+            .execute()
+            .data or []
+        )
+    except Exception:
+        top_high = []
 
-    top_low = _paginate(
-        client, "sales_transactions",
-        "sku_id,location_id,transaction_date,qty_sold,unit_price,total_revenue",
-        eq_bool={"is_anomaly": True},
-        order_col="qty_sold",
-        order_desc=False,
-        limit=5,
-    )
+    try:
+        top_low = (
+            client.table("sales_transactions")
+            .select("sku_id,location_id,transaction_date,qty_sold,unit_price,total_revenue")
+            .eq("is_anomaly", True)
+            .gte("transaction_date", cutoff)
+            .order("qty_sold", desc=False)
+            .limit(5)
+            .execute()
+            .data or []
+        )
+    except Exception:
+        top_low = []
 
     loc_dist: dict[str, int] = {}
     sample_locs = ["LOC-008", "LOC-025", "LOC-004", "LOC-001", "LOC-005"]
     for loc in sample_locs:
         try:
-            r = client.table("sales_transactions").select("transaction_id", count="exact").eq("is_anomaly", True).eq("location_id", loc).limit(1).execute()
+            r = client.table("sales_transactions").select("transaction_id", count="exact").eq("is_anomaly", True).eq("location_id", loc).gte("transaction_date", cutoff).limit(1).execute()
             loc_dist[loc] = r.count or 0
         except Exception:
             loc_dist[loc] = 0

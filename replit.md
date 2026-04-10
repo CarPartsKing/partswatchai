@@ -61,7 +61,7 @@ Acts as shared foundation code (config, DB connection, logging utilities) and sy
 - If accessible: primary demand indicator
 
 **8. Additional ML models**
-- Basket analysis (mlxtend) — co-purchase signals ← *WEEKLY PIPELINE (Phase 2)*
+- Basket analysis (mlxtend) — co-purchase signals ← *COMPLETE* (see `ml/basket.py`)
 - Customer churn predictor
 - Dead stock classifier ← *COMPLETE* (see `ml/dead_stock.py`)
 - Forecast accuracy feedback loop ← *COMPLETE* (see `ml/accuracy.py`)

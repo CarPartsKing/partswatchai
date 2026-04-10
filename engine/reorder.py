@@ -96,6 +96,12 @@ URGENCY_CRITICAL_DAYS: float = 3.0
 URGENCY_WARNING_DAYS: float = 7.0
 """days_of_supply_remaining in [CRITICAL, WARNING) → urgency = 'warning'."""
 
+BASKET_CONFIDENCE_THRESHOLD: float = 0.30
+"""Minimum confidence for a basket rule to trigger a co-purchase recommendation."""
+
+BASKET_LOW_STOCK_DAYS: float = 14.0
+"""If a consequent SKU has fewer than this many days of supply, include it."""
+
 _PAGE_SIZE: int = 1_000
 """Supabase PostgREST page size for paginated fetches."""
 
@@ -406,6 +412,111 @@ def _select_forecasts(
 
 
 # ---------------------------------------------------------------------------
+# Basket-triggered co-purchase recommendations
+# ---------------------------------------------------------------------------
+
+def _add_basket_triggered(
+    client: Any,
+    recommendations: list[dict],
+    inventory_summary: dict[tuple[str, str], dict],
+    today: date,
+    counts: dict[str, int],
+) -> int:
+    already_recommended = {
+        (r["sku_id"], r["location_id"]) for r in recommendations
+    }
+
+    try:
+        rules = _paginate(
+            client, "basket_rules",
+            "antecedent_sku,consequent_sku,confidence,lift",
+            gte_filters={"confidence": str(BASKET_CONFIDENCE_THRESHOLD)},
+        )
+    except Exception:
+        log.warning("basket_rules table not available — skipping basket enhancement.")
+        return 0
+
+    if not rules:
+        log.info("No basket rules found — skipping basket-triggered recommendations.")
+        return 0
+
+    trigger_skus = {r["sku_id"] for r in recommendations}
+
+    rule_map: dict[str, list[dict]] = defaultdict(list)
+    for r in rules:
+        rule_map[r["antecedent_sku"]].append(r)
+
+    added = 0
+    for trigger_sku in trigger_skus:
+        if trigger_sku not in rule_map:
+            continue
+        for rule in rule_map[trigger_sku]:
+            cons_sku = rule["consequent_sku"]
+
+            for (sku, loc), summary in inventory_summary.items():
+                if sku != cons_sku:
+                    continue
+                if (sku, loc) in already_recommended:
+                    continue
+
+                days_supply = summary["days_of_supply_remaining"]
+                if days_supply >= BASKET_LOW_STOCK_DAYS:
+                    continue
+
+                avg_daily = summary["avg_daily_forecast"]
+                qty_on_hand = summary["qty_on_hand"]
+                qty_on_order = summary["qty_on_order"]
+                reorder_threshold = summary["reorder_threshold"]
+
+                demand_over_coverage = avg_daily * reorder_threshold
+                qty_to_order = max(0.0, demand_over_coverage - qty_on_hand - qty_on_order)
+                if qty_to_order < MIN_ORDER_QTY:
+                    continue
+
+                if days_supply < URGENCY_CRITICAL_DAYS:
+                    urgency = "critical"
+                elif days_supply < URGENCY_WARNING_DAYS:
+                    urgency = "warning"
+                else:
+                    urgency = "normal"
+
+                rec = {
+                    "sku_id":                   sku,
+                    "location_id":              loc,
+                    "recommendation_date":      today.isoformat(),
+                    "qty_to_order":             round(qty_to_order, 4),
+                    "supplier_id":              summary.get("supplier_id"),
+                    "recommendation_type":      "basket_triggered",
+                    "transfer_from_location":   None,
+                    "days_of_supply_remaining": round(days_supply, 2),
+                    "urgency":                  urgency,
+                    "forecast_model_used":      summary.get("model_used"),
+                    "supplier_risk_flag":       summary.get("supplier_risk_flag"),
+                    "is_approved":              False,
+                    "approved_by":              None,
+                    "approved_at":              None,
+                }
+                recommendations.append(rec)
+                already_recommended.add((sku, loc))
+                counts[urgency] += 1
+                added += 1
+
+                log.info(
+                    "  BASKET %-12s %-10s  trigger=%-12s  conf=%.0f%%  lift=%.1fx  qty=%.2f",
+                    sku, loc, trigger_sku,
+                    float(rule["confidence"]) * 100,
+                    float(rule["lift"]),
+                    qty_to_order,
+                )
+
+    if added:
+        log.info("Basket-triggered recommendations added: %d", added)
+    else:
+        log.info("No basket-triggered recommendations generated.")
+    return added
+
+
+# ---------------------------------------------------------------------------
 # Core recommendation engine
 # ---------------------------------------------------------------------------
 
@@ -628,6 +739,13 @@ def run_reorder(dry_run: bool = False) -> int:
         )
 
     # ------------------------------------------------------------------
+    # 3b. Basket-triggered recommendations
+    # ------------------------------------------------------------------
+    basket_added = _add_basket_triggered(
+        client, recommendations, inventory_summary, today, counts,
+    )
+
+    # ------------------------------------------------------------------
     # 4. Write to database
     # ------------------------------------------------------------------
     rows_written = 0
@@ -666,6 +784,7 @@ def run_reorder(dry_run: bool = False) -> int:
     log.info("  Recommendations generated:     %d", len(recommendations))
     log.info("    ↳ transfers:                 %d", counts["transfer"])
     log.info("    ↳ purchase orders:           %d", counts["po"])
+    log.info("    ↳ basket-triggered:          %d", basket_added)
     log.info("    ↳ skipped (open POs cover):  %d", counts["skipped_covered"])
     log.info("  By urgency:")
     log.info("    ↳ critical  (< %.0fd):       %d",

@@ -589,6 +589,44 @@ def _section_location_performance(client: Any, today: date) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Section 8 — Basket rules (co-purchase intelligence)
+# ---------------------------------------------------------------------------
+
+def _section_basket_rules(client: Any, today: date) -> str:
+    try:
+        rows = _paginate(
+            client, "basket_rules",
+            "antecedent_sku,consequent_sku,confidence,lift,transaction_count",
+            limit=50,
+        )
+    except Exception:
+        return "[BASKET RULES]\n  Table not available yet.\n"
+
+    if not rows:
+        return "[BASKET RULES]\n  No co-purchase rules generated yet.\n"
+
+    sorted_rows = sorted(rows, key=lambda r: float(r.get("lift", 0)), reverse=True)
+    top5 = sorted_rows[:5]
+
+    lines = ["[BASKET RULES — co-purchase intelligence]"]
+    for r in top5:
+        ant = r.get("antecedent_sku", "?")
+        con = r.get("consequent_sku", "?")
+        conf = float(r.get("confidence", 0)) * 100
+        lift = float(r.get("lift", 0))
+        lines.append(
+            f"  When customers buy {ant} they almost always also buy {con} "
+            f"(confidence: {conf:.0f}%, lift: {lift:.1f}x)"
+        )
+
+    txn_count = top5[0].get("transaction_count", 0) if top5 else 0
+    if txn_count:
+        lines.append(f"  Based on {txn_count:,} baskets analyzed.")
+
+    return "\n".join(lines) + "\n"
+
+
+# ---------------------------------------------------------------------------
 # Assembler
 # ---------------------------------------------------------------------------
 
@@ -617,6 +655,7 @@ def build_context(client: Any) -> str:
         ("Inventory health",     _section_inventory_health),
         ("Forecast accuracy",    _section_forecast_accuracy),
         ("Location performance", _section_location_performance),
+        ("Basket rules",         _section_basket_rules),
     ]
 
     parts: list[str] = [

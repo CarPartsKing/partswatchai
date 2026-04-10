@@ -1,0 +1,77 @@
+Build ml/basket.py
+
+Co-purchase basket analysis using mlxtend.
+Finds which SKUs are almost always bought 
+together so we can pre-stage related inventory
+and detect demand for SKU B when SKU A moves.
+
+Build ml/basket.py to:
+
+1. Pull all transactions from sales_transactions
+   grouped by invoice/order — every line item 
+   on the same invoice = one basket
+   Use transaction_id to group line items
+   If transaction_id is null, group by 
+   customer_id + transaction_date + location_id
+
+2. Build item sets per basket — each basket 
+   is a list of SKUs purchased together
+
+3. Run Apriori algorithm (mlxtend):
+   min_support = 0.001 (appears in 0.1% of baskets)
+   min_confidence = 0.3 (30% of the time when 
+   SKU A is bought, SKU B is also bought)
+   min_lift = 1.5 (50% more likely to be bought 
+   together than by chance)
+
+4. Generate association rules:
+   antecedent → consequent
+   Example: {water pump} → {thermostat, coolant hose}
+   
+   Store each rule with:
+   - antecedent_sku (the trigger SKU)
+   - consequent_sku (the predicted co-purchase)
+   - support (how common this combination is)
+   - confidence (how often consequent follows antecedent)
+   - lift (how much more likely than random)
+
+5. Write rules to new table: basket_rules
+   Migration 018:
+   - antecedent_sku VARCHAR(50)
+   - consequent_sku VARCHAR(50)
+   - support NUMERIC(8,6)
+   - confidence NUMERIC(6,4)
+   - lift NUMERIC(8,4)
+   - rule_date DATE
+   - transaction_count INTEGER
+   UNIQUE(antecedent_sku, consequent_sku, rule_date)
+
+6. After rules are generated, use them to 
+   enhance reorder recommendations:
+   When reorder.py recommends ordering SKU A,
+   check basket_rules for high-confidence 
+   consequents — if SKU B is frequently 
+   co-purchased with SKU A and SKU B stock 
+   is low, add SKU B to the recommendation
+   Write these as recommendation_type = 
+   'basket_triggered' in reorder_recommendations
+
+7. Also surface basket intelligence in the 
+   purchasing assistant context:
+   Add to context_builder.py:
+   Top 5 basket rules by lift — 
+   "When customers buy X they almost always 
+   also buy Y (confidence: 85%, lift: 3.2x)"
+
+8. Log summary:
+   Total baskets analyzed: X
+   Association rules found: X
+   High-confidence rules (>70%): X
+   Top 10 rules by lift: [list]
+   SKUs added to recommendations via basket: X
+
+Add to weekly pipeline in main.py.
+New capability = new file.
+basket.py only generates basket rules.
+Nothing else.
+Follow all coding standards.

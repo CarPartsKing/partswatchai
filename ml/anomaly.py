@@ -54,6 +54,10 @@ from utils.logging_config import get_logger
 
 log = get_logger(__name__)
 
+_CLIENT_REFRESH_EVERY: int = 500
+_MAX_RETRIES: int = 3
+_RETRY_DELAY: float = 5.0
+
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -90,33 +94,61 @@ ISSUE_TYPE: str = "isolation_forest_anomaly"
 # Shared fetch helper
 # ---------------------------------------------------------------------------
 
-def _fetch_all(client: Any, table: str, select: str = "*") -> list[dict]:
-    """Return every row from a Supabase table, paging through the 1000-row cap.
+def _fetch_chunked_by_date(
+    client: Any,
+    table: str,
+    select: str,
+    date_col: str,
+    since: str,
+    until: str | None = None,
+    chunk_days: int = 7,
+    extra_eq: dict[str, Any] | None = None,
+) -> list[dict]:
+    """Fetch rows in weekly date chunks to avoid Supabase statement timeouts.
+
+    Iterates over *chunk_days*-wide date windows from *since* to *until*,
+    paginating within each window.  This keeps each individual query small
+    enough to complete within Supabase's statement timeout while still
+    fetching all rows.
 
     Args:
-        client: Active Supabase client.
-        table:  Table name to query.
-        select: PostgREST column selector string.
+        client:     Active Supabase client.
+        table:      Table name.
+        select:     PostgREST column selector.
+        date_col:   Date column to chunk on.
+        since:      Start date (inclusive) ISO string.
+        until:      End date (inclusive) ISO string; defaults to today.
+        chunk_days: Width of each date window in days.
+        extra_eq:   Optional {column: value} equality filters.
 
     Returns:
         All matching rows as a list of dicts.
     """
-    rows: list[dict] = []
-    offset = 0
-    while True:
-        page = (
-            client.table(table)
-            .select(select)
-            .range(offset, offset + _PAGE_SIZE - 1)
-            .execute()
-            .data
-            or []
-        )
-        rows.extend(page)
-        if len(page) < _PAGE_SIZE:
-            break
-        offset += _PAGE_SIZE
-    return rows
+    from datetime import date as _date, timedelta as _td
+    start = _date.fromisoformat(since)
+    end = _date.fromisoformat(until) if until else _date.today()
+    all_rows: list[dict] = []
+    chunk_start = start
+    while chunk_start <= end:
+        chunk_end = min(chunk_start + _td(days=chunk_days - 1), end)
+        offset = 0
+        while True:
+            q = client.table(table).select(select)
+            q = q.gte(date_col, chunk_start.isoformat())
+            q = q.lte(date_col, chunk_end.isoformat())
+            if extra_eq:
+                for col, val in extra_eq.items():
+                    q = q.eq(col, val)
+            page = q.range(offset, offset + _PAGE_SIZE - 1).execute().data or []
+            all_rows.extend(page)
+            if len(page) < _PAGE_SIZE:
+                break
+            offset += _PAGE_SIZE
+        chunk_start = chunk_end + _td(days=1)
+        if all_rows and len(all_rows) % 100_000 < (chunk_days * 7000):
+            log.info("    … streamed %d rows so far from %s", len(all_rows), table)
+    log.info("    … streamed %d total rows from %s", len(all_rows), table)
+    return all_rows
 
 
 # ---------------------------------------------------------------------------
@@ -235,12 +267,34 @@ def _fit_and_detect(sku_id: str, daily: list[dict]) -> list[dict]:
 # Database write helpers
 # ---------------------------------------------------------------------------
 
-def _reset_is_anomaly_for_sku(client: Any, sku_id: str, dry_run: bool) -> None:
-    """Set is_anomaly=FALSE for all transactions belonging to this SKU.
+def _get_fresh_client() -> Any:
+    from db.connection import get_client
+    return get_client()
 
-    Called before re-flagging so that days that were previously anomalous
-    but are no longer (after a model re-fit with more data) get cleared.
-    """
+
+def _db_call_with_retry(fn, client_holder: list, *args, **kwargs):
+    for attempt in range(1, _MAX_RETRIES + 1):
+        try:
+            return fn(client_holder[0], *args, **kwargs)
+        except Exception as exc:
+            err_name = type(exc).__name__
+            err_str = str(exc)
+            is_conn_err = any(k in err_name + err_str for k in (
+                "ConnectionTerminated", "ConnectionError", "RemoteProtocolError",
+                "ReadTimeout", "ConnectTimeout", "PoolTimeout",
+            ))
+            if is_conn_err and attempt < _MAX_RETRIES:
+                log.warning(
+                    "  DB connection error (attempt %d/%d): %s — reconnecting in %.0fs …",
+                    attempt, _MAX_RETRIES, err_name, _RETRY_DELAY,
+                )
+                time.sleep(_RETRY_DELAY)
+                client_holder[0] = _get_fresh_client()
+                continue
+            raise
+
+
+def _reset_is_anomaly_for_sku(client: Any, sku_id: str, dry_run: bool) -> None:
     if dry_run:
         return
     client.table("sales_transactions").update(
@@ -253,7 +307,6 @@ def _write_anomaly_flags(
     tx_ids: list[str],
     dry_run: bool,
 ) -> None:
-    """Mark a list of transaction_ids as is_anomaly=TRUE."""
     if dry_run:
         return
     for tx_id in tx_ids:
@@ -264,22 +317,10 @@ def _write_anomaly_flags(
 
 def _write_quality_issues(
     client: Any,
-    flagged_days: list[dict],   # list of enriched daily dicts with tx metadata
-    daily_lookup: dict[str, dict],  # tx_id → original row data
+    flagged_days: list[dict],
+    daily_lookup: dict[str, dict],
     dry_run: bool,
 ) -> int:
-    """Write one data_quality_issues row per flagged transaction.
-
-    Args:
-        client:       Supabase client.
-        flagged_days: Output of _fit_and_detect (anomalous daily dicts).
-        daily_lookup: Mapping of transaction_id → raw transaction dict for
-                      detail fields (qty_sold, unit_price, sku_id).
-        dry_run:      When True, skips all writes.
-
-    Returns:
-        Number of data_quality_issues rows written.
-    """
     if dry_run:
         return sum(len(d["tx_ids"]) for d in flagged_days)
 
@@ -305,7 +346,7 @@ def _write_quality_issues(
                 "field_name":  "qty_sold",
                 "field_value": str(qty),
                 "severity":    ISSUE_SEVERITY,
-                "detected_at": now,
+                "checked_at": now,
             })
 
     for i in range(0, len(records), BATCH_SIZE):
@@ -332,20 +373,23 @@ def run_anomaly_detection(dry_run: bool = False) -> int:
     Returns:
         Exit code: 0 on success, 1 if an unrecoverable error occurred.
     """
-    from db.connection import get_client
-    client = get_client()
+    client = _get_fresh_client()
+    client_holder = [client]
 
     t_start = time.perf_counter()
 
     if dry_run:
         log.info("DRY RUN — no database writes will be made.")
 
-    # ── 1. Fetch all transactions ──────────────────────────────────────────
-    log.info("Fetching sales_transactions …")
-    tx_rows = _fetch_all(
+    from datetime import date, timedelta
+    cutoff = (date.today() - timedelta(days=365)).isoformat()
+    log.info("Fetching sales_transactions since %s (chunked by week) …", cutoff)
+    tx_rows = _fetch_chunked_by_date(
         client,
         "sales_transactions",
         "transaction_id,sku_id,transaction_date,qty_sold,unit_price",
+        date_col="transaction_date",
+        since=cutoff,
     )
     log.info("  Fetched %d transaction(s).", len(tx_rows))
 
@@ -353,10 +397,8 @@ def run_anomaly_detection(dry_run: bool = False) -> int:
         log.warning("No transactions found — nothing to do.")
         return 0
 
-    # Build a tx_id → raw row lookup for the quality-issues write
     tx_lookup: dict[str, dict] = {r["transaction_id"]: r for r in tx_rows}
 
-    # ── 2. Aggregate to daily level ────────────────────────────────────────
     daily_by_sku = _aggregate_daily(tx_rows)
     log.info(
         "  Aggregated to daily level: %d SKU(s), %d total daily observations.",
@@ -364,7 +406,6 @@ def run_anomaly_detection(dry_run: bool = False) -> int:
         sum(len(v) for v in daily_by_sku.values()),
     )
 
-    # ── 3. Fit Isolation Forest per SKU ───────────────────────────────────
     total_skus_eligible  = 0
     total_skus_skipped   = 0
     total_days_flagged   = 0
@@ -375,13 +416,18 @@ def run_anomaly_detection(dry_run: bool = False) -> int:
     log.info("Processing %d SKU(s) …", len(sku_list))
     log.info("-" * 60)
 
-    for sku_id in sku_list:
+    client_holder[0] = _get_fresh_client()
+
+    for idx, sku_id in enumerate(sku_list):
+        if idx > 0 and idx % _CLIENT_REFRESH_EVERY == 0:
+            log.info("  [refresh] Reconnecting Supabase client after %d SKUs …", idx)
+            client_holder[0] = _get_fresh_client()
+
         daily = daily_by_sku[sku_id]
 
         flagged = _fit_and_detect(sku_id, daily)
 
         if flagged is None:
-            # Not enough history
             log.info(
                 "  SKIP  %-12s  %d daily obs (need >= %d)",
                 sku_id, len(daily), MIN_TRANSACTIONS,
@@ -400,16 +446,18 @@ def run_anomaly_detection(dry_run: bool = False) -> int:
         )
 
         if not dry_run:
-            # Reset first so previously-flagged clean days are cleared
-            _reset_is_anomaly_for_sku(client, sku_id, dry_run)
+            def _do_sku_writes(cl, _sku=sku_id, _flagged=flagged):
+                _reset_is_anomaly_for_sku(cl, _sku, dry_run)
+                if _flagged:
+                    anomalous_tx_ids = [tx for d in _flagged for tx in d["tx_ids"]]
+                    _write_anomaly_flags(cl, anomalous_tx_ids, dry_run)
+                    return _write_quality_issues(cl, _flagged, tx_lookup, dry_run)
+                return 0
+            issues = _db_call_with_retry(_do_sku_writes, client_holder)
+        else:
+            issues = sum(len(d["tx_ids"]) for d in flagged) if flagged else 0
 
         if flagged:
-            # Collect all tx_ids for this SKU's anomalous days
-            anomalous_tx_ids = [tx for d in flagged for tx in d["tx_ids"]]
-            _write_anomaly_flags(client, anomalous_tx_ids, dry_run)
-
-            issues = _write_quality_issues(client, flagged, tx_lookup, dry_run)
-
             total_days_flagged   += n_flagged_days
             total_tx_flagged     += n_flagged_tx
             total_issues_written += issues

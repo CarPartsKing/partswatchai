@@ -30,6 +30,10 @@ author = "agent"
 task = "workflow.run"
 args = "Start application"
 
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "Fixed Stages Runner"
+
 [[workflows.workflow]]
 name = "Start application"
 author = "agent"
@@ -41,6 +45,17 @@ outputType = "webview"
 task = "shell.exec"
 args = "python dashboard/server.py"
 waitForPort = 5000
+
+[[workflows.workflow]]
+name = "Fixed Stages Runner"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "python run_fixed_stages.py --only anomaly"
+
+[workflows.workflow.metadata]
+outputType = "console"
 
 [[ports]]
 localPort = 5000

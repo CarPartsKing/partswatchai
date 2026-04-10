@@ -89,13 +89,21 @@ DeriveFn = Callable[[Any], dict]
 # Shared helpers
 # ---------------------------------------------------------------------------
 
-def _fetch_all(client: Any, table: str, select: str = "*") -> list[dict]:
-    """Return every row from a Supabase table, handling the 1000-row page cap.
+def _fetch_all(
+    client: Any,
+    table: str,
+    select: str = "*",
+    gte: dict[str, str] | None = None,
+    eq: dict[str, Any] | None = None,
+) -> list[dict]:
+    """Return rows from a Supabase table with server-side filtering.
 
     Args:
         client: Active Supabase client.
         table:  Table to query.
         select: PostgREST column selector string.
+        gte:    Dict of {column: value} for >= filters (pushed server-side).
+        eq:     Dict of {column: value} for == filters (pushed server-side).
 
     Returns:
         All matching rows as a list of dicts.
@@ -103,18 +111,70 @@ def _fetch_all(client: Any, table: str, select: str = "*") -> list[dict]:
     all_rows: list[dict] = []
     offset = 0
     while True:
-        resp = (
-            client.table(table)
-            .select(select)
-            .range(offset, offset + _PAGE_SIZE - 1)
-            .execute()
-        )
+        q = client.table(table).select(select)
+        if gte:
+            for col, val in gte.items():
+                q = q.gte(col, val)
+        if eq:
+            for col, val in eq.items():
+                q = q.eq(col, val)
+        resp = q.range(offset, offset + _PAGE_SIZE - 1).execute()
         page: list[dict] = resp.data or []
         all_rows.extend(page)
         if len(page) < _PAGE_SIZE:
             break
         offset += _PAGE_SIZE
+        if offset % 50_000 == 0:
+            log.info("    … fetched %d rows so far from %s", offset, table)
     return all_rows
+
+
+def _fetch_chunked_by_date(
+    client: Any,
+    table: str,
+    select: str,
+    date_col: str,
+    since: str,
+    until: str | None = None,
+    chunk_days: int = 7,
+    extra_eq: dict[str, Any] | None = None,
+    callback: Callable[[list[dict]], None] | None = None,
+) -> int:
+    """Fetch rows in weekly date chunks, calling *callback* for each page.
+
+    Instead of loading millions of rows into one giant list, this streams
+    them through *callback* so the caller can accumulate only the tiny
+    per-SKU metric it needs.
+
+    Returns total rows fetched.
+    """
+    from datetime import date as _date
+    start = _date.fromisoformat(since)
+    end = _date.fromisoformat(until) if until else _date.today()
+    total = 0
+    chunk_start = start
+    while chunk_start <= end:
+        chunk_end = min(chunk_start + timedelta(days=chunk_days - 1), end)
+        offset = 0
+        while True:
+            q = client.table(table).select(select)
+            q = q.gte(date_col, chunk_start.isoformat())
+            q = q.lte(date_col, chunk_end.isoformat())
+            if extra_eq:
+                for col, val in extra_eq.items():
+                    q = q.eq(col, val)
+            page = q.range(offset, offset + _PAGE_SIZE - 1).execute().data or []
+            if callback and page:
+                callback(page)
+            total += len(page)
+            if len(page) < _PAGE_SIZE:
+                break
+            offset += _PAGE_SIZE
+        chunk_start = chunk_end + timedelta(days=1)
+        if total > 0 and total % 100_000 < (chunk_days * 7000):
+            log.info("    … streamed %d rows so far from %s", total, table)
+    log.info("    … streamed %d total rows from %s", total, table)
+    return total
 
 
 def _upsert(client: Any, table: str, rows: list[dict], on_conflict: str) -> None:
@@ -182,18 +242,30 @@ def derive_lost_sales_imputation(client: Any) -> dict:
     Returns:
         {"rows_updated": N}
     """
-    tx_rows = _fetch_all(
+    stockouts = _fetch_all(
         client,
         "sales_transactions",
         "transaction_id,sku_id,location_id,transaction_date,qty_sold,is_stockout",
+        eq={"is_stockout": True},
     )
-
-    stockouts     = [r for r in tx_rows if r.get("is_stockout")]
-    non_stockouts = [r for r in tx_rows if not r.get("is_stockout")]
 
     if not stockouts:
         log.info("  No stockout transactions — skipping imputation.")
         return {"rows_updated": 0}
+
+    log.info("  Found %d stockout transaction(s) to impute.", len(stockouts))
+
+    stockout_skus = {r.get("sku_id", "") for r in stockouts} - {""}
+
+    non_stockouts: list[dict] = []
+    for sku in stockout_skus:
+        rows = _fetch_all(
+            client,
+            "sales_transactions",
+            "sku_id,location_id,transaction_date,qty_sold",
+            eq={"sku_id": sku, "is_stockout": False},
+        )
+        non_stockouts.extend(rows)
 
     # Build lookup: sku_id → list of non-stockout sales at peer locations
     peer_sales: dict[str, list[dict]] = {}
@@ -274,17 +346,20 @@ def derive_abc_classification(client: Any) -> dict:
     """
     cutoff = (date.today() - timedelta(days=ABC_LOOKBACK_DAYS)).isoformat()
 
-    tx_rows = _fetch_all(
-        client, "sales_transactions", "sku_id,total_revenue,transaction_date"
-    )
-    tx_rows = [r for r in tx_rows if str(r.get("transaction_date", ""))[:10] >= cutoff]
-
-    # Sum revenue per SKU over the window
+    log.info("  Streaming transactions since %s for ABC classification …", cutoff)
     revenue: dict[str, float] = {}
-    for r in tx_rows:
-        sku = r.get("sku_id", "")
-        rev = float(r.get("total_revenue") or 0)
-        revenue[sku] = revenue.get(sku, 0.0) + rev
+
+    def _acc_revenue(page: list[dict]) -> None:
+        for r in page:
+            sku = r.get("sku_id", "")
+            if sku:
+                revenue[sku] = revenue.get(sku, 0.0) + float(r.get("total_revenue") or 0)
+
+    _fetch_chunked_by_date(
+        client, "sales_transactions", "sku_id,total_revenue",
+        date_col="transaction_date", since=cutoff,
+        callback=_acc_revenue,
+    )
 
     # Sort SKUs by revenue descending
     ranked = sorted(revenue.items(), key=lambda kv: kv[1], reverse=True)
@@ -354,16 +429,20 @@ def derive_xyz_classification(client: Any) -> dict:
     Returns:
         {"rows_updated": N}
     """
+    try:
+        client.table("sku_master").select("xyz_class").limit(1).execute()
+    except Exception:
+        log.warning(
+            "  xyz_class column not found in sku_master — "
+            "apply migration 010_xyz_classification.sql in the Supabase SQL Editor first."
+        )
+        return {"rows_updated": 0}
+
     today  = date.today()
     cutoff = (today - timedelta(days=XYZ_LOOKBACK_DAYS)).isoformat()
 
-    # Fetch transactions in the lookback window
-    tx_rows = _fetch_all(client, "sales_transactions",
-                         "sku_id,qty_sold,transaction_date")
-    tx_rows = [r for r in tx_rows
-               if str(r.get("transaction_date", ""))[:10] >= cutoff]
+    log.info("  Streaming transactions since %s for XYZ classification …", cutoff)
 
-    # Enumerate every ISO week that falls inside the window (for zero-padding)
     all_iso_weeks: list[tuple[int, int]] = []
     cursor = today - timedelta(days=XYZ_LOOKBACK_DAYS)
     seen_weeks: set[tuple[int, int]] = set()
@@ -376,18 +455,25 @@ def derive_xyz_classification(client: Any) -> dict:
         cursor += timedelta(days=7)
     n_weeks = len(all_iso_weeks)
 
-    # Aggregate qty_sold per (sku_id, iso_year, iso_week)
     weekly: dict[str, dict[tuple[int, int], float]] = defaultdict(
         lambda: defaultdict(float)
     )
-    for r in tx_rows:
-        sku   = r.get("sku_id", "")
-        qty   = float(r.get("qty_sold") or 0)
-        d_str = str(r.get("transaction_date", ""))[:10]
-        if not sku or not d_str:
-            continue
-        iso_cal = date.fromisoformat(d_str).isocalendar()
-        weekly[sku][(iso_cal[0], iso_cal[1])] += qty
+
+    def _acc_weekly(page: list[dict]) -> None:
+        for r in page:
+            sku   = r.get("sku_id", "")
+            qty   = float(r.get("qty_sold") or 0)
+            d_str = str(r.get("transaction_date", ""))[:10]
+            if not sku or not d_str:
+                continue
+            iso_cal = date.fromisoformat(d_str).isocalendar()
+            weekly[sku][(iso_cal[0], iso_cal[1])] += qty
+
+    _fetch_chunked_by_date(
+        client, "sales_transactions", "sku_id,qty_sold,transaction_date",
+        date_col="transaction_date", since=cutoff,
+        callback=_acc_weekly,
+    )
 
     # Fetch current abc_class for the combined field
     sku_rows = _fetch_all(client, "sku_master", "sku_id,abc_class")
@@ -582,34 +668,48 @@ def derive_weather_sensitivity(client: Any) -> dict:
     """
     cutoff = (date.today() - timedelta(days=WEATHER_LOOKBACK_DAYS)).isoformat()
 
-    tx_rows      = _fetch_all(client, "sales_transactions",  "sku_id,transaction_date,qty_sold")
-    sku_rows     = _fetch_all(client, "sku_master",          "sku_id,part_category")
-    weather_rows = _fetch_all(client, "weather_log",         "log_date,temp_min_f,is_forecast")
+    sku_rows     = _fetch_all(client, "sku_master", "sku_id,part_category")
+    sku_to_cat:  dict[str, str] = {r["sku_id"]: r.get("part_category", "") for r in sku_rows}
 
-    # Filter to window, historical weather only
-    tx_rows      = [r for r in tx_rows      if str(r.get("transaction_date", ""))[:10] >= cutoff]
-    weather_rows = [r for r in weather_rows
-                    if str(r.get("log_date", ""))[:10] >= cutoff
-                    and not r.get("is_forecast")]
+    cats_with_data = {c for c in sku_to_cat.values() if c}
+    if not cats_with_data:
+        log.info("  No part_category data in sku_master — skipping weather sensitivity.")
+        return {"rows_updated": 0}
 
-    # Build lookups
-    sku_to_cat:      dict[str, str]   = {r["sku_id"]: r.get("part_category", "") for r in sku_rows}
-    temp_by_date:    dict[str, float] = {}
+    weather_rows = _fetch_all(
+        client, "weather_log", "log_date,temp_min_f,is_forecast",
+        gte={"log_date": cutoff},
+        eq={"is_forecast": False},
+    )
+
+    temp_by_date: dict[str, float] = {}
     for r in weather_rows:
         if r.get("temp_min_f") is not None:
             temp_by_date[str(r["log_date"])[:10]] = float(r["temp_min_f"])
 
-    # Aggregate daily qty sold by (date, category)
+    if not temp_by_date:
+        log.info("  No historical weather data — skipping weather sensitivity.")
+        return {"rows_updated": 0}
+
+    log.info("  Streaming transactions since %s for weather sensitivity …", cutoff)
     daily_qty: dict[tuple[str, str], float] = {}
-    for r in tx_rows:
-        date_str = str(r.get("transaction_date", ""))[:10]
-        sku      = r.get("sku_id", "")
-        category = sku_to_cat.get(sku, "")
-        if not date_str or not category or date_str not in temp_by_date:
-            continue
-        qty = float(r.get("qty_sold") or 0)
-        key = (date_str, category)
-        daily_qty[key] = daily_qty.get(key, 0.0) + qty
+
+    def _acc_weather(page: list[dict]) -> None:
+        for r in page:
+            date_str = str(r.get("transaction_date", ""))[:10]
+            sku      = r.get("sku_id", "")
+            category = sku_to_cat.get(sku, "")
+            if not date_str or not category or date_str not in temp_by_date:
+                continue
+            qty = float(r.get("qty_sold") or 0)
+            key = (date_str, category)
+            daily_qty[key] = daily_qty.get(key, 0.0) + qty
+
+    _fetch_chunked_by_date(
+        client, "sales_transactions", "sku_id,transaction_date,qty_sold",
+        date_col="transaction_date", since=cutoff,
+        callback=_acc_weather,
+    )
 
     # Assemble (temp, qty) pairs per category
     cat_pairs: dict[str, list[tuple[float, float]]] = {}
@@ -654,15 +754,16 @@ def derive_weather_sensitivity(client: Any) -> dict:
 # Derivation 5 — SKU metrics (last_sale_date, avg_weekly_units)
 # ---------------------------------------------------------------------------
 
+SKU_METRICS_LOOKBACK_DAYS: int = 365
+
+
 def derive_sku_metrics(client: Any) -> dict:
     """Update last_sale_date and avg_weekly_units in sku_master for every SKU.
 
     last_sale_date   — date of most recent transaction for each SKU
-    avg_weekly_units — total qty_sold ÷ total weeks spanned by the dataset
+    avg_weekly_units — total qty_sold ÷ weeks in lookback window
 
-    The week denominator uses the full date range of all transactions in the
-    database (not just a lookback window) so the metric reflects the true
-    average selling rate over the observed history.
+    Uses a 365-day lookback for avg_weekly_units to avoid fetching all 8M+ rows.
 
     Writes to:
         sku_master.last_sale_date
@@ -671,51 +772,42 @@ def derive_sku_metrics(client: Any) -> dict:
     Returns:
         {"rows_updated": N}
     """
-    tx_rows = _fetch_all(
-        client, "sales_transactions", "sku_id,transaction_date,qty_sold"
+    cutoff = (date.today() - timedelta(days=SKU_METRICS_LOOKBACK_DAYS)).isoformat()
+    total_weeks = SKU_METRICS_LOOKBACK_DAYS / 7.0
+
+    log.info("  Streaming transactions since %s for SKU metrics (%.0f weeks) …",
+             cutoff, total_weeks)
+
+    sku_max_date: dict[str, str] = {}
+    sku_qty:      dict[str, float] = {}
+
+    def _acc_metrics(page: list[dict]) -> None:
+        for r in page:
+            sku      = r.get("sku_id", "")
+            date_str = str(r.get("transaction_date", ""))[:10]
+            qty      = float(r.get("qty_sold") or 0)
+            if not sku:
+                continue
+            if sku not in sku_max_date or date_str > sku_max_date[sku]:
+                sku_max_date[sku] = date_str
+            sku_qty[sku] = sku_qty.get(sku, 0.0) + qty
+
+    _fetch_chunked_by_date(
+        client, "sales_transactions", "sku_id,transaction_date,qty_sold",
+        date_col="transaction_date", since=cutoff,
+        callback=_acc_metrics,
     )
 
-    if not tx_rows:
+    if not sku_qty:
         log.info("  No sales transactions found — skipping SKU metrics.")
         return {"rows_updated": 0}
 
-    # Global date range → week denominator
-    all_dates: list[str] = [
-        str(r["transaction_date"])[:10]
-        for r in tx_rows
-        if r.get("transaction_date")
-    ]
-    if not all_dates:
-        return {"rows_updated": 0}
-
-    global_min = date.fromisoformat(min(all_dates))
-    global_max = date.fromisoformat(max(all_dates))
-    total_weeks = max((global_max - global_min).days / 7.0, 1.0)
-
-    log.info(
-        "  Date range %s → %s  (%.1f weeks)",
-        global_min, global_max, total_weeks,
-    )
-
-    # Aggregate per SKU
-    sku_dates: dict[str, list[str]]  = {}
-    sku_qty:   dict[str, float]      = {}
-
-    for r in tx_rows:
-        sku      = r.get("sku_id", "")
-        date_str = str(r.get("transaction_date", ""))[:10]
-        qty      = float(r.get("qty_sold") or 0)
-        if not sku:
-            continue
-        sku_dates.setdefault(sku, []).append(date_str)
-        sku_qty[sku] = sku_qty.get(sku, 0.0) + qty
-
     updates: list[dict] = []
-    for sku, dates in sku_dates.items():
+    for sku, max_d in sku_max_date.items():
         updates.append({
             "sku_id":          sku,
-            "last_sale_date":  max(dates),
-            "avg_weekly_units": round(sku_qty[sku] / total_weeks, 2),
+            "last_sale_date":  max_d,
+            "avg_weekly_units": round(sku_qty.get(sku, 0.0) / total_weeks, 2),
         })
 
     _upsert(client, "sku_master", updates, on_conflict="sku_id")

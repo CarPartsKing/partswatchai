@@ -124,7 +124,50 @@ def _paginate(
         if len(page) < _PAGE_SIZE:
             break
         offset += _PAGE_SIZE
+        if offset % 50_000 == 0:
+            log.info("    … fetched %d rows so far from %s", offset, table)
     return rows
+
+
+def _fetch_chunked_by_date(
+    client: Any,
+    table: str,
+    select: str,
+    date_col: str,
+    since: str,
+    until: str | None = None,
+    chunk_days: int = 7,
+    extra_eq: dict[str, Any] | None = None,
+) -> list[dict]:
+    """Fetch rows in weekly date chunks to avoid Supabase statement timeouts.
+
+    Returns:
+        All matching rows as a list of dicts.
+    """
+    start = date.fromisoformat(since)
+    end = date.fromisoformat(until) if until else date.today()
+    all_rows: list[dict] = []
+    chunk_start = start
+    while chunk_start <= end:
+        chunk_end = min(chunk_start + timedelta(days=chunk_days - 1), end)
+        offset = 0
+        while True:
+            q = client.table(table).select(select)
+            q = q.gte(date_col, chunk_start.isoformat())
+            q = q.lte(date_col, chunk_end.isoformat())
+            if extra_eq:
+                for col, val in extra_eq.items():
+                    q = q.eq(col, val)
+            page = q.range(offset, offset + _PAGE_SIZE - 1).execute().data or []
+            all_rows.extend(page)
+            if len(page) < _PAGE_SIZE:
+                break
+            offset += _PAGE_SIZE
+        chunk_start = chunk_end + timedelta(days=1)
+        if all_rows and len(all_rows) % 100_000 < (chunk_days * 7000):
+            log.info("    … streamed %d rows so far from %s", len(all_rows), table)
+    log.info("    … streamed %d total rows from %s", len(all_rows), table)
+    return all_rows
 
 
 # ---------------------------------------------------------------------------
@@ -159,10 +202,13 @@ def _classify_location_tiers(
     """
     log.info("Stage 1: Classifying location tiers …")
 
-    # -- Revenue and SKU breadth from sales_transactions -----------------------
-    tx_rows = _paginate(
+    tier_cutoff = (today - timedelta(days=180)).isoformat()
+    log.info("  Fetching sales since %s for tier classification (chunked) …", tier_cutoff)
+    tx_rows = _fetch_chunked_by_date(
         client, "sales_transactions",
         "location_id,sku_id,qty_sold",
+        date_col="transaction_date",
+        since=tier_cutoff,
     )
     revenue_by_loc:  dict[str, float] = defaultdict(float)
     skus_by_loc:     dict[str, set]   = defaultdict(set)
@@ -477,9 +523,13 @@ def _compute_demand_quality(
     """
     log.info("Stage 3: Computing demand quality scores …")
 
-    tx_rows = _paginate(
+    cutoff = (today - timedelta(days=730)).isoformat()
+    log.info("  Fetching sales_transactions since %s (chunked by week) …", cutoff)
+    tx_rows = _fetch_chunked_by_date(
         client, "sales_transactions",
         "sku_id,location_id,is_residual_demand",
+        date_col="transaction_date",
+        since=cutoff,
     )
 
     totals:   dict[tuple[str, str], int] = defaultdict(int)

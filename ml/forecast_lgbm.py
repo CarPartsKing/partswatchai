@@ -93,6 +93,40 @@ from utils.logging_config import get_logger
 
 log = get_logger(__name__)
 
+_CLIENT_REFRESH_EVERY: int = 200
+_MAX_RETRIES: int = 3
+_RETRY_DELAY: float = 5.0
+
+
+def _get_fresh_client() -> Any:
+    from db.connection import get_client
+    return get_client()
+
+
+def _upsert_with_retry(client_holder: list, table: str, rows: list, on_conflict: str):
+    for attempt in range(1, _MAX_RETRIES + 1):
+        try:
+            client_holder[0].table(table).upsert(
+                rows, on_conflict=on_conflict,
+            ).execute()
+            return
+        except Exception as exc:
+            err_name = type(exc).__name__
+            err_str = str(exc)
+            is_conn_err = any(k in err_name + err_str for k in (
+                "ConnectionTerminated", "ConnectionError", "RemoteProtocolError",
+                "ReadTimeout", "ConnectTimeout", "PoolTimeout",
+            ))
+            if is_conn_err and attempt < _MAX_RETRIES:
+                log.warning(
+                    "  DB connection error (attempt %d/%d): %s — reconnecting in %.0fs …",
+                    attempt, _MAX_RETRIES, err_name, _RETRY_DELAY,
+                )
+                time.sleep(_RETRY_DELAY)
+                client_holder[0] = _get_fresh_client()
+                continue
+            raise
+
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -200,31 +234,70 @@ def _fetch_b_class_skus(client: Any) -> list[str]:
     return skus
 
 
+def _fetch_chunked_by_date(
+    client: Any,
+    table: str,
+    select: str,
+    date_col: str,
+    since: str,
+    until: str | None = None,
+    chunk_days: int = 7,
+    extra_eq: dict[str, Any] | None = None,
+) -> list[dict]:
+    """Fetch rows in weekly date chunks to avoid Supabase statement timeouts.
+
+    Iterates over *chunk_days*-wide date windows, paginating within each
+    window.  Keeps individual queries small enough to complete within
+    Supabase's statement timeout.
+
+    Returns:
+        All matching rows as a list of dicts.
+    """
+    from datetime import date as _date, timedelta as _td
+    start = _date.fromisoformat(since)
+    end = _date.fromisoformat(until) if until else _date.today()
+    all_rows: list[dict] = []
+    chunk_start = start
+    while chunk_start <= end:
+        chunk_end = min(chunk_start + _td(days=chunk_days - 1), end)
+        offset = 0
+        while True:
+            q = client.table(table).select(select)
+            q = q.gte(date_col, chunk_start.isoformat())
+            q = q.lte(date_col, chunk_end.isoformat())
+            if extra_eq:
+                for col, val in extra_eq.items():
+                    q = q.eq(col, val)
+            page = q.range(offset, offset + _PAGE_SIZE - 1).execute().data or []
+            all_rows.extend(page)
+            if len(page) < _PAGE_SIZE:
+                break
+            offset += _PAGE_SIZE
+        chunk_start = chunk_end + _td(days=1)
+        if all_rows and len(all_rows) % 100_000 < (chunk_days * 7000):
+            log.info("    … streamed %d rows so far from %s", len(all_rows), table)
+    log.info("    … streamed %d total rows from %s", len(all_rows), table)
+    return all_rows
+
+
 def _fetch_transactions(client: Any, cutoff: str) -> list[dict]:
-    """Bulk-fetch all non-anomaly transactions on or after cutoff."""
-    rows: list[dict] = []
-    offset = 0
+    """Bulk-fetch all non-anomaly, non-residual transactions on or after cutoff.
+
+    Uses weekly date-chunking to avoid Supabase statement timeouts when
+    fetching millions of rows.
+    """
     select = (
         "sku_id,location_id,transaction_date,"
         "qty_sold,lost_sales_imputation,is_stockout,is_anomaly"
     )
-    while True:
-        page = (
-            client.table("sales_transactions")
-            .select(select)
-            .gte("transaction_date", cutoff)
-            .eq("is_anomaly", False)
-            .eq("is_residual_demand", False)
-            .range(offset, offset + _PAGE_SIZE - 1)
-            .execute()
-            .data
-            or []
-        )
-        rows.extend(page)
-        if len(page) < _PAGE_SIZE:
-            break
-        offset += _PAGE_SIZE
-    return rows
+    return _fetch_chunked_by_date(
+        client,
+        "sales_transactions",
+        select,
+        date_col="transaction_date",
+        since=cutoff,
+        extra_eq={"is_anomaly": False, "is_residual_demand": False},
+    )
 
 
 def _fetch_weather(client: Any, cutoff: str) -> list[dict]:
@@ -677,8 +750,8 @@ def run_forecast(dry_run: bool = False) -> int:
     Returns:
         Exit code 0 on success, 1 on unrecoverable error.
     """
-    from db.connection import get_client
-    client       = get_client()
+    client       = _get_fresh_client()
+    client_holder = [client]
     t_start      = time.perf_counter()
     today        = date.today()
     run_date_str = today.isoformat()
@@ -767,7 +840,12 @@ def run_forecast(dry_run: bool = False) -> int:
     total_iters = 0
     fc_buffer: list[dict] = []
 
+    _pair_count = 0
     for sku_id, location_id in active_pairs:
+        _pair_count += 1
+        if _pair_count > 1 and _pair_count % _CLIENT_REFRESH_EVERY == 0:
+            log.info("  [refresh] Reconnecting Supabase client after %d pairs …", _pair_count)
+            client_holder[0] = _get_fresh_client()
         demand_by_date = demand_map[(sku_id, location_id)]
 
         # Look up demand quality, location tier, and XYZ class for this pair
@@ -884,23 +962,21 @@ def run_forecast(dry_run: bool = False) -> int:
         total_rows  += len(fc_rows)
         total_iters += n_iters
 
-        # Flush buffer in BATCH_SIZE chunks
         while len(fc_buffer) >= BATCH_SIZE:
             batch = fc_buffer[:BATCH_SIZE]
             fc_buffer = fc_buffer[BATCH_SIZE:]
             if not dry_run:
-                client.table("forecast_results").upsert(
-                    batch,
-                    on_conflict="sku_id,location_id,forecast_date,model_type,run_date",
-                ).execute()
+                _upsert_with_retry(
+                    client_holder, "forecast_results", batch,
+                    "sku_id,location_id,forecast_date,model_type,run_date",
+                )
 
-    # Final flush
     if fc_buffer:
         if not dry_run:
-            client.table("forecast_results").upsert(
-                fc_buffer,
-                on_conflict="sku_id,location_id,forecast_date,model_type,run_date",
-            ).execute()
+            _upsert_with_retry(
+                client_holder, "forecast_results", fc_buffer,
+                "sku_id,location_id,forecast_date,model_type,run_date",
+            )
 
     # ── 6. Summary ────────────────────────────────────────────────────────
     elapsed = time.perf_counter() - t_start

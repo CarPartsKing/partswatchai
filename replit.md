@@ -192,6 +192,25 @@ partswatch-ai/
 
 **Dry-run confirmed**: 8/8 active stages OK in 9.2s; `derive` skipped (no dry-run support)
 
+## Full Pipeline Run Status (Apr 10, 2026)
+| Stage | Status | Time | Notes |
+|-------|--------|------|-------|
+| derive (lost sales) | ✅ | 0.7s | 2 stockout rows imputed |
+| derive (ABC) | ✅ | 186s | 317,738 SKUs classified (A=28K, B=42K, C=247K) |
+| derive (XYZ) | ⏭️ Skipped | 0.1s | Migration 010 pending — apply in Supabase SQL Editor |
+| derive (supplier scores) | ✅ | 0.2s | 5 suppliers scored |
+| derive (weather sensitivity) | ✅ | 571s | 12 SKUs updated (sample categories only) |
+| derive (SKU metrics) | ✅ | 346s | 226,740 SKUs with last_sale_date + avg_weekly_units |
+| location_classify | ⚠️ Partial | 567s | Tier classification OK; demand quality step timed out |
+| anomaly | ❌ | 772s | 502 Bad Gateway after 2M+ rows (Supabase rate limit) |
+| forecast_rolling | ✅ | 151s | 840 forecasts for 28 C-class SKU-location pairs |
+| forecast_lgbm | ❌ | 1421s | Statement timeout fetching 2yr B-class data |
+| reorder | ✅ | 45s | Recommendations generated |
+| alerts | ✅ | 1s | 7 supplier risk warnings |
+
+**Root cause of failures**: Supabase REST API pagination (1000 rows/page) is too slow for 2M+ row fetches.
+**Fix for production**: Use direct Postgres connection (service role key) or Supabase Edge Functions for heavy aggregation.
+
 ## GitHub Actions
 - **nightly.yml**: `0 7 * * *` (7am UTC = 2am EST) — full pipeline
 - **weekly.yml**: `0 4 * * 1` (4am UTC Monday = 11pm EST Sunday) — weekly analysis + nightly re-run

@@ -1,0 +1,104 @@
+Major discovery — Product cube has critical 
+data we haven't been using. Build 
+extract/autocube_product_pull.py
+
+This becomes our second Autocube pipeline 
+running nightly alongside autocube_pull.py
+
+Pull these dimensions and measures from 
+the Product cube (AutoCube_DTR_23160):
+
+PRIORITY 1 — Live inventory snapshot:
+Dimensions: Product.Prod Code, Location.Loc
+Measures: 
+- On Hand Qty (current)
+- Min Qty, Max Qty
+- Qty On Order
+- Ext Cost On Hand
+- LM On Hand Qty (last month)
+- 2M through 6M On Hand Qty (trend)
+
+Load into inventory_snapshots table.
+This replaces our estimated inventory 
+positions with real recorded on-hand data.
+Run nightly in incremental mode.
+
+PRIORITY 2 — Transfer history:
+Dimensions: 
+- Product.Prod Code
+- Transfer Locs.Loc From
+- Transfer Locs.Loc To
+- Sales Date (if available in Product cube)
+Measures: transfer quantities and costs
+
+Create new table: location_transfers
+Columns: sku_id, from_location, to_location,
+transfer_date, qty_transferred, transfer_cost
+Migration 012.
+
+This trains the transfer optimizer on real 
+historical transfer patterns.
+
+PRIORITY 3 — Product master enrichment:
+Dimensions:
+- Product.Prod Code
+- Product.1st Vend No (primary vendor)
+- Product.Aisle/Bin/Zone (warehouse position)
+- Product.Core Flag
+- Product.Stock Flag  
+- Product.Sup Code
+- Product.SC/SL
+- Product.Own Class 1-5
+
+Update sku_master with:
+- primary_supplier_id (from 1st Vend No)
+- warehouse_bin (from Aisle/Bin/Zone)
+- is_core_item (from Core Flag)
+- is_stocked (from Stock Flag)
+- supplier_code (from Sup Code)
+- own_class (from Own Class 1-5)
+
+Migration 013 for new sku_master columns.
+
+PRIORITY 4 — Sales transaction enrichment:
+The Sales Detail cube has flags we are not 
+currently capturing:
+- Backorder Flag → add to sales_transactions
+- Core Flag → add to sales_transactions  
+- Warranty Flag → add to sales_transactions
+- Price Override Flag → add to sales_transactions
+- Counterman → add to sales_transactions
+
+Migration 014 for new sales_transactions columns.
+
+Update autocube_pull.py to capture these 
+flags in the incremental nightly pull.
+
+Warranty Flag = TRUE transactions should be 
+excluded from forecast training data 
+(same as is_anomaly = TRUE) — warranty 
+replacements are not organic demand.
+
+PRIORITY 5 — Pricing tiers:
+Dimensions: Product.Prod Code, Price 1-10
+Measures: corresponding GP margins
+
+Create new table: sku_pricing_tiers
+Columns: sku_id, price_tier (1-10), 
+price_value, gp_margin_pct
+Migration 015.
+
+This enables dynamic pricing recommendations 
+and margin optimization later.
+
+Build in same pattern as autocube_pull.py:
+- --test mode: discover dimensions
+- --mode full: complete historical pull  
+- --mode incremental: nightly update
+- Same security requirements (read-only MDX)
+- Same error handling and logging standards
+- Add PRODUCT_CUBE as source in DataSource factory
+
+Run --test mode first and show me exactly 
+what dimension members are available before 
+writing the main pull queries.

@@ -1,0 +1,129 @@
+Build ml/forecast_prophet.py
+
+This is the highest priority remaining ML file.
+A-class SKUs — our top revenue parts.
+28,120 SKUs currently falling back to 
+rolling average. Need full Prophet + 
+XGBoost ensemble with weather regressors.
+
+IMPORTANT: This file is designed to run 
+on a local Windows or Mac laptop — NOT 
+on Replit. Replit does not have enough 
+compute for 28,120 Prophet models.
+Design accordingly.
+
+Build ml/forecast_prophet.py to:
+
+1. Query all A-class SKUs dynamically:
+   SELECT sku_id FROM sku_master 
+   WHERE abc_class = 'A' AND is_active = TRUE
+   Never hardcode count.
+
+2. For each SKU + location combination 
+   pull sales history from sales_transactions:
+   WHERE is_anomaly = FALSE
+   AND is_residual_demand = FALSE
+   AND is_warranty = FALSE (if column exists)
+   Use lost_sales_imputation for stockout days
+   Skip combinations with fewer than 90 days 
+   of sales history
+
+3. Join weather_log on transaction_date:
+   temp_min_f
+   snowfall_in
+   consecutive_freeze_days
+   freeze_thaw_cycle
+
+4. Train Prophet model:
+   yearly_seasonality = True
+   weekly_seasonality = True
+   daily_seasonality = False
+   changepoint_prior_scale = 0.05
+   
+   Add all 4 weather regressors:
+   model.add_regressor('temp_min_f')
+   model.add_regressor('snowfall_in')
+   model.add_regressor('consecutive_freeze_days')
+   model.add_regressor('freeze_thaw_cycle')
+
+5. Train XGBoost on same features:
+   Features: day_of_week, month, week_of_year,
+   lag_7, lag_14, lag_28, rolling_mean_7,
+   rolling_mean_28, temp_min_f, snowfall_in,
+   consecutive_freeze_days, freeze_thaw_cycle,
+   abc_class encoded, location_tier encoded
+   
+   Ensemble weights as constants at top:
+   PROPHET_WEIGHT = 0.60
+   XGBOOST_WEIGHT = 0.40
+   Final forecast = weighted average of both
+
+6. Generate 30-day forward forecasts:
+   predicted_qty = ensemble result
+   lower_bound = Prophet yhat_lower
+   upper_bound = Prophet yhat_upper
+   model_type = 'prophet'
+   confidence_pct = 0.95
+   
+   Upsert to forecast_results table
+
+7. Save trained models to disk:
+   models/prophet/{sku_id}_{location_id}.pkl
+   models/xgboost/{sku_id}_{location_id}.pkl
+   
+   On weekly rerun — only retrain SKUs where 
+   new sales data exists since last training.
+   Load cached model for everything else.
+   This cuts weekly runtime from hours to minutes
+   after the first run.
+
+8. Batch processing — 50 SKU+location 
+   combinations per batch:
+   Log after every batch:
+   [PROPHET] Batch 12/450 — 600 SKUs complete
+   — elapsed 18m — est 42m remaining
+
+9. Single SKU test mode:
+   python ml/forecast_prophet.py --sku XT12QULV
+   Trains and forecasts one SKU across all 
+   locations. Use this to validate output 
+   before running full batch.
+   Show the forecast chart in terminal if 
+   matplotlib is available.
+
+10. Full run modes:
+    python ml/forecast_prophet.py --mode full
+    Trains all A-class SKUs from scratch
+    
+    python ml/forecast_prophet.py --mode incremental  
+    Only retrains SKUs with new data since 
+    last training run
+    
+    python ml/forecast_prophet.py --mode forecast-only
+    Uses cached models, just generates 
+    new 30-day forecasts without retraining
+    Fastest — use for mid-week forecast refresh
+
+11. Log final summary:
+    SKUs trained: X
+    SKUs skipped (insufficient history): X
+    Forecast rows written: X
+    Average training MAPE: X%
+    Fastest SKU: X seconds
+    Slowest SKU: X seconds
+    Total runtime: Xh Xm
+
+CONSTANTS at top of file (all tunable):
+PROPHET_WEIGHT = 0.60
+XGBOOST_WEIGHT = 0.40
+MIN_HISTORY_DAYS = 90
+BATCH_SIZE = 50
+CHANGEPOINT_PRIOR = 0.05
+FORECAST_HORIZON_DAYS = 30
+MODEL_CACHE_DIR = 'models/'
+
+Follow all coding standards.
+New capability = new file.
+forecast_prophet.py only generates 
+Prophet+XGBoost ensemble forecasts.
+Nothing else.

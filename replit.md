@@ -38,10 +38,13 @@ Acts as shared foundation code (config, DB connection, logging utilities) and sy
 **2. L/R part pair grouping**
 - Part pairing logic needed — L/R suffix SKUs (e.g. headlights, mirrors, control arms) are treated as separate SKUs but represent the same repair job. Build logic to group L/R pairs and aggregate demand for forecasting accuracy. Example: SKU-1234L and SKU-1234R should be forecasted as a pair.
 
-**3. Prophet A-class forecasting**
-- Runs weekly on laptop Sunday nights
+**3. Prophet A-class forecasting** ← *COMPLETE* (see `ml/forecast_prophet.py`)
+- Runs weekly on LOCAL LAPTOP (not Replit — too compute-intensive for 28K+ Prophet models)
+- Prophet + XGBoost ensemble: 60%/40% weighted average
 - Weather regressors: `temp_min_f`, `snowfall_in`, `consecutive_freeze_days`, `freeze_thaw_cycle`
-- XGBoost ensemble for top accuracy
+- Model caching: `models/prophet/` and `models/xgboost/` — incremental mode only retrains stale
+- Modes: `--mode full` | `--mode incremental` | `--mode forecast-only` | `--sku XXXX` (single test)
+- NOT in main.py pipeline stages (laptop-only); writes to `forecast_results` with `model_type='prophet'`
 
 **4. Min/Max Qty comparison (buyer-set vs AI-generated)**
 - Product cube contains buyer-set Min Qty and Max Qty per SKU per location from Datatron. When loaded, compare AI-generated reorder points against these buyer-set minimums. Significant differences (>50% variance) should be flagged for review — either the AI found a better level or the buyer knows something the data doesn't capture.

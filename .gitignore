@@ -3,6 +3,11 @@ __pycache__/
 *.py[cod]
 *$py.class
 
+# Cached ML models and charts (Prophet + XGBoost)
+models/prophet/
+models/xgboost/
+models/*.png
+
 # C extensions
 *.so
 

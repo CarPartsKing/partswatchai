@@ -319,10 +319,15 @@ def _build_forecast_accuracy(client: Any, today: date) -> list[dict]:
         actuals[(r["sku_id"], r["location_id"], d)] += float(r.get("qty_sold") or 0)
         actuals_all[(r["sku_id"], d)] += float(r.get("qty_sold") or 0)
 
-    sku_ids = {k[0] for k in forecast_map}
-    sku_rows = _paginate(client, "sku_master", "sku_id,abc_class",
-                         in_filters={"sku_id": list(sku_ids)})
-    abc_map = {r["sku_id"]: (r.get("abc_class") or "?") for r in sku_rows}
+    sku_ids = list({k[0] for k in forecast_map})
+    abc_map: dict[str, str] = {}
+    _IN_BATCH = 300
+    for i in range(0, len(sku_ids), _IN_BATCH):
+        batch = sku_ids[i:i + _IN_BATCH]
+        sku_rows = _paginate(client, "sku_master", "sku_id,abc_class",
+                             in_filters={"sku_id": batch})
+        for r in sku_rows:
+            abc_map[r["sku_id"]] = r.get("abc_class") or "?"
 
     ape_by_class: dict[tuple[str, str], list[float]] = defaultdict(list)
     for (sku_id, loc_id, model), date_qty in forecast_map.items():

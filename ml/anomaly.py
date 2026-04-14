@@ -281,7 +281,7 @@ def _db_call_with_retry(fn, client_holder: list, *args, **kwargs):
             err_str = str(exc)
             is_conn_err = any(k in err_name + err_str for k in (
                 "ConnectionTerminated", "ConnectionError", "RemoteProtocolError",
-                "ReadTimeout", "ConnectTimeout", "PoolTimeout",
+                "ReadTimeout", "ConnectTimeout", "PoolTimeout", "57014",
             ))
             if is_conn_err and attempt < _MAX_RETRIES:
                 log.warning(
@@ -294,12 +294,17 @@ def _db_call_with_retry(fn, client_holder: list, *args, **kwargs):
             raise
 
 
-def _reset_is_anomaly_for_sku(client: Any, sku_id: str, dry_run: bool) -> None:
+_RESET_BATCH = 200
+
+
+def _reset_is_anomaly_for_sku(client: Any, sku_id: str, tx_ids_all: list[str], dry_run: bool) -> None:
     if dry_run:
         return
-    client.table("sales_transactions").update(
-        {"is_anomaly": False}
-    ).eq("sku_id", sku_id).execute()
+    for i in range(0, len(tx_ids_all), _RESET_BATCH):
+        batch_ids = tx_ids_all[i : i + _RESET_BATCH]
+        client.table("sales_transactions").update(
+            {"is_anomaly": False}
+        ).in_("transaction_id", batch_ids).execute()
 
 
 def _write_anomaly_flags(
@@ -309,10 +314,11 @@ def _write_anomaly_flags(
 ) -> None:
     if dry_run:
         return
-    for tx_id in tx_ids:
+    for i in range(0, len(tx_ids), _RESET_BATCH):
+        batch_ids = tx_ids[i : i + _RESET_BATCH]
         client.table("sales_transactions").update(
             {"is_anomaly": True}
-        ).eq("transaction_id", tx_id).execute()
+        ).in_("transaction_id", batch_ids).execute()
 
 
 def _write_quality_issues(
@@ -446,8 +452,10 @@ def run_anomaly_detection(dry_run: bool = False) -> int:
         )
 
         if not dry_run:
-            def _do_sku_writes(cl, _sku=sku_id, _flagged=flagged):
-                _reset_is_anomaly_for_sku(cl, _sku, dry_run)
+            all_tx_ids_for_sku = [tx for d in daily for tx in d["tx_ids"]]
+
+            def _do_sku_writes(cl, _sku=sku_id, _flagged=flagged, _all_tx=all_tx_ids_for_sku):
+                _reset_is_anomaly_for_sku(cl, _sku, _all_tx, dry_run)
                 if _flagged:
                     anomalous_tx_ids = [tx for d in _flagged for tx in d["tx_ids"]]
                     _write_anomaly_flags(cl, anomalous_tx_ids, dry_run)

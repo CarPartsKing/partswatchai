@@ -1324,11 +1324,51 @@ def _label_to_months(label: str) -> set[str]:
     return months
 
 
+def _detect_resume_chunk(all_chunks: list[tuple[str, str, str]]) -> int:
+    """Query Supabase for the latest loaded date and return the chunk index to resume from.
+
+    Returns 0 if no data exists or on error (start from beginning).
+    """
+    try:
+        from db.connection import get_client as get_db_client
+        db = get_db_client()
+        resp = (
+            db.table("sales_transactions")
+            .select("transaction_date")
+            .order("transaction_date", desc=True)
+            .limit(1)
+            .execute()
+        )
+        if not resp.data:
+            log.info("[RESUME] No existing data in sales_transactions — starting from chunk 1.")
+            return 0
+
+        latest_date_str = resp.data[0]["transaction_date"]
+        latest_date = date.fromisoformat(latest_date_str[:10])
+        log.info("[RESUME] Latest transaction_date in Supabase: %s", latest_date.isoformat())
+
+        for i, (label, start_key, end_key) in enumerate(all_chunks):
+            chunk_end = date(int(end_key[:4]), int(end_key[4:6]), int(end_key[6:8]))
+            if chunk_end >= latest_date:
+                skip = max(0, i - 1)
+                log.info("[RESUME] Resuming from chunk %d (re-processing chunk containing %s for safety).",
+                         skip + 1, latest_date.isoformat())
+                return skip
+
+        log.info("[RESUME] All chunks appear loaded — will re-verify last few.")
+        return max(0, len(all_chunks) - 3)
+
+    except Exception as exc:
+        log.warning("[RESUME] Could not detect resume point (%s) — starting from chunk 1.", exc)
+        return 0
+
+
 def run_historical_extract(
     dry_run: bool = False,
     start_chunk: int = 0,
     max_chunks: int = 0,
     months_filter: list[str] | None = None,
+    auto_resume: bool = True,
 ) -> int:
     """Pull historical data month by month and load to Supabase.
 
@@ -1336,6 +1376,8 @@ def run_historical_extract(
         dry_run: If True, pull and clean but do not write to Supabase.
         months_filter: If provided, only process these months (YYYY-MM format).
                        Used by --mode retry-failed.
+        auto_resume: If True and start_chunk is 0, auto-detect resume point
+                     from existing Supabase data.
 
     Returns 0 if all months succeeded, 1 if any failed.
     """
@@ -1373,6 +1415,11 @@ def run_historical_extract(
 
     if start_chunk > 0:
         all_chunks = all_chunks[start_chunk:]
+    elif auto_resume and not months_filter and not dry_run:
+        resume_idx = _detect_resume_chunk(all_chunks)
+        if resume_idx > 0:
+            log.info("[RESUME] Skipping %d already-loaded chunks.", resume_idx)
+            all_chunks = all_chunks[resume_idx:]
     if max_chunks > 0:
         all_chunks = all_chunks[:max_chunks]
 

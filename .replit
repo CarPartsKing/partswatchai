@@ -65,12 +65,12 @@ outputType = "console"
 name = "Historical Extract"
 author = "agent"
 
-[[workflows.workflow.tasks]]
-task = "shell.exec"
-args = "python run_historical_extract.py 2"
-
 [workflows.workflow.metadata]
 outputType = "console"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "python run_historical_extract.py"
 
 [[ports]]
 localPort = 5000

@@ -1,0 +1,556 @@
+Add a webhook receiver endpoint to the existing Elite EXTRA Operations Intelligence Dashboard. This endpoint will receive real-time order status data pushed from Elite EXTRA every time a delivery stop status changes. Do not modify any existing functionality. Only add what is described below.
+
+New Database Table — webhook_events
+Add this table to the existing database:
+sqlCREATE TABLE IF NOT EXISTS webhook_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    received_at TEXT DEFAULT (datetime('now')),
+    event_id TEXT,
+    status TEXT,
+    driver_full_name TEXT,
+    driver_employee_id TEXT,
+    manifest_name TEXT,
+    manifest_id TEXT,
+    stop_number INTEGER,
+    destination_business_name TEXT,
+    destination_business_id TEXT,
+    source_business_name TEXT,
+    ordered_by_dealer_id TEXT,
+    invoice TEXT,
+    po TEXT,
+    parts_value REAL,
+    order_id TEXT,
+    arrival_time TEXT,
+    departure_time TEXT,
+    delivery_eta TEXT,
+    time_dispatched TEXT,
+    route_start_time TEXT,
+    route_finish_time TEXT,
+    time_created TEXT,
+    time_delivered TEXT,
+    raw_payload TEXT,
+    processed INTEGER DEFAULT 0,
+    processing_error TEXT,
+    store_id TEXT
+)
+Add these indexes:
+sqlCREATE INDEX IF NOT EXISTS idx_webhook_received ON webhook_events(received_at);
+CREATE INDEX IF NOT EXISTS idx_webhook_status ON webhook_events(status);
+CREATE INDEX IF NOT EXISTS idx_webhook_driver ON webhook_events(driver_full_name);
+CREATE INDEX IF NOT EXISTS idx_webhook_processed ON webhook_events(processed);
+CREATE INDEX IF NOT EXISTS idx_webhook_manifest ON webhook_events(manifest_id);
+Add these query functions to database.py:
+save_webhook_event(event_dict) — inserts a raw webhook event into webhook_events table, stores the full JSON payload as a string in raw_payload, returns the new row id
+get_unprocessed_webhook_events(limit=100) — returns list of webhook events where processed = 0, ordered by received_at ascending, limited to limit rows
+mark_webhook_processed(event_id, error=None) — sets processed = 1 on the webhook_events row with that id. If error is provided set processing_error to that string instead and set processed = -1 to flag it as failed
+get_webhook_stats() — returns dict with total_received, total_processed, total_failed, total_pending, last_received_at from the webhook_events table
+get_recent_webhook_events(limit=50) — returns 50 most recent webhook events ordered by received_at descending for the activity log display
+
+New File — webhook_processor.py
+Create a new file called webhook_processor.py. This file handles converting raw Elite EXTRA webhook payloads into stop records that match the existing stops table schema.
+pythonimport json
+import re
+from datetime import datetime
+from database import (
+    get_unprocessed_webhook_events,
+    mark_webhook_processed,
+    get_connection
+)
+
+STORE_LOOKUP = {}
+
+STATUS_MAP = {
+    "Delivered": "delivered",
+    "En Route":  "attempted",
+    "Arrived":   "delivered",
+    "Dispatched": "delivered",
+    "Voided":    "cancelled",
+    "Held":      "cancelled",
+    "Pending":   "delivered",
+}
+
+def parse_iso_time(ts):
+    if not ts:
+        return None
+    try:
+        dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        return dt.strftime("%H:%M:%S")
+    except:
+        return None
+
+def parse_iso_date(ts):
+    if not ts:
+        return None
+    try:
+        dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        return dt.strftime("%Y-%m-%d")
+    except:
+        return None
+
+def minutes_between(start_ts, end_ts):
+    if not start_ts or not end_ts:
+        return None
+    try:
+        fmt = "%Y-%m-%dT%H:%M:%SZ"
+        s = datetime.strptime(start_ts.replace("+00:00","Z"), fmt)
+        e = datetime.strptime(end_ts.replace("+00:00","Z"), fmt)
+        diff = (e - s).total_seconds() / 60
+        if 0 < diff < 720:
+            return round(diff, 1)
+        return None
+    except:
+        return None
+
+def calc_on_time(eta_ts, delivered_ts):
+    mins = minutes_between(eta_ts, delivered_ts)
+    if mins is None:
+        return 1
+    return 1 if mins <= 15 else 0
+
+def extract_stop_from_event(event):
+    raw = event.get("raw_payload")
+    if isinstance(raw, str):
+        try:
+            payload = json.loads(raw)
+        except:
+            return None
+    else:
+        payload = raw or {}
+
+    status_raw = event.get("status") or payload.get("status", "")
+    status = STATUS_MAP.get(status_raw, "delivered")
+
+    if status_raw not in ("Delivered", "Arrived"):
+        return None
+
+    route_date = parse_iso_date(
+        event.get("time_dispatched") or
+        event.get("route_start_time") or
+        event.get("time_created")
+    )
+
+    if not route_date:
+        return None
+
+    driver_name = (
+        event.get("driver_full_name") or
+        payload.get("driver_full_name") or
+        "Unknown"
+    ).strip()
+
+    arrival_time   = parse_iso_time(event.get("arrival_time"))
+    departure_time = parse_iso_time(event.get("departure_time"))
+    dispatch_time  = parse_iso_time(event.get("time_dispatched"))
+    delivered_time = parse_iso_time(event.get("time_delivered") or event.get("arrival_time"))
+    scheduled_time = parse_iso_time(event.get("delivery_eta"))
+
+    dwell_minutes             = minutes_between(event.get("arrival_time"), event.get("departure_time"))
+    dispatch_to_delivery_min  = minutes_between(event.get("time_dispatched"), event.get("time_delivered") or event.get("arrival_time"))
+    pick_to_dispatch_min      = None
+    total_cycle_min           = dispatch_to_delivery_min
+
+    on_time = calc_on_time(event.get("delivery_eta"), event.get("time_delivered") or event.get("arrival_time"))
+
+    location = (
+        event.get("store_id") or
+        str(event.get("ordered_by_dealer_id") or "") or
+        "webhook"
+    )
+
+    return {
+        "route_id":                None,
+        "import_id":               f"WEBHOOK-{event.get('manifest_id') or 'unknown'}",
+        "route_date":              route_date,
+        "driver_name":             driver_name,
+        "stop_sequence":           event.get("stop_number"),
+        "customer_name":           event.get("destination_business_name"),
+        "customer_id":             event.get("destination_business_id"),
+        "address":                 None,
+        "order_number":            event.get("invoice"),
+        "invoice_number":          event.get("invoice"),
+        "order_value":             event.get("parts_value"),
+        "dispatch_time":           dispatch_time,
+        "scheduled_time":          scheduled_time,
+        "arrival_time":            arrival_time,
+        "departure_time":          departure_time,
+        "delivered_time":          delivered_time,
+        "status":                  status,
+        "dwell_minutes":           dwell_minutes,
+        "on_time":                 on_time,
+        "pick_to_dispatch_min":    pick_to_dispatch_min,
+        "dispatch_to_delivery_min": dispatch_to_delivery_min,
+        "total_cycle_min":         total_cycle_min,
+        "location":                location,
+    }
+
+def insert_stop_from_webhook(stop_dict):
+    conn = get_connection()
+    try:
+        route_check = conn.execute("""
+            SELECT id FROM routes
+            WHERE route_date = ? AND driver_name = ? AND manifest_id = ?
+            LIMIT 1
+        """, [
+            stop_dict["route_date"],
+            stop_dict["driver_name"],
+            stop_dict.get("import_id", "").replace("WEBHOOK-", "")
+        ]).fetchone()
+
+        route_id = route_check[0] if route_check else None
+
+        if not route_id:
+            result = conn.execute("""
+                INSERT INTO routes (
+                    import_id, route_date, driver_name, manifest_id,
+                    location, dispatch_time, total_stops, delivered_stops,
+                    attempted_stops, total_orders, total_miles, route_duration_min
+                ) VALUES (?,?,?,?,?,?,0,0,0,0,0,0)
+            """, [
+                stop_dict["import_id"],
+                stop_dict["route_date"],
+                stop_dict["driver_name"],
+                stop_dict.get("import_id", "").replace("WEBHOOK-",""),
+                stop_dict["location"],
+                stop_dict["dispatch_time"],
+            ])
+            route_id = result.lastrowid
+
+        existing = conn.execute("""
+            SELECT id FROM stops
+            WHERE route_date = ? AND driver_name = ? AND invoice_number = ?
+            LIMIT 1
+        """, [
+            stop_dict["route_date"],
+            stop_dict["driver_name"],
+            stop_dict["invoice_number"]
+        ]).fetchone()
+
+        if existing:
+            conn.execute("""
+                UPDATE stops SET
+                    arrival_time = ?, departure_time = ?, delivered_time = ?,
+                    status = ?, dwell_minutes = ?, on_time = ?,
+                    dispatch_to_delivery_min = ?, total_cycle_min = ?
+                WHERE id = ?
+            """, [
+                stop_dict["arrival_time"], stop_dict["departure_time"],
+                stop_dict["delivered_time"], stop_dict["status"],
+                stop_dict["dwell_minutes"], stop_dict["on_time"],
+                stop_dict["dispatch_to_delivery_min"], stop_dict["total_cycle_min"],
+                existing[0]
+            ])
+        else:
+            conn.execute("""
+                INSERT INTO stops (
+                    route_id, import_id, route_date, driver_name, stop_sequence,
+                    customer_name, customer_id, order_number, invoice_number,
+                    order_value, dispatch_time, scheduled_time, arrival_time,
+                    departure_time, delivered_time, status, dwell_minutes, on_time,
+                    pick_to_dispatch_min, dispatch_to_delivery_min, total_cycle_min, location
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            """, [
+                route_id, stop_dict["import_id"], stop_dict["route_date"],
+                stop_dict["driver_name"], stop_dict["stop_sequence"],
+                stop_dict["customer_name"], stop_dict["customer_id"],
+                stop_dict["order_number"], stop_dict["invoice_number"],
+                stop_dict["order_value"], stop_dict["dispatch_time"],
+                stop_dict["scheduled_time"], stop_dict["arrival_time"],
+                stop_dict["departure_time"], stop_dict["delivered_time"],
+                stop_dict["status"], stop_dict["dwell_minutes"],
+                stop_dict["on_time"], stop_dict["pick_to_dispatch_min"],
+                stop_dict["dispatch_to_delivery_min"], stop_dict["total_cycle_min"],
+                stop_dict["location"]
+            ])
+
+        conn.execute("""
+            UPDATE routes SET
+                total_stops = total_stops + 1,
+                delivered_stops = delivered_stops + CASE WHEN ? = 'delivered' THEN 1 ELSE 0 END,
+                attempted_stops = attempted_stops + CASE WHEN ? = 'attempted' THEN 1 ELSE 0 END
+            WHERE id = ?
+        """, [stop_dict["status"], stop_dict["status"], route_id])
+
+        conn.commit()
+        return True
+    except Exception as e:
+        conn.rollback()
+        raise e
+    finally:
+        conn.close()
+
+def process_pending_webhooks():
+    events = get_unprocessed_webhook_events(limit=100)
+    results = {"processed": 0, "skipped": 0, "failed": 0}
+
+    for event in events:
+        try:
+            stop = extract_stop_from_event(event)
+            if stop is None:
+                mark_webhook_processed(event["id"])
+                results["skipped"] += 1
+                continue
+            insert_stop_from_webhook(stop)
+            mark_webhook_processed(event["id"])
+            results["processed"] += 1
+        except Exception as e:
+            mark_webhook_processed(event["id"], error=str(e))
+            results["failed"] += 1
+
+    return results
+
+New Webhook Endpoint in main.py
+Add these imports at the top of main.py if not already present:
+pythonimport hashlib
+import hmac
+import base64
+import json
+from webhook_processor import process_pending_webhooks
+Add this environment variable check in main.py. Read WEBHOOK_USERNAME and WEBHOOK_PASSWORD from environment variables with defaults:
+pythonWEBHOOK_USERNAME = os.getenv("WEBHOOK_USERNAME", "eliteextra_webhook")
+WEBHOOK_PASSWORD = os.getenv("WEBHOOK_PASSWORD", "changeme123")
+Add this helper function in main.py:
+pythondef verify_webhook_auth(request: Request) -> bool:
+    auth_header = request.headers.get("Authorization", "")
+    if not auth_header.startswith("Basic "):
+        return False
+    try:
+        decoded = base64.b64decode(auth_header[6:]).decode("utf-8")
+        username, password = decoded.split(":", 1)
+        return username == WEBHOOK_USERNAME and password == WEBHOOK_PASSWORD
+    except:
+        return False
+Add this endpoint to main.py:
+python@app.post("/api/webhook/orderstatus")
+async def receive_order_status_webhook(request: Request):
+    if not verify_webhook_auth(request):
+        return JSONResponse(
+            status_code=401,
+            content={"error": "Unauthorized"}
+        )
+
+    try:
+        body = await request.body()
+        payload = json.loads(body)
+    except Exception as e:
+        return JSONResponse(
+            status_code=400,
+            content={"error": f"Invalid JSON: {str(e)}"}
+        )
+
+    try:
+        event_dict = {
+            "status":                   payload.get("status"),
+            "driver_full_name":         payload.get("driver_full_name"),
+            "driver_employee_id":       payload.get("driver_employee_id"),
+            "manifest_name":            payload.get("manifest_name"),
+            "manifest_id":              str(payload.get("manifest_id", "")),
+            "stop_number":              payload.get("stop_number"),
+            "destination_business_name": payload.get("destination_business_name") or payload.get("order", {}).get("destination_business_name"),
+            "destination_business_id":  payload.get("destination_business_id") or payload.get("order", {}).get("destination_business_id"),
+            "source_business_name":     payload.get("source_business_name") or payload.get("order", {}).get("source_business_name"),
+            "ordered_by_dealer_id":     str(payload.get("ordered_by_dealer_id", "")),
+            "invoice":                  payload.get("invoice") or payload.get("order", {}).get("invoice"),
+            "po":                       payload.get("po") or payload.get("order", {}).get("po"),
+            "parts_value":              payload.get("parts_value") or payload.get("order", {}).get("parts_value"),
+            "order_id":                 str(payload.get("order_id", "")),
+            "arrival_time":             payload.get("arrival_time") or payload.get("order", {}).get("arrival_time"),
+            "departure_time":           payload.get("departure_time"),
+            "delivery_eta":             payload.get("delivery_eta") or payload.get("order", {}).get("delivery_eta"),
+            "time_dispatched":          payload.get("time_dispatched") or payload.get("order", {}).get("time_dispatched"),
+            "route_start_time":         payload.get("route_start_time") or payload.get("order", {}).get("route_start_time"),
+            "route_finish_time":        payload.get("route_finish_time") or payload.get("order", {}).get("route_finish_time"),
+            "time_created":             payload.get("time_created") or payload.get("order", {}).get("time_created"),
+            "time_delivered":           payload.get("time_delivered") or payload.get("order", {}).get("time_delivered"),
+            "store_id":                 str(payload.get("ordered_by_dealer_id", "")),
+            "raw_payload":              json.dumps(payload),
+            "processed":                0,
+        }
+
+        event_id = save_webhook_event(event_dict)
+
+        try:
+            stop = extract_stop_from_event(event_dict)
+            if stop:
+                insert_stop_from_webhook(stop)
+                mark_webhook_processed(event_id)
+            else:
+                mark_webhook_processed(event_id)
+        except Exception as process_err:
+            mark_webhook_processed(event_id, error=str(process_err))
+
+        return JSONResponse(
+            status_code=200,
+            content={"received": True, "event_id": event_id}
+        )
+
+    except Exception as e:
+        return JSONResponse(
+            status_code=500,
+            content={"error": str(e)}
+        )
+Add this endpoint for testing the webhook manually:
+python@app.post("/api/webhook/test")
+async def test_webhook(request: Request):
+    if not verify_webhook_auth(request):
+        return JSONResponse(status_code=401, content={"error": "Unauthorized"})
+    test_payload = {
+        "status": "Delivered",
+        "driver_full_name": "Test Driver",
+        "driver_employee_id": "TEST001",
+        "manifest_name": "TEST-MANIFEST-001",
+        "manifest_id": 99999,
+        "stop_number": 1,
+        "destination_business_name": "Test Auto Parts",
+        "destination_business_id": "CUST001",
+        "source_business_name": "Main Warehouse",
+        "ordered_by_dealer_id": 33,
+        "invoice": "TEST-INV-001",
+        "parts_value": 125.50,
+        "order_id": "TEST001",
+        "arrival_time": "2026-04-14T14:30:00Z",
+        "departure_time": "2026-04-14T14:35:00Z",
+        "delivery_eta": "2026-04-14T14:30:00Z",
+        "time_dispatched": "2026-04-14T13:00:00Z",
+        "route_start_time": "2026-04-14T13:00:00Z",
+        "route_finish_time": "2026-04-14T16:00:00Z",
+        "time_created": "2026-04-14T12:00:00Z",
+        "time_delivered": "2026-04-14T14:33:00Z",
+    }
+    fake_request_dict = {**test_payload, "raw_payload": json.dumps(test_payload), "processed": 0, "store_id": "33"}
+    event_id = save_webhook_event(fake_request_dict)
+    stop = extract_stop_from_event(fake_request_dict)
+    if stop:
+        insert_stop_from_webhook(stop)
+        mark_webhook_processed(event_id)
+    return JSONResponse(status_code=200, content={"success": True, "event_id": event_id, "stop_inserted": stop is not None})
+Add these monitoring endpoints:
+python@app.get("/api/webhook/stats")
+def webhook_stats():
+    return get_webhook_stats()
+
+@app.get("/api/webhook/events")
+def recent_webhook_events(limit: int = 50):
+    return {"events": get_recent_webhook_events(limit)}
+
+@app.post("/api/webhook/process")
+async def trigger_process():
+    results = process_pending_webhooks()
+    return {"success": True, "results": results}
+
+Add Secrets to Replit
+In Replit Secrets add these two values:
+WEBHOOK_USERNAME = eliteextra_webhook
+WEBHOOK_PASSWORD = [choose a strong password — at least 16 characters]
+Write down the password you choose. You will need to give it to Elite EXTRA's integration team so they can configure Basic Auth on their webhook.
+
+Frontend Updates in public/index.html
+Add a Live Feed section to the existing Settings tab. Find the Settings tab content and add this section at the top before the existing settings content:
+html<div style="background:#141720;border:0.5px solid rgba(255,255,255,0.07);border-radius:8px;padding:16px;margin-bottom:16px;">
+  <div style="font-size:10px;text-transform:uppercase;letter-spacing:.08em;color:#7a8099;margin-bottom:12px;">Webhook status</div>
+
+  <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:14px;" id="webhookKpis">
+    <div style="background:#1c2030;border-radius:6px;padding:10px;">
+      <div style="font-size:10px;color:#7a8099;margin-bottom:4px;">Total received</div>
+      <div id="wh-total" style="font-size:20px;font-weight:700;font-family:monospace;color:#a78bfa;">—</div>
+    </div>
+    <div style="background:#1c2030;border-radius:6px;padding:10px;">
+      <div style="font-size:10px;color:#7a8099;margin-bottom:4px;">Processed</div>
+      <div id="wh-processed" style="font-size:20px;font-weight:700;font-family:monospace;color:#22c55e;">—</div>
+    </div>
+    <div style="background:#1c2030;border-radius:6px;padding:10px;">
+      <div style="font-size:10px;color:#7a8099;margin-bottom:4px;">Pending</div>
+      <div id="wh-pending" style="font-size:20px;font-weight:700;font-family:monospace;color:#f59e0b;">—</div>
+    </div>
+    <div style="background:#1c2030;border-radius:6px;padding:10px;">
+      <div style="font-size:10px;color:#7a8099;margin-bottom:4px;">Failed</div>
+      <div id="wh-failed" style="font-size:20px;font-weight:700;font-family:monospace;color:#ef4444;">—</div>
+    </div>
+  </div>
+
+  <div style="display:flex;gap:8px;margin-bottom:12px;">
+    <button onclick="loadWebhookStats()" style="background:#1c2030;border:0.5px solid rgba(255,255,255,0.13);color:#e8eaf0;border-radius:6px;padding:5px 14px;font-size:12px;cursor:pointer;">↻ Refresh</button>
+    <button onclick="sendTestWebhook()" style="background:#f59e0b;color:#000;border:none;border-radius:6px;padding:5px 14px;font-size:12px;font-weight:600;cursor:pointer;">Send test event</button>
+    <span id="webhookEndpoint" style="font-size:11px;color:#7a8099;margin-left:auto;font-family:monospace;align-self:center;"></span>
+  </div>
+
+  <div style="font-size:10px;text-transform:uppercase;letter-spacing:.06em;color:#7a8099;margin-bottom:8px;">Recent events</div>
+  <div id="webhookEventsList" style="font-size:12px;"></div>
+</div>
+Add these JavaScript functions inside the existing script tag:
+javascriptasync function loadWebhookStats() {
+  try {
+    const stats = await api('/api/webhook/stats');
+    document.getElementById('wh-total').textContent     = stats.total_received || 0;
+    document.getElementById('wh-processed').textContent = stats.total_processed || 0;
+    document.getElementById('wh-pending').textContent   = stats.total_pending || 0;
+    document.getElementById('wh-failed').textContent    = stats.total_failed || 0;
+
+    const data = await api('/api/webhook/events?limit=20');
+    const events = data.events || [];
+    const list = document.getElementById('webhookEventsList');
+
+    if (!events.length) {
+      list.innerHTML = '<div style="color:#7a8099;padding:8px 0;">No webhook events received yet</div>';
+      return;
+    }
+
+    list.innerHTML = events.map(e => {
+      const statusColor = e.status === 'Delivered' ? '#22c55e' : e.status === 'Arrived' ? '#3b82f6' : '#7a8099';
+      const procColor = e.processed === 1 ? '#22c55e' : e.processed === -1 ? '#ef4444' : '#f59e0b';
+      const procLabel = e.processed === 1 ? 'ok' : e.processed === -1 ? 'failed' : 'pending';
+      return `
+        <div style="display:flex;align-items:center;justify-content:space-between;padding:7px 0;border-bottom:0.5px solid rgba(255,255,255,0.05);">
+          <div>
+            <span style="font-weight:500;color:#e8eaf0;">${e.driver_full_name || 'Unknown driver'}</span>
+            <span style="color:#7a8099;margin-left:8px;">${e.destination_business_name || ''}</span>
+          </div>
+          <div style="display:flex;gap:10px;align-items:center;">
+            <span style="color:${statusColor};font-size:11px;">${e.status || ''}</span>
+            <span style="color:${procColor};font-size:10px;padding:1px 6px;border-radius:3px;background:rgba(255,255,255,0.05);">${procLabel}</span>
+            <span style="color:#7a8099;font-size:11px;font-family:monospace;">${(e.received_at || '').slice(0,16)}</span>
+          </div>
+        </div>`;
+    }).join('');
+
+    document.getElementById('webhookEndpoint').textContent =
+      window.location.origin + '/api/webhook/orderstatus';
+
+  } catch(e) {
+    console.error('Webhook stats error:', e);
+  }
+}
+
+async function sendTestWebhook() {
+  try {
+    const res = await fetch('/api/webhook/test', {
+      method: 'POST',
+      headers: {
+        'Authorization': 'Basic ' + btoa('eliteextra_webhook:changeme123'),
+        'Content-Type': 'application/json'
+      }
+    });
+    const data = await res.json();
+    if (data.success) {
+      alert('Test event sent successfully. Check the events list.');
+      loadWebhookStats();
+    } else {
+      alert('Test failed: ' + JSON.stringify(data));
+    }
+  } catch(e) {
+    alert('Test error: ' + e.message);
+  }
+}
+Update the existing switchTab() function so when the Settings tab is opened it automatically calls loadWebhookStats():
+javascriptif (name === 'settings') {
+  loadWebhookStats();
+}
+
+Add WEBHOOK_USERNAME and WEBHOOK_PASSWORD to existing environment variable handling
+In main.py where other environment variables are read, add:
+pythonWEBHOOK_USERNAME = os.getenv("WEBHOOK_USERNAME", "eliteextra_webhook")
+WEBHOOK_PASSWORD = os.getenv("WEBHOOK_PASSWORD", "changeme123")
+Add these to .env.example:
+WEBHOOK_USERNAME=eliteextra_webhook
+WEBHOOK_PASSWORD=your-strong-password-here
+
+Do not modify any existing functionality. All existing uploads, KPI cards, driver table, timing charts, AI report generation, anomaly detection, schema registry, and import history must continue working exactly as before.

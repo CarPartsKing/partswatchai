@@ -48,6 +48,22 @@ def get_client() -> Client:
     return client
 
 
+def get_new_client() -> Client:
+    """Build a brand-new, uncached Supabase client.
+
+    Use this from long-running jobs to drop a stale HTTP/2 connection
+    after a `RemoteProtocolError` / `ConnectionTerminated`. This bypasses
+    the `get_client()` lru_cache and also clears it so subsequent
+    `get_client()` callers receive the fresh instance.
+    """
+    from config import SUPABASE_URL, SUPABASE_KEY
+
+    get_client.cache_clear()
+    log.info("Building fresh Supabase client (cache cleared) → %s", SUPABASE_URL)
+    client = create_client(SUPABASE_URL, SUPABASE_KEY)
+    return client
+
+
 @retry(
     stop=stop_after_attempt(3),
     wait=wait_exponential(multiplier=1, min=2, max=10),

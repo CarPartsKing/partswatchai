@@ -77,6 +77,14 @@ _PAGE_SIZE: int = 1000
 # Batch size for upserts
 BATCH_SIZE: int = 500
 
+# Connection-error retry policy for upserts/reads
+_MAX_RETRIES: int = 3
+_RETRY_DELAY: float = 5.0
+
+# Reconnect a fresh Supabase client every N upsert batches to keep the
+# underlying HTTP/2 connection from going stale on long-running runs.
+_RECONNECT_EVERY_N_BATCHES: int = 20
+
 
 # ---------------------------------------------------------------------------
 # Type alias
@@ -177,18 +185,93 @@ def _fetch_chunked_by_date(
     return total
 
 
-def _upsert(client: Any, table: str, rows: list[dict], on_conflict: str) -> None:
-    """Upsert rows in BATCH_SIZE chunks.
+def _get_fresh_client() -> Any:
+    """Return a brand-new Supabase client (drops any stale HTTP/2 connection).
+
+    Bypasses the `get_client` lru_cache so a real new HTTP session is opened.
+    """
+    from db.connection import get_new_client
+    return get_new_client()
+
+
+def _is_connection_error(exc: Exception) -> bool:
+    """Return True if *exc* looks like a transient Supabase/network connection error."""
+    blob = type(exc).__name__ + " " + str(exc)
+    return any(k in blob for k in (
+        "ConnectionTerminated", "ConnectionError", "RemoteProtocolError",
+        "ReadTimeout", "ConnectTimeout", "PoolTimeout",
+        "RemoteDisconnected", "BrokenPipeError", "57014",
+    ))
+
+
+def _upsert(
+    client: Any,
+    table: str,
+    rows: list[dict],
+    on_conflict: str,
+    progress_label: str | None = None,
+) -> Any:
+    """Upsert rows in BATCH_SIZE chunks with retry + periodic reconnect.
+
+    - Retries each batch up to _MAX_RETRIES times on connection errors.
+    - Reconnects a fresh Supabase client every _RECONNECT_EVERY_N_BATCHES
+      batches to avoid stale HTTP/2 connections on multi-hundred-batch runs.
+    - Logs progress every 20 batches when *progress_label* is provided.
 
     Args:
-        client:      Active Supabase client.
-        table:       Target table name.
-        rows:        Full list of rows to upsert.
-        on_conflict: Comma-separated conflict column string.
+        client:         Active Supabase client (will be replaced internally if reconnects happen).
+        table:          Target table name.
+        rows:           Full list of rows to upsert.
+        on_conflict:    Comma-separated conflict column string.
+        progress_label: Optional label for periodic progress logging.
+
+    Returns:
+        The (possibly fresh) Supabase client at the end of the run.
     """
-    for i in range(0, len(rows), BATCH_SIZE):
+    if not rows:
+        return client
+
+    total_batches = (len(rows) + BATCH_SIZE - 1) // BATCH_SIZE
+    written = 0
+
+    for batch_idx, i in enumerate(range(0, len(rows), BATCH_SIZE), start=1):
         batch = rows[i : i + BATCH_SIZE]
-        client.table(table).upsert(batch, on_conflict=on_conflict).execute()
+
+        # Periodic reconnect to keep the HTTP/2 channel fresh.
+        if batch_idx > 1 and (batch_idx - 1) % _RECONNECT_EVERY_N_BATCHES == 0:
+            try:
+                client = _get_fresh_client()
+            except Exception as exc:
+                log.warning("    reconnect failed: %s — keeping current client", exc)
+
+        for attempt in range(1, _MAX_RETRIES + 1):
+            try:
+                client.table(table).upsert(batch, on_conflict=on_conflict).execute()
+                break
+            except Exception as exc:
+                if _is_connection_error(exc) and attempt < _MAX_RETRIES:
+                    log.warning(
+                        "    upsert batch %d/%d failed (attempt %d/%d): %s — "
+                        "reconnecting in %.0fs …",
+                        batch_idx, total_batches, attempt, _MAX_RETRIES,
+                        type(exc).__name__, _RETRY_DELAY,
+                    )
+                    time.sleep(_RETRY_DELAY)
+                    try:
+                        client = _get_fresh_client()
+                    except Exception:
+                        pass
+                    continue
+                raise
+
+        written += len(batch)
+        if progress_label and (batch_idx % 20 == 0 or batch_idx == total_batches):
+            log.info(
+                "    %s — wrote %d / %d rows (%d / %d batches)",
+                progress_label, written, len(rows), batch_idx, total_batches,
+            )
+
+    return client
 
 
 def _pearson_r(xs: list[float], ys: list[float]) -> float | None:
@@ -385,7 +468,10 @@ def derive_abc_classification(client: Any) -> dict:
             updates.append({"sku_id": r["sku_id"], "abc_class": "C"})
             class_counts["C"] += 1
 
-    _upsert(client, "sku_master", updates, on_conflict="sku_id")
+    _upsert(
+        client, "sku_master", updates, on_conflict="sku_id",
+        progress_label="ABC class upsert",
+    )
 
     log.info(
         "  ABC classified %d SKU(s): A=%d  B=%d  C=%d",
@@ -519,7 +605,10 @@ def derive_xyz_classification(client: Any) -> dict:
             "abc_xyz_class": abc + xyz,
         })
 
-    _upsert(client, "sku_master", updates, on_conflict="sku_id")
+    _upsert(
+        client, "sku_master", updates, on_conflict="sku_id",
+        progress_label="XYZ class upsert",
+    )
 
     log.info(
         "  XYZ classified %d SKU(s): X=%d  Y=%d  Z=%d  "
@@ -639,7 +728,10 @@ def derive_supplier_scores(client: Any) -> dict:
             "risk_flag":             risk_flag,
         })
 
-    _upsert(client, "supplier_scores", updates, on_conflict="supplier_id,score_date")
+    _upsert(
+        client, "supplier_scores", updates, on_conflict="supplier_id,score_date",
+        progress_label="Supplier scores upsert",
+    )
     return {"rows_updated": len(updates)}
 
 
@@ -745,7 +837,10 @@ def derive_weather_sensitivity(client: Any) -> dict:
             updates.append({"sku_id": r["sku_id"], "weather_sensitivity_score": corr})
 
     if updates:
-        _upsert(client, "sku_master", updates, on_conflict="sku_id")
+        _upsert(
+            client, "sku_master", updates, on_conflict="sku_id",
+            progress_label="Weather sensitivity upsert",
+        )
 
     return {"rows_updated": len(updates)}
 
@@ -757,7 +852,55 @@ def derive_weather_sensitivity(client: Any) -> dict:
 SKU_METRICS_LOOKBACK_DAYS: int = 365
 
 
-def derive_sku_metrics(client: Any) -> dict:
+def _fetch_skus_with_metrics(client: Any) -> set[str]:
+    """Return the set of sku_ids that already have last_sale_date populated.
+
+    Used by derive_sku_metrics(resume=True) to skip SKUs that were already
+    updated in a previous (interrupted) run.
+
+    Each page is retried up to _MAX_RETRIES times on connection errors and
+    raises after exhaustion (no infinite retry loop).
+    """
+    done: set[str] = set()
+    offset = 0
+    while True:
+        page: list[dict] | None = None
+        for attempt in range(1, _MAX_RETRIES + 1):
+            try:
+                page = (
+                    client.table("sku_master")
+                    .select("sku_id")
+                    .not_.is_("last_sale_date", "null")
+                    .range(offset, offset + _PAGE_SIZE - 1)
+                    .execute()
+                    .data or []
+                )
+                break
+            except Exception as exc:
+                if _is_connection_error(exc) and attempt < _MAX_RETRIES:
+                    log.warning(
+                        "    resume-check page (offset=%d) failed (attempt %d/%d): %s — "
+                        "reconnecting in %.0fs …",
+                        offset, attempt, _MAX_RETRIES, type(exc).__name__, _RETRY_DELAY,
+                    )
+                    time.sleep(_RETRY_DELAY)
+                    client = _get_fresh_client()
+                    continue
+                raise
+        page = page or []
+        for r in page:
+            sid = r.get("sku_id")
+            if sid:
+                done.add(sid)
+        if len(page) < _PAGE_SIZE:
+            break
+        offset += _PAGE_SIZE
+        if offset % 50_000 == 0:
+            log.info("    … resume-check: %d SKUs already have last_sale_date", len(done))
+    return done
+
+
+def derive_sku_metrics(client: Any, resume: bool = False) -> dict:
     """Update last_sale_date and avg_weekly_units in sku_master for every SKU.
 
     last_sale_date   — date of most recent transaction for each SKU
@@ -765,12 +908,20 @@ def derive_sku_metrics(client: Any) -> dict:
 
     Uses a 365-day lookback for avg_weekly_units to avoid fetching all 8M+ rows.
 
+    Resume behavior:
+        Default is resume=False so nightly scheduled runs always recompute
+        every SKU's last_sale_date / avg_weekly_units (otherwise stale
+        metrics would never refresh).  When restarting an interrupted run
+        manually, pass resume=True (or use the --resume-sku-metrics CLI
+        flag): SKUs that already have last_sale_date populated will be
+        skipped.
+
     Writes to:
         sku_master.last_sale_date
         sku_master.avg_weekly_units
 
     Returns:
-        {"rows_updated": N}
+        {"rows_updated": N, "rows_skipped_resume": M}
     """
     cutoff = (date.today() - timedelta(days=SKU_METRICS_LOOKBACK_DAYS)).isoformat()
     total_weeks = SKU_METRICS_LOOKBACK_DAYS / 7.0
@@ -800,18 +951,34 @@ def derive_sku_metrics(client: Any) -> dict:
 
     if not sku_qty:
         log.info("  No sales transactions found — skipping SKU metrics.")
-        return {"rows_updated": 0}
+        return {"rows_updated": 0, "rows_skipped_resume": 0}
+
+    already_done: set[str] = set()
+    if resume:
+        log.info("  Resume check: querying SKUs that already have last_sale_date …")
+        already_done = _fetch_skus_with_metrics(client)
+        log.info("  Resume check: %d SKUs already updated — will be skipped.", len(already_done))
 
     updates: list[dict] = []
+    skipped_resume = 0
     for sku, max_d in sku_max_date.items():
+        if sku in already_done:
+            skipped_resume += 1
+            continue
         updates.append({
             "sku_id":          sku,
             "last_sale_date":  max_d,
             "avg_weekly_units": round(sku_qty.get(sku, 0.0) / total_weeks, 2),
         })
 
-    _upsert(client, "sku_master", updates, on_conflict="sku_id")
-    return {"rows_updated": len(updates)}
+    log.info("  Upserting %d SKU metric row(s) (skipped %d already done) …",
+             len(updates), skipped_resume)
+
+    _upsert(
+        client, "sku_master", updates, on_conflict="sku_id",
+        progress_label="SKU metrics upsert",
+    )
+    return {"rows_updated": len(updates), "rows_skipped_resume": skipped_resume}
 
 
 # ---------------------------------------------------------------------------
@@ -833,8 +1000,13 @@ DERIVATIONS: list[tuple[str, DeriveFn]] = [
 # Orchestrator
 # ---------------------------------------------------------------------------
 
-def run_derivations() -> int:
+def run_derivations(resume_sku_metrics: bool = False) -> int:
     """Run every registered derivation in order and log timing + row counts.
+
+    Args:
+        resume_sku_metrics: When True, the SKU metrics step skips SKUs that
+            already have last_sale_date populated. Use only to recover from an
+            interrupted run — the default (False) refreshes every SKU.
 
     Returns:
         Exit code: 0 on success, 1 if any derivation raised an exception.
@@ -846,13 +1018,18 @@ def run_derivations() -> int:
     total_rows = 0
 
     log.info("Running %d derivation(s) …", len(DERIVATIONS))
+    if resume_sku_metrics:
+        log.info("  --resume-sku-metrics: SKU metrics will skip already-populated SKUs.")
     log.info("=" * 60)
 
     for label, fn in DERIVATIONS:
         log.info("▶  %s", label)
         t0 = time.perf_counter()
         try:
-            stats   = fn(client)
+            if fn is derive_sku_metrics:
+                stats = fn(client, resume=resume_sku_metrics)
+            else:
+                stats = fn(client)
             elapsed = time.perf_counter() - t0
             rows    = stats.get("rows_updated", 0)
             total_rows += rows
@@ -885,14 +1062,21 @@ def main() -> int:
             "in the Supabase SQL Editor before first use.\n"
         ),
     )
-    # Reserved for future flags (e.g. --only=abc_classification)
-    parser.parse_args()
+    parser.add_argument(
+        "--resume-sku-metrics", action="store_true", default=False,
+        help=(
+            "Skip SKUs that already have last_sale_date populated when "
+            "computing SKU metrics. Use only to recover from an interrupted "
+            "previous run; nightly runs should NOT use this flag."
+        ),
+    )
+    args = parser.parse_args()
 
     log.info("=" * 60)
     log.info("partswatch-ai — derive")
     log.info("=" * 60)
 
-    return run_derivations()
+    return run_derivations(resume_sku_metrics=args.resume_sku_metrics)
 
 
 if __name__ == "__main__":

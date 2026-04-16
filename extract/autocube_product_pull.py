@@ -20,6 +20,10 @@ MODES
     python -m extract.autocube_product_pull --mode inventory
         Pull current inventory snapshots (On Hand, Min, Max, On Order, Cost).
 
+    python -m extract.autocube_product_pull --mode full
+        Alias for --mode inventory — loads every (SKU, location) on-hand
+        position from the Product cube's [Prod PN Loc] hierarchy.
+
     python -m extract.autocube_product_pull --mode transfers
         Pull inter-location transfer history.
 
@@ -60,6 +64,11 @@ log = get_logger(__name__)
 
 _PRODUCT_CUBE = "Product"
 
+# Preferred: the Product cube exposes a compound "Prod PN Loc" hierarchy
+# where each member encodes SKU and location together as
+# "SKU_ID (LOCATION_NUMBER)", e.g. "ACD-OF-001 (1)".  A single-dimension
+# fetch is dramatically faster than a full crossjoin of Prod Code × Loc
+# (which otherwise materializes ~200k × 23 ≈ 4.6M cells server-side).
 MDX_INVENTORY_SNAPSHOT = """\
 SELECT
   NON EMPTY {{
@@ -76,12 +85,56 @@ SELECT
     [Measures].[On Hand Qty 5M],
     [Measures].[On Hand Qty 6M]
   }} ON COLUMNS,
+  NON EMPTY
+    [Product].[Prod PN Loc].[Prod PN Loc].MEMBERS
+  ON ROWS
+FROM [Product]
+"""
+
+# Fallback MDX when the [Prod PN Loc] hierarchy is unavailable in this
+# cube deployment — reverts to the original Prod Code × Loc crossjoin.
+MDX_INVENTORY_SNAPSHOT_CROSSJOIN = """\
+SELECT
+  NON EMPTY {{
+    [Measures].[On Hand Qty],
+    [Measures].[Min Qty],
+    [Measures].[Max Qty],
+    [Measures].[Qty On Order],
+    [Measures].[Ext Cost On Hand],
+    [Measures].[Stock Qty]
+  }} ON COLUMNS,
   NON EMPTY CROSSJOIN(
     [Product].[Prod Code].[Prod Code].MEMBERS,
     [Location].[Loc].[Loc].MEMBERS
   ) ON ROWS
 FROM [Product]
 """
+
+# Matches "SKU_ID (N)" or "SKU_ID (NN)" — the compound member key format.
+_PROD_PN_LOC_RE = re.compile(r"^\s*(.+?)\s*\(\s*(\d+)\s*\)\s*$")
+
+
+def _parse_prod_pn_loc(member: str) -> tuple[str, str] | tuple[None, None]:
+    """Split a '[Prod PN Loc]' member key into (sku_id, location_id).
+
+    Example:
+        'ACD-OF-001 (1)'   → ('ACD-OF-001', 'LOC-001')
+        'NGK-SP-100 (23)'  → ('NGK-SP-100', 'LOC-023')
+
+    Returns (None, None) when the member does not match the expected
+    compound format (header rows, grand totals, etc).
+    """
+    if not member:
+        return (None, None)
+    m = _PROD_PN_LOC_RE.match(member)
+    if not m:
+        return (None, None)
+    sku = m.group(1).strip()
+    try:
+        loc = f"LOC-{int(m.group(2)):03d}"
+    except ValueError:
+        return (None, None)
+    return (sku, loc)
 
 MDX_TRANSFERS = """\
 SELECT
@@ -311,35 +364,91 @@ def run_inventory_extract(dry_run: bool = False) -> int:
         log.exception("Connection failed.")
         return 1
 
+    # Preferred path: compound [Prod PN Loc] hierarchy (fast).
+    use_crossjoin = False
     try:
         rows = client.execute_mdx(MDX_INVENTORY_SNAPSHOT)
-        log.info("Inventory rows returned: %d", len(rows))
+        log.info("Inventory rows returned (Prod PN Loc): %d", len(rows))
     except Exception:
-        log.exception("Inventory extract failed.")
-        return 1
+        log.exception(
+            "[Prod PN Loc] inventory query failed — falling back to Prod Code × Loc crossjoin.",
+        )
+        use_crossjoin = True
+        rows = []
+
+    if not use_crossjoin and not rows:
+        log.warning(
+            "[Prod PN Loc] returned 0 rows — falling back to Prod Code × Loc crossjoin.",
+        )
+        use_crossjoin = True
+
+    if use_crossjoin:
+        try:
+            rows = client.execute_mdx(MDX_INVENTORY_SNAPSHOT_CROSSJOIN)
+            log.info("Inventory rows returned (crossjoin fallback): %d", len(rows))
+        except Exception:
+            log.exception("Crossjoin inventory extract failed.")
+            return 1
 
     if not rows:
-        log.info("No inventory data returned.")
+        log.info("No inventory data returned from either MDX path.")
         return 0
 
-    cleaned: list[dict[str, Any]] = []
-    for r in rows:
-        sku = r.get("[Product].[Prod Code].[Prod Code]", "").strip()
-        loc_raw = r.get("[Location].[Loc].[Loc]", "").strip()
-        if not sku or not loc_raw:
-            continue
-        loc = _extract_location_code(loc_raw)
-        cleaned.append({
-            "sku_id": sku,
-            "location_id": loc,
-            "snapshot_date": today.isoformat(),
-            "qty_on_hand": clean_numeric(r.get("[Measures].[On Hand Qty]")) or 0,
-            "qty_on_order": clean_numeric(r.get("[Measures].[Qty On Order]")) or 0,
-            "reorder_point": clean_numeric(r.get("[Measures].[Min Qty]")),
-            "reorder_qty": clean_numeric(r.get("[Measures].[Max Qty]")),
-        })
+    def _clean_rows(raw_rows: list[dict], crossjoin: bool) -> tuple[list[dict], int]:
+        out: list[dict] = []
+        skipped = 0
+        for rr in raw_rows:
+            if crossjoin:
+                s = rr.get("[Product].[Prod Code].[Prod Code]", "").strip()
+                lr = rr.get("[Location].[Loc].[Loc]", "").strip()
+                if not s or not lr:
+                    skipped += 1
+                    continue
+                lc = _extract_location_code(lr)
+            else:
+                member = rr.get("[Product].[Prod PN Loc].[Prod PN Loc]", "").strip()
+                s, lc = _parse_prod_pn_loc(member)
+                if not s or not lc:
+                    skipped += 1
+                    continue
+            out.append({
+                "sku_id":        s,
+                "location_id":   lc,
+                "snapshot_date": today.isoformat(),
+                "qty_on_hand":   clean_numeric(rr.get("[Measures].[On Hand Qty]")) or 0,
+                "qty_on_order":  clean_numeric(rr.get("[Measures].[Qty On Order]")) or 0,
+                "reorder_point": clean_numeric(rr.get("[Measures].[Min Qty]")),
+                "reorder_qty":   clean_numeric(rr.get("[Measures].[Max Qty]")),
+            })
+        return out, skipped
 
-    log.info("Cleaned %d inventory snapshot rows.", len(cleaned))
+    cleaned, skipped_unparseable = _clean_rows(rows, use_crossjoin)
+
+    # Post-parse fallback guard: if Prod PN Loc returned rows but the
+    # caption format has drifted (e.g. a cube upgrade renamed members),
+    # nothing will parse — retry with the crossjoin MDX before declaring
+    # success.  Only triggers when parse ratio is near zero.
+    parse_ratio = len(cleaned) / len(rows) if rows else 0.0
+    if not use_crossjoin and rows and parse_ratio < 0.10:
+        log.warning(
+            "[Prod PN Loc] parse success ratio %.2f%% (cleaned=%d / rows=%d) — "
+            "caption format may have drifted; falling back to crossjoin.",
+            parse_ratio * 100, len(cleaned), len(rows),
+        )
+        try:
+            rows = client.execute_mdx(MDX_INVENTORY_SNAPSHOT_CROSSJOIN)
+            log.info("Crossjoin fallback rows returned: %d", len(rows))
+            use_crossjoin = True
+            cleaned, skipped_unparseable = _clean_rows(rows, True)
+        except Exception:
+            log.exception("Crossjoin fallback (post-parse) failed.")
+            return 1
+
+    log.info(
+        "Cleaned %d inventory snapshot rows (skipped %d unparseable, path=%s).",
+        len(cleaned), skipped_unparseable,
+        "crossjoin" if use_crossjoin else "prod_pn_loc",
+    )
 
     if dry_run:
         for i, r in enumerate(cleaned[:5]):
@@ -622,8 +731,8 @@ def main() -> int:
     )
     parser.add_argument(
         "--mode",
-        choices=["inventory", "transfers", "enrich", "pricing", "all"],
-        help="Extraction mode",
+        choices=["inventory", "full", "transfers", "enrich", "pricing", "all"],
+        help="Extraction mode.  'full' is an alias for 'inventory'.",
     )
     parser.add_argument(
         "--dry-run",
@@ -656,9 +765,10 @@ def main() -> int:
 
     mode_map = {
         "inventory": run_inventory_extract,
+        "full":      run_inventory_extract,  # alias
         "transfers": run_transfer_extract,
-        "enrich": run_enrich_extract,
-        "pricing": run_pricing_extract,
+        "enrich":    run_enrich_extract,
+        "pricing":   run_pricing_extract,
     }
     return mode_map[args.mode](dry_run=args.dry_run)
 

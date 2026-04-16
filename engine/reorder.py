@@ -58,13 +58,13 @@ Usage
 from __future__ import annotations
 
 import argparse
+import math
 import sys
 import time
 from collections import defaultdict
 from datetime import date, timedelta
 from typing import Any
 
-from db.connection import get_client
 from engine.transfer import find_transfer_source
 from utils.logging_config import get_logger, setup_logging
 
@@ -105,6 +105,33 @@ BASKET_LOW_STOCK_DAYS: float = 14.0
 _PAGE_SIZE: int = 1_000
 """Supabase PostgREST page size for paginated fetches."""
 
+SKU_BATCH_SIZE: int = 1_000
+"""How many SKUs to pass to .in_() in a single forecast / PO fetch query.
+Keeps each query inside Supabase's statement timeout (error 57014)."""
+
+AT_RISK_COVERAGE_DAYS: float = 60.0
+"""Pre-filter threshold: a (SKU, location) with proxy days-of-supply
+(qty_on_hand / (avg_weekly_units / 7)) > this many days is clearly NOT
+at risk of stockout in the 30-day forecast horizon and is pruned BEFORE
+we fetch any forecasts.  Double the max reasonable reorder threshold
+(lead_time + safety_buffer ≈ 14–21 days) so we never miss a real
+at-risk SKU even if the true forecast spikes well above the rolling
+historical average."""
+
+_MAX_RETRIES: int = 5
+_RETRY_DELAY: float = 5.0
+_RETRYABLE_TOKENS: tuple[str, ...] = (
+    "57014",
+    "statement timeout",
+    "canceling statement",
+    "ConnectionTerminated",
+    "RemoteProtocolError",
+    "ReadTimeout",
+    "ConnectTimeout",
+    "PoolTimeout",
+    "ConnectionError",
+)
+
 # Preferred forecast model by ABC class.
 # A-class will use whatever is available (Prophet added later).
 _CLASS_MODEL_PREF: dict[str, list[str]] = {
@@ -116,24 +143,42 @@ _DEFAULT_MODEL_ORDER: list[str] = ["lightgbm", "rolling_avg"]
 
 
 # ---------------------------------------------------------------------------
-# Fetch helpers — all paginated, no N+1 queries
+# Fetch helpers — all paginated, retry on transient errors
 # ---------------------------------------------------------------------------
 
-def _paginate(client: Any, table: str, select: str,
+def _is_retryable_error(exc: Exception) -> bool:
+    """True if exc looks like a Supabase timeout or dropped-connection error."""
+    blob = type(exc).__name__ + " " + str(exc)
+    return any(tok in blob for tok in _RETRYABLE_TOKENS)
+
+
+def _get_fresh_client() -> Any:
+    """Return a brand-new Supabase client (bypasses lru_cache when available)."""
+    try:
+        from db.connection import get_new_client
+        return get_new_client()
+    except ImportError:
+        from db.connection import get_client
+        return get_client()
+
+
+def _paginate(client_holder: list, table: str, select: str,
               filters: dict | None = None,
               gte_filters: dict | None = None,
               lte_filters: dict | None = None,
               in_filters: dict | None = None) -> list[dict]:
-    """Generic paginated fetch from a Supabase table.
+    """Generic paginated fetch with retry + reconnect on transient errors.
 
     Args:
-        client:       Active Supabase client.
-        table:        Table name.
-        select:       PostgREST column selector.
-        filters:      {column: exact_value} equality filters.
-        gte_filters:  {column: value} for column >= value.
-        lte_filters:  {column: value} for column <= value.
-        in_filters:   {column: [values]} for column IN (values).
+        client_holder: Single-element list holding the active Supabase
+                       client.  The reference is replaced in-place when a
+                       retryable error forces a reconnect.
+        table:         Table name.
+        select:        PostgREST column selector.
+        filters:       {column: exact_value} equality filters.
+        gte_filters:   {column: value} for column >= value.
+        lte_filters:   {column: value} for column <= value.
+        in_filters:    {column: [values]} for column IN (values).
 
     Returns:
         All matching rows as a list of dicts.
@@ -141,16 +186,32 @@ def _paginate(client: Any, table: str, select: str,
     rows: list[dict] = []
     offset = 0
     while True:
-        q = client.table(table).select(select)
-        for col, val in (filters or {}).items():
-            q = q.eq(col, val)
-        for col, val in (gte_filters or {}).items():
-            q = q.gte(col, val)
-        for col, val in (lte_filters or {}).items():
-            q = q.lte(col, val)
-        for col, vals in (in_filters or {}).items():
-            q = q.in_(col, vals)
-        page = q.range(offset, offset + _PAGE_SIZE - 1).execute().data or []
+        page: list[dict] | None = None
+        for attempt in range(1, _MAX_RETRIES + 1):
+            try:
+                q = client_holder[0].table(table).select(select)
+                for col, val in (filters or {}).items():
+                    q = q.eq(col, val)
+                for col, val in (gte_filters or {}).items():
+                    q = q.gte(col, val)
+                for col, val in (lte_filters or {}).items():
+                    q = q.lte(col, val)
+                for col, vals in (in_filters or {}).items():
+                    q = q.in_(col, vals)
+                page = q.range(offset, offset + _PAGE_SIZE - 1).execute().data or []
+                break
+            except Exception as exc:
+                if _is_retryable_error(exc) and attempt < _MAX_RETRIES:
+                    log.warning(
+                        "  %s fetch retry %d/%d (offset=%d): %s — reconnecting in %.0fs …",
+                        table, attempt, _MAX_RETRIES, offset,
+                        type(exc).__name__, _RETRY_DELAY,
+                    )
+                    time.sleep(_RETRY_DELAY)
+                    client_holder[0] = _get_fresh_client()
+                    continue
+                raise
+        assert page is not None
         rows.extend(page)
         if len(page) < _PAGE_SIZE:
             break
@@ -158,22 +219,23 @@ def _paginate(client: Any, table: str, select: str,
     return rows
 
 
-def _fetch_skus(client: Any) -> dict[str, dict]:
+def _fetch_skus(client_holder: list) -> dict[str, dict]:
     """Return all active SKUs keyed by sku_id.
 
-    Tries to fetch ``primary_supplier_id`` (added by migration 007).
-    If that column does not yet exist, falls back to fetching without it and
-    logs a warning so the operator knows to run the migration.
+    Tries to fetch ``primary_supplier_id`` (added by migration 007) and
+    ``avg_weekly_units`` (populated by transform/derive.py).  The latter is
+    used by the at-risk pre-filter so we only fetch forecasts for SKUs that
+    could plausibly trigger a reorder.
 
     Returns:
-        {sku_id: {abc_class, primary_supplier_id}}
+        {sku_id: {abc_class, primary_supplier_id, avg_weekly_units}}
     """
     from postgrest.exceptions import APIError  # local import — avoid polluting module ns
 
     try:
         rows = _paginate(
-            client, "sku_master",
-            "sku_id,abc_class,primary_supplier_id",
+            client_holder, "sku_master",
+            "sku_id,abc_class,primary_supplier_id,avg_weekly_units",
             filters={"is_active": True},
         )
     except APIError as exc:
@@ -184,8 +246,8 @@ def _fetch_skus(client: Any) -> dict[str, dict]:
                 "Falling back to purchase_orders-derived suppliers only."
             )
             rows = _paginate(
-                client, "sku_master",
-                "sku_id,abc_class",
+                client_holder, "sku_master",
+                "sku_id,abc_class,avg_weekly_units",
                 filters={"is_active": True},
             )
         else:
@@ -195,13 +257,18 @@ def _fetch_skus(client: Any) -> dict[str, dict]:
         r["sku_id"]: {
             "abc_class":           r.get("abc_class"),
             "primary_supplier_id": r.get("primary_supplier_id"),  # None if migration pending
+            "avg_weekly_units":    (
+                float(r["avg_weekly_units"])
+                if r.get("avg_weekly_units") is not None
+                else 0.0
+            ),
         }
         for r in rows
         if r.get("sku_id")
     }
 
 
-def _fetch_inventory(client: Any, lookback_days: int = 7) -> dict[tuple[str, str], dict]:
+def _fetch_inventory(client_holder: list, lookback_days: int = 7) -> dict[tuple[str, str], dict]:
     """Return the most recent inventory snapshot per (sku_id, location_id).
 
     Fetches snapshots from the last ``lookback_days`` days and deduplicates
@@ -216,7 +283,7 @@ def _fetch_inventory(client: Any, lookback_days: int = 7) -> dict[tuple[str, str
     """
     cutoff = (date.today() - timedelta(days=lookback_days)).isoformat()
     rows = _paginate(
-        client, "inventory_snapshots",
+        client_holder, "inventory_snapshots",
         "sku_id,location_id,snapshot_date,qty_on_hand,qty_on_order",
         gte_filters={"snapshot_date": cutoff},
     )
@@ -233,7 +300,7 @@ def _fetch_inventory(client: Any, lookback_days: int = 7) -> dict[tuple[str, str
     return latest
 
 
-def _fetch_suppliers(client: Any, lookback_days: int = 90) -> dict[str, dict]:
+def _fetch_suppliers(client_holder: list, lookback_days: int = 90) -> dict[str, dict]:
     """Return the most recent supplier score per supplier_id.
 
     Args:
@@ -245,7 +312,7 @@ def _fetch_suppliers(client: Any, lookback_days: int = 90) -> dict[str, dict]:
     """
     cutoff = (date.today() - timedelta(days=lookback_days)).isoformat()
     rows = _paginate(
-        client, "supplier_scores",
+        client_holder, "supplier_scores",
         "supplier_id,score_date,avg_lead_time_days,risk_flag,composite_score",
         gte_filters={"score_date": cutoff},
     )
@@ -274,34 +341,55 @@ def _fetch_suppliers(client: Any, lookback_days: int = 90) -> dict[str, dict]:
 
 
 def _fetch_forecasts(
-    client: Any,
+    client_holder: list,
     today: date,
     horizon_end: date,
+    at_risk_skus: list[str],
 ) -> dict[tuple[str, str, str], dict[str, float]]:
-    """Return the most recent forecast rows per (sku_id, location_id, model_type).
+    """Return the most recent forecast rows for the at-risk SKUs only.
 
-    Only fetches lightgbm and rolling_avg results (Prophet added later).
-    Deduplicates in Python to keep only the latest run_date per group.
+    The forecast_results table is ~1.6M rows (248K C-class + 30K B-class SKUs
+    × ~23 locations × 30 days); fetching all of them times out with
+    Supabase error 57014.  Reorder never needs forecasts for SKUs that are
+    clearly not at risk of stockout, so we restrict the fetch to the SKUs
+    identified by ``_compute_at_risk_skus`` and batch those in
+    ``SKU_BATCH_SIZE`` chunks.
 
     Args:
-        client:      Active Supabase client.
-        today:       First day of the forecast horizon (inclusive).
-        horizon_end: Last day of the forecast horizon (inclusive).
+        client_holder: Single-element list holding the active client.
+        today:         First day of the forecast horizon (inclusive).
+        horizon_end:   Last day of the forecast horizon (inclusive).
+        at_risk_skus:  SKU IDs that the pre-filter flagged as at-risk.
 
     Returns:
         {(sku_id, location_id, model_type): {date_str: predicted_qty}}
     """
-    rows = _paginate(
-        client, "forecast_results",
-        "sku_id,location_id,forecast_date,model_type,predicted_qty,run_date",
-        gte_filters={"forecast_date": today.isoformat()},
-        lte_filters={"forecast_date": horizon_end.isoformat()},
-        in_filters={"model_type": ["lightgbm", "rolling_avg"]},
-    )
+    if not at_risk_skus:
+        return {}
+
+    all_rows: list[dict] = []
+    n_batches = math.ceil(len(at_risk_skus) / SKU_BATCH_SIZE)
+    for i in range(n_batches):
+        sku_batch = at_risk_skus[i * SKU_BATCH_SIZE:(i + 1) * SKU_BATCH_SIZE]
+        page = _paginate(
+            client_holder, "forecast_results",
+            "sku_id,location_id,forecast_date,model_type,predicted_qty,run_date",
+            gte_filters={"forecast_date": today.isoformat()},
+            lte_filters={"forecast_date": horizon_end.isoformat()},
+            in_filters={
+                "sku_id":     sku_batch,
+                "model_type": ["lightgbm", "rolling_avg"],
+            },
+        )
+        all_rows.extend(page)
+        log.info(
+            "  forecast batch %d/%d  skus=%d  rows=%d  (running total %d)",
+            i + 1, n_batches, len(sku_batch), len(page), len(all_rows),
+        )
 
     # Pass 1: find the latest run_date per (sku_id, location_id, model_type)
     latest_run: dict[tuple[str, str, str], str] = {}
-    for r in rows:
+    for r in all_rows:
         key = (r["sku_id"], r["location_id"], r["model_type"])
         run = r.get("run_date", "")
         if run > latest_run.get(key, ""):
@@ -309,7 +397,7 @@ def _fetch_forecasts(
 
     # Pass 2: build date → qty maps for the latest run only
     forecast_map: dict[tuple[str, str, str], dict[str, float]] = defaultdict(dict)
-    for r in rows:
+    for r in all_rows:
         key = (r["sku_id"], r["location_id"], r["model_type"])
         if r.get("run_date") == latest_run.get(key):
             d = str(r.get("forecast_date", ""))[:10]
@@ -319,27 +407,45 @@ def _fetch_forecasts(
     return dict(forecast_map)
 
 
-def _fetch_fallback_suppliers(client: Any, lookback_days: int = 180) -> dict[str, str]:
+def _fetch_fallback_suppliers(
+    client_holder: list,
+    at_risk_skus: list[str],
+    lookback_days: int = 180,
+) -> dict[str, str]:
     """Return the most recent supplier_id per sku_id from purchase_orders.
 
-    Used as a fallback when sku_master.primary_supplier_id is NULL.
+    Used as a fallback when sku_master.primary_supplier_id is NULL.  Scoped
+    to the at-risk SKU set and batched to stay within the statement timeout.
 
     Args:
-        client:        Active Supabase client.
+        client_holder: Single-element list holding the active client.
+        at_risk_skus:  SKUs that could trigger a reorder recommendation.
         lookback_days: How far back to scan POs.
 
     Returns:
         {sku_id: supplier_id}
     """
+    if not at_risk_skus:
+        return {}
+
     cutoff = (date.today() - timedelta(days=lookback_days)).isoformat()
-    rows = _paginate(
-        client, "purchase_orders",
-        "sku_id,supplier_id,po_date",
-        gte_filters={"po_date": cutoff},
-        in_filters={"status": ["open", "received", "partial"]},
-    )
+    all_rows: list[dict] = []
+    n_batches = math.ceil(len(at_risk_skus) / SKU_BATCH_SIZE)
+    for i in range(n_batches):
+        sku_batch = at_risk_skus[i * SKU_BATCH_SIZE:(i + 1) * SKU_BATCH_SIZE]
+        page = _paginate(
+            client_holder, "purchase_orders",
+            "sku_id,supplier_id,po_date",
+            gte_filters={"po_date": cutoff},
+            in_filters={
+                "sku_id": sku_batch,
+                "status": ["open", "received", "partial"],
+            },
+        )
+        all_rows.extend(page)
+
     latest_po: dict[str, dict] = {}
-    for r in rows:
+    for r in all_rows:
         sku = r.get("sku_id")
         if not sku:
             continue
@@ -348,6 +454,95 @@ def _fetch_fallback_suppliers(client: Any, lookback_days: int = 180) -> dict[str
             latest_po[sku] = r
     return {sku: info["supplier_id"] for sku, info in latest_po.items()
             if info.get("supplier_id")}
+
+
+# ---------------------------------------------------------------------------
+# At-risk pre-filter — identifies SKUs that could plausibly need reorder
+# ---------------------------------------------------------------------------
+
+def _compute_at_risk_skus(
+    inventory: dict[tuple[str, str], dict],
+    skus: dict[str, dict],
+    suppliers: dict[str, dict],
+) -> set[str]:
+    """Return the set of SKU IDs that may need a reorder recommendation.
+
+    Pre-filter rules (a SKU is flagged if ANY of its (SKU, location) pairs
+    triggers ONE of these):
+
+    1. **Zero on-hand** — qty_on_hand <= 0 is an actual stockout; always
+       flag regardless of proxy demand.  Covers new SKUs that have no
+       historical avg_weekly_units yet but do have forward forecasts.
+    2. **Zero on-hand + on-order** — same rationale.
+    3. **Low proxy days-of-supply** — qty_on_hand / (avg_weekly_units/7)
+       below a dynamic threshold derived from the longest supplier lead
+       time observed plus a 2× safety margin.  This guarantees that no
+       SKU with a plausible shortfall (even accounting for the longest
+       lead time in the network) is pruned.
+
+    Args:
+        inventory: Output of _fetch_inventory (latest snapshot per pair).
+        skus:      Output of _fetch_skus (must include ``avg_weekly_units``).
+        suppliers: Output of _fetch_suppliers (for max lead time lookup).
+
+    Returns:
+        Set of sku_ids that need forecast data fetched.
+    """
+    # Derive a safety-preserving upper bound from the observed lead-time
+    # distribution.  threshold = max(constant floor, 2 × (max_lead + buffer)).
+    max_lead = DEFAULT_LEAD_TIME_DAYS
+    for info in suppliers.values():
+        lt = info.get("avg_lead_time_days")
+        if lt is not None and lt > max_lead:
+            max_lead = lt
+    dynamic_threshold = max(
+        AT_RISK_COVERAGE_DAYS,
+        2.0 * (max_lead + SAFETY_BUFFER_DAYS),
+    )
+
+    at_risk: set[str] = set()
+    stockout_flagged = 0
+    proxy_flagged = 0
+    safe_count = 0
+
+    for (sku_id, _loc_id), inv in inventory.items():
+        sku_info = skus.get(sku_id)
+        if not sku_info:
+            continue  # inactive / unknown SKU
+
+        qty_on_hand  = inv["qty_on_hand"]
+        qty_on_order = inv["qty_on_order"]
+
+        # Rule 1 & 2: actual stockout always wins, even with no historical demand.
+        if qty_on_hand <= 0 or (qty_on_hand + qty_on_order) <= 0:
+            at_risk.add(sku_id)
+            stockout_flagged += 1
+            continue
+
+        # Rule 3: proxy days-of-supply check (requires historical demand).
+        avg_weekly = sku_info.get("avg_weekly_units") or 0.0
+        if avg_weekly <= 0:
+            # Positive stock and no historical demand — rolling_avg forecast
+            # will be ~0 and cannot trigger reorder; safe to skip.
+            safe_count += 1
+            continue
+
+        avg_daily_proxy = avg_weekly / 7.0
+        days_of_supply_proxy = qty_on_hand / avg_daily_proxy
+
+        if days_of_supply_proxy < dynamic_threshold:
+            at_risk.add(sku_id)
+            proxy_flagged += 1
+        else:
+            safe_count += 1
+
+    log.info(
+        "  At-risk pre-filter:  %d SKU(s) flagged  "
+        "(stockout=%d, proxy<%.0fd=%d, safe=%d, max_lead=%.0fd)",
+        len(at_risk), stockout_flagged, dynamic_threshold,
+        proxy_flagged, safe_count, max_lead,
+    )
+    return at_risk
 
 
 # ---------------------------------------------------------------------------
@@ -416,7 +611,7 @@ def _select_forecasts(
 # ---------------------------------------------------------------------------
 
 def _add_basket_triggered(
-    client: Any,
+    client_holder: list,
     recommendations: list[dict],
     inventory_summary: dict[tuple[str, str], dict],
     today: date,
@@ -428,7 +623,7 @@ def _add_basket_triggered(
 
     try:
         rules = _paginate(
-            client, "basket_rules",
+            client_holder, "basket_rules",
             "antecedent_sku,consequent_sku,confidence,lift",
             gte_filters={"confidence": str(BASKET_CONFIDENCE_THRESHOLD)},
         )
@@ -542,7 +737,7 @@ def run_reorder(dry_run: bool = False) -> int:
     log.info(banner)
 
     try:
-        client = get_client()
+        client_holder: list = [_get_fresh_client()]
     except Exception:
         log.exception("Failed to initialise Supabase client.")
         return 1
@@ -558,35 +753,55 @@ def run_reorder(dry_run: bool = False) -> int:
     log.info("-" * 60)
 
     # ------------------------------------------------------------------
-    # 1. Bulk data fetch (3 + 2 queries total — no per-SKU round trips)
+    # 1. Bulk data fetch — SKU master, inventory, supplier scores
     # ------------------------------------------------------------------
     try:
         log.info("Fetching active SKUs from sku_master …")
-        skus = _fetch_skus(client)
+        skus = _fetch_skus(client_holder)
         log.info("  Active SKUs: %d", len(skus))
 
         log.info("Fetching inventory snapshots …")
-        inventory = _fetch_inventory(client)
+        inventory = _fetch_inventory(client_holder)
         log.info("  (SKU, location) inventory pairs: %d", len(inventory))
 
         log.info("Fetching supplier scores …")
-        suppliers = _fetch_suppliers(client)
+        suppliers = _fetch_suppliers(client_holder)
         log.info("  Suppliers with scores: %d", len(suppliers))
 
-        log.info("Fetching forecasts (lightgbm + rolling_avg, next %dd) …",
-                 FORECAST_HORIZON_DAYS)
-        forecast_map = _fetch_forecasts(client, today, horizon_end)
+        # --------------------------------------------------------------
+        # 1b. At-risk pre-filter — the forecast_results table has ~1.6M
+        #     rows for the 30-day horizon; fetching all of them times
+        #     out (Supabase error 57014).  We only need forecasts for
+        #     SKUs whose proxy days-of-supply is below the threshold.
+        # --------------------------------------------------------------
+        log.info("Computing at-risk SKU set from inventory + avg_weekly_units …")
+        at_risk_set = _compute_at_risk_skus(inventory, skus, suppliers)
+        at_risk_list = sorted(at_risk_set)
+
+        log.info(
+            "Fetching forecasts (lightgbm + rolling_avg, next %dd) for %d at-risk SKUs …",
+            FORECAST_HORIZON_DAYS, len(at_risk_list),
+        )
+        forecast_map = _fetch_forecasts(
+            client_holder, today, horizon_end, at_risk_list,
+        )
         unique_pairs_with_forecast = len({(k[0], k[1]) for k in forecast_map})
         log.info("  Forecast series fetched: %d (across %d SKU×location pairs)",
                  len(forecast_map), unique_pairs_with_forecast)
 
         log.info("Fetching fallback supplier map from purchase_orders …")
-        fallback_suppliers = _fetch_fallback_suppliers(client)
+        fallback_suppliers = _fetch_fallback_suppliers(client_holder, at_risk_list)
         log.info("  SKUs with PO-derived fallback supplier: %d", len(fallback_suppliers))
 
     except Exception:
         log.exception("Fatal error during data fetch phase.")
         return 1
+
+    # NOTE: after this point we must always dereference client_holder[0]
+    # at the point of use.  Any retry inside _paginate (including the
+    # basket-rules fetch below) may swap client_holder[0] for a fresh
+    # client, so caching the reference here would risk using a dead
+    # connection for the final upsert.
 
     # ------------------------------------------------------------------
     # 2. Build inventory_summary — compute derived fields for every pair
@@ -742,7 +957,7 @@ def run_reorder(dry_run: bool = False) -> int:
     # 3b. Basket-triggered recommendations
     # ------------------------------------------------------------------
     basket_added = _add_basket_triggered(
-        client, recommendations, inventory_summary, today, counts,
+        client_holder, recommendations, inventory_summary, today, counts,
     )
 
     # ------------------------------------------------------------------
@@ -756,8 +971,10 @@ def run_reorder(dry_run: bool = False) -> int:
                  len(recommendations))
         try:
             # Upsert with ignore_duplicates preserves same-day approvals.
+            # Always read client_holder[0] fresh — earlier retry paths may
+            # have swapped in a reconnected client.
             resp = (
-                client.table("reorder_recommendations")
+                client_holder[0].table("reorder_recommendations")
                 .upsert(
                     recommendations,
                     on_conflict="sku_id,location_id,recommendation_date",

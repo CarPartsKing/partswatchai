@@ -705,6 +705,7 @@ def run_forecast(
     fastest_time = float("inf")
     slowest_time = 0.0
     mape_values: list[float] = []
+    single_sku_fc_rows: list[dict] = []
 
     for batch_idx in range(total_batches):
         batch_start = batch_idx * BATCH_SIZE
@@ -787,6 +788,8 @@ def run_forecast(
             )
 
             fc_buffer.extend(fc_rows)
+            if single_sku and sku_id == single_sku:
+                single_sku_fc_rows.extend(fc_rows)
 
             while len(fc_buffer) >= _BATCH_WRITE:
                 batch = fc_buffer[:_BATCH_WRITE]
@@ -823,35 +826,72 @@ def run_forecast(
     log.info("=" * 60)
 
     if single_sku:
-        _show_single_sku_chart(single_sku, demand_map, today)
+        _show_single_sku_chart(single_sku, demand_map, today, single_sku_fc_rows)
 
     return 0
 
 
-def _show_single_sku_chart(sku_id: str, demand_map: dict, today: date):
+def _show_single_sku_chart(
+    sku_id: str,
+    demand_map: dict,
+    today: date,
+    fc_rows: list[dict] | None = None,
+):
     try:
         import matplotlib
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
-
-        for (s, loc), demand in demand_map.items():
-            if s != sku_id:
-                continue
-            dates = sorted(demand.keys())
-            vals = [demand[d] for d in dates]
-            plt.figure(figsize=(12, 4))
-            plt.plot(dates[-90:], vals[-90:], label=f"{sku_id} @ {loc}")
-            plt.title(f"Last 90 Days — {sku_id} @ {loc}")
-            plt.ylabel("Daily Demand")
-            plt.legend()
-            plt.tight_layout()
-            chart_path = f"models/chart_{sku_id}_{loc}.png"
-            plt.savefig(chart_path, dpi=100)
-            plt.close()
-            log.info("  Chart saved: %s", chart_path)
-            break
+        from datetime import datetime as _dt
     except ImportError:
         log.info("  matplotlib not available — skipping chart.")
+        return
+
+    fc_rows = fc_rows or []
+    fc_by_loc: dict[str, list[dict]] = {}
+    for r in fc_rows:
+        fc_by_loc.setdefault(r["location_id"], []).append(r)
+
+    for (s, loc), demand in demand_map.items():
+        if s != sku_id:
+            continue
+
+        hist_dates_all = sorted(demand.keys())
+        if not hist_dates_all:
+            continue
+        hist_dates = hist_dates_all[-90:]
+        hist_vals = [demand[d] for d in hist_dates]
+        hist_x = [_dt.fromisoformat(d).date() if isinstance(d, str) else d for d in hist_dates]
+
+        loc_fc = sorted(fc_by_loc.get(loc, []), key=lambda r: r["forecast_date"])
+        fc_x = [_dt.fromisoformat(r["forecast_date"]).date() for r in loc_fc]
+        fc_y = [r["predicted_qty"] for r in loc_fc]
+        fc_lo = [r["lower_bound"] for r in loc_fc]
+        fc_hi = [r["upper_bound"] for r in loc_fc]
+
+        plt.figure(figsize=(14, 5))
+        plt.plot(hist_x, hist_vals, color="#1f77b4", linewidth=1.5, label="Historical (90d)")
+
+        if fc_x:
+            plt.plot(fc_x, fc_y, color="#d62728", linewidth=2.0, label=f"Forecast ({len(fc_x)}d)")
+            plt.fill_between(
+                fc_x, fc_lo, fc_hi,
+                color="#d62728", alpha=0.20,
+                label=f"{int(round(loc_fc[0].get('confidence_pct', 0.95) * 100))}% confidence",
+            )
+            plt.axvline(today, color="gray", linestyle="--", linewidth=1, alpha=0.7)
+
+        plt.title(f"{sku_id} @ {loc} — Historical + Forecast")
+        plt.ylabel("Daily Demand (units)")
+        plt.xlabel("Date")
+        plt.legend(loc="upper left")
+        plt.grid(True, alpha=0.3)
+        plt.tight_layout()
+
+        chart_path = f"models/chart_{sku_id}_{loc}.png"
+        plt.savefig(chart_path, dpi=100)
+        plt.close()
+        log.info("  Chart saved: %s", chart_path)
+        break
 
 
 def _parse_args() -> argparse.Namespace:

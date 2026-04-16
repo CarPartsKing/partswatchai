@@ -93,14 +93,39 @@ from utils.logging_config import get_logger
 
 log = get_logger(__name__)
 
-_CLIENT_REFRESH_EVERY: int = 200
-_MAX_RETRIES: int = 3
+_MAX_RETRIES: int = 5
 _RETRY_DELAY: float = 5.0
+
+# Retryable errors include both 57014 statement timeouts (returned by
+# Supabase as a PostgREST error message) and the usual transient HTTP/2
+# disconnects.
+_RETRYABLE_TOKENS: tuple[str, ...] = (
+    "57014",
+    "statement timeout",
+    "canceling statement",
+    "ConnectionTerminated",
+    "RemoteProtocolError",
+    "ReadTimeout",
+    "ConnectTimeout",
+    "PoolTimeout",
+    "ConnectionError",
+)
+
+
+def _is_retryable_error(exc: Exception) -> bool:
+    """True if exc looks like a Supabase timeout / dropped-connection error."""
+    blob = type(exc).__name__ + " " + str(exc)
+    return any(tok in blob for tok in _RETRYABLE_TOKENS)
 
 
 def _get_fresh_client() -> Any:
-    from db.connection import get_client
-    return get_client()
+    """Return a brand-new Supabase client (bypasses lru_cache when available)."""
+    try:
+        from db.connection import get_new_client
+        return get_new_client()
+    except ImportError:
+        from db.connection import get_client
+        return get_client()
 
 
 def _upsert_with_retry(client_holder: list, table: str, rows: list, on_conflict: str):
@@ -111,16 +136,11 @@ def _upsert_with_retry(client_holder: list, table: str, rows: list, on_conflict:
             ).execute()
             return
         except Exception as exc:
-            err_name = type(exc).__name__
-            err_str = str(exc)
-            is_conn_err = any(k in err_name + err_str for k in (
-                "ConnectionTerminated", "ConnectionError", "RemoteProtocolError",
-                "ReadTimeout", "ConnectTimeout", "PoolTimeout",
-            ))
-            if is_conn_err and attempt < _MAX_RETRIES:
+            if _is_retryable_error(exc) and attempt < _MAX_RETRIES:
                 log.warning(
-                    "  DB connection error (attempt %d/%d): %s — reconnecting in %.0fs …",
-                    attempt, _MAX_RETRIES, err_name, _RETRY_DELAY,
+                    "  upsert retry %d/%d (%d rows): %s — reconnecting in %.0fs …",
+                    attempt, _MAX_RETRIES, len(rows),
+                    type(exc).__name__, _RETRY_DELAY,
                 )
                 time.sleep(_RETRY_DELAY)
                 client_holder[0] = _get_fresh_client()
@@ -153,6 +173,21 @@ _PAGE_SIZE: int = 1000
 
 # Upsert batch size
 BATCH_SIZE: int = 500
+
+# How many SKUs to fetch transactions for in a single Supabase query.
+# A single query against the entire B-class catalog hits the Supabase
+# statement timeout (error 57014) once history grows large.  Fetching
+# 1 000 SKUs per call keeps the query inside the timeout window.
+SKU_BATCH_SIZE: int = 1000
+
+# Emit a progress line after every PROGRESS_EVERY SKUs processed.
+PROGRESS_EVERY: int = 5000
+
+# History window used to fetch transactions for feature engineering.
+# 365 days is plenty for lag_28, rolling_mean_28, full seasonal coverage,
+# and per-SKU LightGBM training, while keeping each batch query small
+# enough to avoid statement timeouts at full B-class scale.
+TRAINING_DAYS: int = 365
 
 # Tier 3 blending — when a location is Tier 3 AND demand_quality_score is
 # below LOW_QUALITY_THRESHOLD, predictions are blended toward the Tier 1+2
@@ -280,24 +315,68 @@ def _fetch_chunked_by_date(
     return all_rows
 
 
-def _fetch_transactions(client: Any, cutoff: str) -> list[dict]:
-    """Bulk-fetch all non-anomaly, non-residual transactions on or after cutoff.
+def _fetch_transactions_for_skus(
+    client_holder: list,
+    cutoff: str,
+    sku_batch: list[str],
+) -> list[dict]:
+    """Fetch non-anomaly transactions on/after cutoff for the given SKU batch.
 
-    Uses weekly date-chunking to avoid Supabase statement timeouts when
-    fetching millions of rows.
+    Restricting the query to ``len(sku_batch) ≤ SKU_BATCH_SIZE`` SKUs keeps
+    each call inside Supabase's statement timeout (error 57014).  Pages are
+    retried on transient errors with a fresh client minted on repeat
+    failures.
+
+    Args:
+        client_holder: Single-element list holding the active client; the
+                       reference is replaced in-place when reconnecting.
+        cutoff:        ISO date string; earliest transaction_date to include.
+        sku_batch:     SKU IDs to fetch transactions for (≤ SKU_BATCH_SIZE).
+
+    Returns:
+        List of transaction dicts.
     """
     select = (
         "sku_id,location_id,transaction_date,"
         "qty_sold,lost_sales_imputation,is_stockout,is_anomaly"
     )
-    return _fetch_chunked_by_date(
-        client,
-        "sales_transactions",
-        select,
-        date_col="transaction_date",
-        since=cutoff,
-        extra_eq={"is_anomaly": False, "is_residual_demand": False},
-    )
+    rows: list[dict] = []
+    offset = 0
+    while True:
+        page: list[dict] | None = None
+        for attempt in range(1, _MAX_RETRIES + 1):
+            try:
+                page = (
+                    client_holder[0].table("sales_transactions")
+                    .select(select)
+                    .in_("sku_id", sku_batch)
+                    .gte("transaction_date", cutoff)
+                    .eq("is_anomaly", False)
+                    .eq("is_residual_demand", False)
+                    .range(offset, offset + _PAGE_SIZE - 1)
+                    .execute()
+                    .data
+                    or []
+                )
+                break
+            except Exception as exc:
+                if _is_retryable_error(exc) and attempt < _MAX_RETRIES:
+                    log.warning(
+                        "  tx fetch retry %d/%d (offset=%d, %d SKUs): %s — "
+                        "reconnecting in %.0fs …",
+                        attempt, _MAX_RETRIES, offset, len(sku_batch),
+                        type(exc).__name__, _RETRY_DELAY,
+                    )
+                    time.sleep(_RETRY_DELAY)
+                    client_holder[0] = _get_fresh_client()
+                    continue
+                raise
+        assert page is not None
+        rows.extend(page)
+        if len(page) < _PAGE_SIZE:
+            break
+        offset += _PAGE_SIZE
+    return rows
 
 
 def _fetch_weather(client: Any, cutoff: str) -> list[dict]:
@@ -750,241 +829,226 @@ def run_forecast(dry_run: bool = False) -> int:
     Returns:
         Exit code 0 on success, 1 on unrecoverable error.
     """
-    client       = _get_fresh_client()
-    client_holder = [client]
-    t_start      = time.perf_counter()
-    today        = date.today()
-    run_date_str = today.isoformat()
-    # Fetch 2 years of history — gives enough lag/rolling signal and keeps
-    # training sets small for per-SKU models (≤ 730 rows)
-    tx_cutoff = (today - timedelta(days=730)).isoformat()
+    client_holder = [_get_fresh_client()]
+    t_start       = time.perf_counter()
+    today         = date.today()
+    run_date_str  = today.isoformat()
+    # Cap history at TRAINING_DAYS (365d) so each per-SKU-batch query stays
+    # inside Supabase's statement timeout.  365 days still covers lag_28,
+    # rolling_mean_28, and full seasonal patterns for B-class SKUs.
+    tx_cutoff = (today - timedelta(days=TRAINING_DAYS)).isoformat()
 
     if dry_run:
         log.info("DRY RUN — no database writes will be made.")
 
-    log.info("Training data window: %s → %s", tx_cutoff, (today - timedelta(days=1)).isoformat())
+    log.info("Training data window: %s → %s  (%d days)",
+             tx_cutoff, (today - timedelta(days=1)).isoformat(), TRAINING_DAYS)
     log.info("Forecast horizon:     %d days  (%s → %s)", FORECAST_HORIZON,
              today.isoformat(), (today + timedelta(days=FORECAST_HORIZON - 1)).isoformat())
+    log.info("SKU batch size:       %d   Progress every: %d SKUs",
+             SKU_BATCH_SIZE, PROGRESS_EVERY)
     log.info("-" * 60)
 
     # ── 1. Fetch B-class SKUs (live count — never hardcoded) ──────────────
     log.info("Fetching B-class SKUs from sku_master …")
-    b_skus = _fetch_b_class_skus(client)
+    b_skus = _fetch_b_class_skus(client_holder[0])
     if not b_skus:
         log.warning("No B-class SKUs found — nothing to forecast.")
         return 0
-    b_class_set = set(b_skus)
+    b_skus = sorted(b_skus)   # deterministic batch order
+    total_skus = len(b_skus)
 
-    # ── 2. Bulk-fetch transactions ─────────────────────────────────────────
-    log.info("Fetching non-anomaly transactions since %s …", tx_cutoff)
-    t0 = time.perf_counter()
-    tx_rows = _fetch_transactions(client, tx_cutoff)
-    log.info("  Fetched %d transaction(s) in %.2fs.", len(tx_rows), time.perf_counter() - t0)
-
-    # ── 3. Bulk-fetch weather ─────────────────────────────────────────────
-    # Fetch historical + forecast weather; the forecast rows cover future dates
+    # ── 2. Bulk-fetch weather (small reference table — date-keyed) ───────
     log.info("Fetching weather_log …")
-    weather_rows = _fetch_weather(client, tx_cutoff)
+    weather_rows     = _fetch_weather(client_holder[0], tx_cutoff)
+    weather_by_date  = _build_weather_map(weather_rows)
+    fallback_weather = _compute_fallback_weather(weather_rows)
     log.info("  Fetched %d weather row(s).", len(weather_rows))
 
-    # ── 4. Build in-memory data structures ───────────────────────────────
-    demand_map      = _build_demand_map(tx_rows, b_class_set)
-    weather_by_date = _build_weather_map(weather_rows)
-    fallback_weather = _compute_fallback_weather(weather_rows)
-
-    # SKUs with any sales in the window
-    active_pairs = sorted(demand_map.keys())
-    skus_with_sales = {sku for sku, _ in active_pairs}
-    skus_no_sales   = len(b_class_set) - len(skus_with_sales)
-
-    log.info(
-        "  Active (SKU, location) pairs: %d  (across %d of %d B-class SKUs)",
-        len(active_pairs), len(skus_with_sales), len(b_skus),
-    )
-    if skus_no_sales:
-        log.info("  %d B-class SKU(s) had no sales in the 2-year window.", skus_no_sales)
-    log.info("-" * 60)
-
-    # ── 4b. Fetch location tiers, demand quality, and XYZ classes ────────
+    # ── 3. Fetch location tiers, demand quality, XYZ classes (small) ─────
     log.info("Fetching location tiers, demand quality scores, and XYZ classes …")
-    location_tiers = _fetch_location_tiers(client)
-    demand_quality = _fetch_demand_quality(client)
-    xyz_class_map  = _fetch_xyz_class(client)
+    location_tiers = _fetch_location_tiers(client_holder[0])
+    demand_quality = _fetch_demand_quality(client_holder[0])
+    xyz_class_map  = _fetch_xyz_class(client_holder[0])
     log.info(
         "  Location tiers loaded: %d  Demand quality pairs: %d  XYZ classes: %d",
         len(location_tiers), len(demand_quality), len(xyz_class_map),
     )
-
-    # Regional baseline demand per SKU: mean of Tier 1+2 location histories.
-    # Used to blend Tier 3 forecasts away from residual-demand-inflated signals.
-    from collections import defaultdict as _dd
-    sku_tier12_means: dict[str, list[float]] = _dd(list)
-    for (sku, loc), daily in demand_map.items():
-        if location_tiers.get(loc, 2) <= 2 and daily:
-            sku_tier12_means[sku].append(sum(daily.values()) / len(daily))
-    sku_regional_baseline: dict[str, float] = {
-        sku: sum(vals) / len(vals)
-        for sku, vals in sku_tier12_means.items()
-        if vals
-    }
-    log.info(
-        "  Regional baselines computed for %d B-class SKU(s) with Tier 1/2 history.",
-        len(sku_regional_baseline),
-    )
     log.info("-" * 60)
 
-    # ── 5. Train one model per (SKU, location) ────────────────────────────
-    processed   = 0
-    skipped     = 0
-    total_rows  = 0
-    total_iters = 0
-    fc_buffer: list[dict] = []
+    # ── 4. Process B-class SKUs in batches of SKU_BATCH_SIZE ─────────────
+    processed         = 0
+    skipped           = 0
+    total_rows        = 0
+    total_iters       = 0
+    skus_with_sales: set[str] = set()
+    skus_done         = 0
 
-    _pair_count = 0
-    for sku_id, location_id in active_pairs:
-        _pair_count += 1
-        if _pair_count > 1 and _pair_count % _CLIENT_REFRESH_EVERY == 0:
-            log.info("  [refresh] Reconnecting Supabase client after %d pairs …", _pair_count)
-            client_holder[0] = _get_fresh_client()
-        demand_by_date = demand_map[(sku_id, location_id)]
+    n_batches = math.ceil(total_skus / SKU_BATCH_SIZE)
+    log.info(
+        "[LGBM] Processing %d B-class SKUs in %d batches of %d …",
+        total_skus, n_batches, SKU_BATCH_SIZE,
+    )
 
-        # Look up demand quality, location tier, and XYZ class for this pair
-        dq_score = float(demand_quality.get((sku_id, location_id), 1.0))
-        loc_tier = location_tiers.get(location_id, 2)
-        xyz_enc  = float(xyz_class_map.get(sku_id, 1))  # default Y=1
+    for batch_idx in range(n_batches):
+        b_start = batch_idx * SKU_BATCH_SIZE
+        sku_batch = b_skus[b_start: b_start + SKU_BATCH_SIZE]
+        sku_batch_set = set(sku_batch)
 
-        # Determine calendar span from first sale to yesterday
-        all_dates_str = sorted(demand_by_date.keys())
-        first_dt = date.fromisoformat(all_dates_str[0])
-        last_dt  = date.fromisoformat(all_dates_str[-1])
-        span_days = (last_dt - first_dt).days + 1
+        t_batch = time.perf_counter()
 
-        if span_days < MIN_TRAIN_DAYS:
-            log.info(
-                "  SKIP  %-12s  %-10s  %d calendar day span (need >= %d)",
-                sku_id, location_id, span_days, MIN_TRAIN_DAYS,
-            )
-            skipped += 1
-            continue
-
-        # Build full calendar range (first_dt … yesterday), filling zeros
-        history_dates = [
-            first_dt + timedelta(days=k)
-            for k in range((min(last_dt, today - timedelta(days=1)) - first_dt).days + 1)
-        ]
-
-        if len(history_dates) < MIN_TRAIN_DAYS + VAL_WINDOW:
-            log.info(
-                "  SKIP  %-12s  %-10s  only %d usable history days",
-                sku_id, location_id, len(history_dates),
-            )
-            skipped += 1
-            continue
-
-        # Compute fallback_demand = rolling_mean_28 of the most recent training data
-        recent_demand = [
-            demand_by_date.get(d.isoformat(), 0.0)
-            for d in history_dates[-28:]
-        ]
-        fallback_demand = sum(recent_demand) / len(recent_demand)
-
-        # Train / validation split: keep last VAL_WINDOW days for hold-out
-        train_dates = history_dates[:-VAL_WINDOW]
-        val_dates   = history_dates[-VAL_WINDOW:]
-
-        X_train, y_train = _build_matrices(
-            train_dates, demand_by_date, weather_by_date,
-            fallback_weather, fallback_demand, today,
-            demand_quality_score=dq_score,
-            xyz_class_enc=xyz_enc,
-        )
-        X_val, y_val = _build_matrices(
-            val_dates, demand_by_date, weather_by_date,
-            fallback_weather, fallback_demand, today,
-            demand_quality_score=dq_score,
-            xyz_class_enc=xyz_enc,
+        # ── 4a. Fetch transactions only for this SKU batch ───────────────
+        tx_rows = _fetch_transactions_for_skus(
+            client_holder, tx_cutoff, sku_batch,
         )
 
-        try:
-            t_model = time.perf_counter()
-            model, val_rmse = _train(X_train, y_train, X_val, y_val)
-            train_ms = (time.perf_counter() - t_model) * 1000
-            n_iters = model.num_trees()
-        except Exception as exc:
-            log.error(
-                "  ERROR %-12s  %-10s  training failed: %s",
-                sku_id, location_id, exc,
-            )
-            skipped += 1
-            continue
+        # ── 4b. Build per-(SKU, location) demand map for the batch ───────
+        demand_map = _build_demand_map(tx_rows, sku_batch_set)
+        active_pairs = sorted(demand_map.keys())
+        skus_with_sales.update(sku for sku, _ in active_pairs)
 
-        fc_rows = _generate_forecast(
-            sku_id, location_id, model,
-            demand_by_date, weather_by_date, fallback_weather,
-            fallback_demand, val_rmse, today, run_date_str,
-            demand_quality_score=dq_score,
-            xyz_class_enc=xyz_enc,
-        )
+        # ── 4c. Compute per-SKU regional baseline (Tier 1+2) inside batch.
+        #        All locations of a given SKU live in the same batch, so the
+        #        per-SKU regional baseline is exact even though we batch by
+        #        SKU.
+        from collections import defaultdict as _dd
+        sku_tier12_means: dict[str, list[float]] = _dd(list)
+        for (sku, loc), daily in demand_map.items():
+            if location_tiers.get(loc, 2) <= 2 and daily:
+                sku_tier12_means[sku].append(sum(daily.values()) / len(daily))
+        sku_regional_baseline: dict[str, float] = {
+            sku: sum(vals) / len(vals)
+            for sku, vals in sku_tier12_means.items()
+            if vals
+        }
 
-        # Tier 3 blending: if this location has low demand quality, weight
-        # predictions toward the regional (Tier 1+2) baseline mean to reduce
-        # the influence of third-call / residual-demand-inflated history.
-        if loc_tier == 3 and dq_score < LOW_QUALITY_THRESHOLD:
-            regional = sku_regional_baseline.get(sku_id, fallback_demand)
-            fc_rows = [
-                {
-                    **r,
-                    "predicted_qty": round(
-                        TIER3_BLEND_WEIGHT * regional
-                        + (1.0 - TIER3_BLEND_WEIGHT) * r["predicted_qty"],
-                        4,
-                    ),
-                }
-                for r in fc_rows
+        # ── 4d. Train + forecast each (SKU, location) in the batch ───────
+        fc_buffer: list[dict] = []
+        for sku_id, location_id in active_pairs:
+            demand_by_date = demand_map[(sku_id, location_id)]
+
+            dq_score = float(demand_quality.get((sku_id, location_id), 1.0))
+            loc_tier = location_tiers.get(location_id, 2)
+            xyz_enc  = float(xyz_class_map.get(sku_id, 1))
+
+            all_dates_str = sorted(demand_by_date.keys())
+            first_dt = date.fromisoformat(all_dates_str[0])
+            last_dt  = date.fromisoformat(all_dates_str[-1])
+            span_days = (last_dt - first_dt).days + 1
+
+            if span_days < MIN_TRAIN_DAYS:
+                skipped += 1
+                continue
+
+            history_dates = [
+                first_dt + timedelta(days=k)
+                for k in range((min(last_dt, today - timedelta(days=1)) - first_dt).days + 1)
             ]
-            log.debug(
-                "  BLEND %-12s  %-10s  Tier 3  dq=%.2f  regional=%.2f  "
-                "blend_wt=%.0f%%",
-                sku_id, location_id, dq_score, regional, TIER3_BLEND_WEIGHT * 100,
+            if len(history_dates) < MIN_TRAIN_DAYS + VAL_WINDOW:
+                skipped += 1
+                continue
+
+            recent_demand = [
+                demand_by_date.get(d.isoformat(), 0.0)
+                for d in history_dates[-28:]
+            ]
+            fallback_demand = sum(recent_demand) / len(recent_demand)
+
+            train_dates = history_dates[:-VAL_WINDOW]
+            val_dates   = history_dates[-VAL_WINDOW:]
+
+            X_train, y_train = _build_matrices(
+                train_dates, demand_by_date, weather_by_date,
+                fallback_weather, fallback_demand, today,
+                demand_quality_score=dq_score,
+                xyz_class_enc=xyz_enc,
+            )
+            X_val, y_val = _build_matrices(
+                val_dates, demand_by_date, weather_by_date,
+                fallback_weather, fallback_demand, today,
+                demand_quality_score=dq_score,
+                xyz_class_enc=xyz_enc,
             )
 
-        mean_pred = sum(r["predicted_qty"] for r in fc_rows) / len(fc_rows)
-        log.info(
-            "  OK    %-12s  %-10s  span=%3dd  train=%3d  val=%2d  "
-            "iters=%3d  rmse=%.2f  pred_avg=%.2f  (%.0fms)",
-            sku_id, location_id, span_days,
-            len(train_dates), len(val_dates),
-            n_iters, val_rmse, mean_pred, train_ms,
-        )
+            try:
+                model, val_rmse = _train(X_train, y_train, X_val, y_val)
+                n_iters = model.num_trees()
+            except Exception as exc:
+                log.error(
+                    "  ERROR %-12s  %-10s  training failed: %s",
+                    sku_id, location_id, exc,
+                )
+                skipped += 1
+                continue
 
-        fc_buffer.extend(fc_rows)
-        processed   += 1
-        total_rows  += len(fc_rows)
-        total_iters += n_iters
+            fc_rows = _generate_forecast(
+                sku_id, location_id, model,
+                demand_by_date, weather_by_date, fallback_weather,
+                fallback_demand, val_rmse, today, run_date_str,
+                demand_quality_score=dq_score,
+                xyz_class_enc=xyz_enc,
+            )
 
+            if loc_tier == 3 and dq_score < LOW_QUALITY_THRESHOLD:
+                regional = sku_regional_baseline.get(sku_id, fallback_demand)
+                fc_rows = [
+                    {
+                        **r,
+                        "predicted_qty": round(
+                            TIER3_BLEND_WEIGHT * regional
+                            + (1.0 - TIER3_BLEND_WEIGHT) * r["predicted_qty"],
+                            4,
+                        ),
+                    }
+                    for r in fc_rows
+                ]
+
+            fc_buffer.extend(fc_rows)
+            processed   += 1
+            total_rows  += len(fc_rows)
+            total_iters += n_iters
+
+        # ── 4e. Flush this batch's forecasts ─────────────────────────────
         while len(fc_buffer) >= BATCH_SIZE:
-            batch = fc_buffer[:BATCH_SIZE]
+            chunk = fc_buffer[:BATCH_SIZE]
             fc_buffer = fc_buffer[BATCH_SIZE:]
             if not dry_run:
                 _upsert_with_retry(
-                    client_holder, "forecast_results", batch,
+                    client_holder, "forecast_results", chunk,
+                    "sku_id,location_id,forecast_date,model_type,run_date",
+                )
+        if fc_buffer:
+            if not dry_run:
+                _upsert_with_retry(
+                    client_holder, "forecast_results", fc_buffer,
                     "sku_id,location_id,forecast_date,model_type,run_date",
                 )
 
-    if fc_buffer:
-        if not dry_run:
-            _upsert_with_retry(
-                client_holder, "forecast_results", fc_buffer,
-                "sku_id,location_id,forecast_date,model_type,run_date",
+        skus_done += len(sku_batch)
+        elapsed_batch = time.perf_counter() - t_batch
+        log.info(
+            "  batch %d/%d  skus=%d  tx=%d  pairs=%d  trained=%d  rows=%d  (%.1fs)",
+            batch_idx + 1, n_batches, len(sku_batch), len(tx_rows),
+            len(active_pairs), processed, total_rows, elapsed_batch,
+        )
+
+        # Progress milestone every PROGRESS_EVERY SKUs
+        if (skus_done % PROGRESS_EVERY) < SKU_BATCH_SIZE or skus_done == total_skus:
+            log.info(
+                "[LGBM] Processed %d / %d B-class SKUs  "
+                "(trained=%d skipped=%d rows=%d elapsed=%.0fs)",
+                skus_done, total_skus, processed, skipped,
+                total_rows, time.perf_counter() - t_start,
             )
 
-    # ── 6. Summary ────────────────────────────────────────────────────────
+    # ── 5. Summary ────────────────────────────────────────────────────────
     elapsed = time.perf_counter() - t_start
     avg_iters = round(total_iters / processed, 1) if processed else 0
+    skus_no_sales = total_skus - len(skus_with_sales)
 
     log.info("=" * 60)
     log.info("LightGBM forecast complete  (%.2fs)", elapsed)
-    log.info("  B-class SKUs queried:              %d", len(b_skus))
+    log.info("  B-class SKUs queried:              %d", total_skus)
     log.info("  B-class SKUs with no sales:        %d", skus_no_sales)
     log.info("  (SKU, location) pairs processed:   %d", processed)
     log.info("  (SKU, location) pairs skipped:     %d", skipped)

@@ -40,7 +40,6 @@ MODES
 from __future__ import annotations
 
 import argparse
-import re
 import sys
 import time
 from datetime import date
@@ -64,77 +63,34 @@ log = get_logger(__name__)
 
 _PRODUCT_CUBE = "Product"
 
-# Preferred: the Product cube exposes a compound "Prod PN Loc" hierarchy
-# where each member encodes SKU and location together as
-# "SKU_ID (LOCATION_NUMBER)", e.g. "ACD-OF-001 (1)".  A single-dimension
-# fetch is dramatically faster than a full crossjoin of Prod Code × Loc
-# (which otherwise materializes ~200k × 23 ≈ 4.6M cells server-side).
-MDX_INVENTORY_SNAPSHOT = """\
+# Active store + DC locations (numeric Autocube codes).  Retired locations
+# 14, 19, 22, 23, 30, 31 are excluded.  Inventory extraction iterates this
+# list and runs ONE MDX per location with a WHERE slicer + NON EMPTY on
+# rows — Autologue's server cannot handle a full Prod Code × Loc crossjoin
+# (out-of-memory after ~10 minutes), so location-by-location batching is
+# the only viable approach.
+ACTIVE_LOCATIONS: list[int] = [
+    1, 2, 3, 4, 5, 6, 7, 8, 9, 10,
+    11, 12, 13, 15, 16, 17, 18,
+    20, 21, 24, 25, 26, 27, 28, 29,
+    32, 33,
+]
+
+MDX_INVENTORY_BY_LOCATION = """\
 SELECT
-  NON EMPTY {{
+  {{
     [Measures].[On Hand Qty],
     [Measures].[Min Qty],
     [Measures].[Max Qty],
     [Measures].[Qty On Order],
-    [Measures].[Ext Cost On Hand],
-    [Measures].[Stock Qty],
-    [Measures].[On Hand Qty LM],
-    [Measures].[On Hand Qty 2M],
-    [Measures].[On Hand Qty 3M],
-    [Measures].[On Hand Qty 4M],
-    [Measures].[On Hand Qty 5M],
-    [Measures].[On Hand Qty 6M]
+    [Measures].[Ext Cost On Hand]
   }} ON COLUMNS,
   NON EMPTY
-    [Product].[Prod PN Loc].[Prod PN Loc].MEMBERS
+    [Product].[Prod Code].[Prod Code].MEMBERS
   ON ROWS
 FROM [Product]
+WHERE ([Location].[Loc].&[{loc_num}])
 """
-
-# Fallback MDX when the [Prod PN Loc] hierarchy is unavailable in this
-# cube deployment — reverts to the original Prod Code × Loc crossjoin.
-MDX_INVENTORY_SNAPSHOT_CROSSJOIN = """\
-SELECT
-  NON EMPTY {{
-    [Measures].[On Hand Qty],
-    [Measures].[Min Qty],
-    [Measures].[Max Qty],
-    [Measures].[Qty On Order],
-    [Measures].[Ext Cost On Hand],
-    [Measures].[Stock Qty]
-  }} ON COLUMNS,
-  NON EMPTY CROSSJOIN(
-    [Product].[Prod Code].[Prod Code].MEMBERS,
-    [Location].[Loc].[Loc].MEMBERS
-  ) ON ROWS
-FROM [Product]
-"""
-
-# Matches "SKU_ID (N)" or "SKU_ID (NN)" — the compound member key format.
-_PROD_PN_LOC_RE = re.compile(r"^\s*(.+?)\s*\(\s*(\d+)\s*\)\s*$")
-
-
-def _parse_prod_pn_loc(member: str) -> tuple[str, str] | tuple[None, None]:
-    """Split a '[Prod PN Loc]' member key into (sku_id, location_id).
-
-    Example:
-        'ACD-OF-001 (1)'   → ('ACD-OF-001', 'LOC-001')
-        'NGK-SP-100 (23)'  → ('NGK-SP-100', 'LOC-023')
-
-    Returns (None, None) when the member does not match the expected
-    compound format (header rows, grand totals, etc).
-    """
-    if not member:
-        return (None, None)
-    m = _PROD_PN_LOC_RE.match(member)
-    if not m:
-        return (None, None)
-    sku = m.group(1).strip()
-    try:
-        loc = f"LOC-{int(m.group(2)):03d}"
-    except ValueError:
-        return (None, None)
-    return (sku, loc)
 
 MDX_TRANSFERS = """\
 SELECT
@@ -351,10 +307,23 @@ def run_test() -> int:
 
 
 def run_inventory_extract(dry_run: bool = False) -> int:
+    """Pull current inventory snapshots from the Product cube.
+
+    Iterates ACTIVE_LOCATIONS one at a time, running an MDX query per
+    location with a WHERE slicer + NON EMPTY on rows.  This is the only
+    pattern that scales: a full Prod Code × Loc crossjoin OOMs the
+    Autologue server after ~10 minutes, and the [Prod PN Loc] compound
+    hierarchy is too wide for the server to materialize either.
+
+    For each location, only SKUs with non-zero on-hand / min / max /
+    on-order / cost are returned (NON EMPTY suppresses the rest).
+    """
     t0 = time.perf_counter()
     today = date.today()
     log.info("=" * 60)
     log.info("  PRODUCT CUBE — INVENTORY SNAPSHOT%s", " [DRY RUN]" if dry_run else "")
+    log.info("  Locations to query: %d  %s",
+             len(ACTIVE_LOCATIONS), ACTIVE_LOCATIONS)
     log.info("=" * 60)
 
     try:
@@ -364,90 +333,58 @@ def run_inventory_extract(dry_run: bool = False) -> int:
         log.exception("Connection failed.")
         return 1
 
-    # Preferred path: compound [Prod PN Loc] hierarchy (fast).
-    use_crossjoin = False
-    try:
-        rows = client.execute_mdx(MDX_INVENTORY_SNAPSHOT)
-        log.info("Inventory rows returned (Prod PN Loc): %d", len(rows))
-    except Exception:
-        log.exception(
-            "[Prod PN Loc] inventory query failed — falling back to Prod Code × Loc crossjoin.",
-        )
-        use_crossjoin = True
-        rows = []
+    cleaned: list[dict[str, Any]] = []
+    skipped_unparseable = 0
+    failed_locations: list[int] = []
+    per_location_counts: dict[int, int] = {}
 
-    if not use_crossjoin and not rows:
-        log.warning(
-            "[Prod PN Loc] returned 0 rows — falling back to Prod Code × Loc crossjoin.",
-        )
-        use_crossjoin = True
+    for idx, loc_num in enumerate(ACTIVE_LOCATIONS, start=1):
+        location_id = f"LOC-{loc_num:03d}"
+        mdx = MDX_INVENTORY_BY_LOCATION.format(loc_num=loc_num)
+        loc_t0 = time.perf_counter()
 
-    if use_crossjoin:
         try:
-            rows = client.execute_mdx(MDX_INVENTORY_SNAPSHOT_CROSSJOIN)
-            log.info("Inventory rows returned (crossjoin fallback): %d", len(rows))
+            rows = client.execute_mdx(mdx)
         except Exception:
-            log.exception("Crossjoin inventory extract failed.")
-            return 1
+            log.exception(
+                "  [%2d/%d] %s  MDX failed — skipping this location.",
+                idx, len(ACTIVE_LOCATIONS), location_id,
+            )
+            failed_locations.append(loc_num)
+            continue
 
-    if not rows:
-        log.info("No inventory data returned from either MDX path.")
-        return 0
-
-    def _clean_rows(raw_rows: list[dict], crossjoin: bool) -> tuple[list[dict], int]:
-        out: list[dict] = []
-        skipped = 0
-        for rr in raw_rows:
-            if crossjoin:
-                s = rr.get("[Product].[Prod Code].[Prod Code]", "").strip()
-                lr = rr.get("[Location].[Loc].[Loc]", "").strip()
-                if not s or not lr:
-                    skipped += 1
-                    continue
-                lc = _extract_location_code(lr)
-            else:
-                member = rr.get("[Product].[Prod PN Loc].[Prod PN Loc]", "").strip()
-                s, lc = _parse_prod_pn_loc(member)
-                if not s or not lc:
-                    skipped += 1
-                    continue
-            out.append({
-                "sku_id":        s,
-                "location_id":   lc,
+        loc_cleaned = 0
+        for r in rows:
+            sku = r.get("[Product].[Prod Code].[Prod Code]", "").strip()
+            if not sku:
+                skipped_unparseable += 1
+                continue
+            cleaned.append({
+                "sku_id":        sku,
+                "location_id":   location_id,
                 "snapshot_date": today.isoformat(),
-                "qty_on_hand":   clean_numeric(rr.get("[Measures].[On Hand Qty]")) or 0,
-                "qty_on_order":  clean_numeric(rr.get("[Measures].[Qty On Order]")) or 0,
-                "reorder_point": clean_numeric(rr.get("[Measures].[Min Qty]")),
-                "reorder_qty":   clean_numeric(rr.get("[Measures].[Max Qty]")),
+                "qty_on_hand":   clean_numeric(r.get("[Measures].[On Hand Qty]")) or 0,
+                "qty_on_order":  clean_numeric(r.get("[Measures].[Qty On Order]")) or 0,
+                "reorder_point": clean_numeric(r.get("[Measures].[Min Qty]")),
+                "reorder_qty":   clean_numeric(r.get("[Measures].[Max Qty]")),
             })
-        return out, skipped
+            loc_cleaned += 1
 
-    cleaned, skipped_unparseable = _clean_rows(rows, use_crossjoin)
-
-    # Post-parse fallback guard: if Prod PN Loc returned rows but the
-    # caption format has drifted (e.g. a cube upgrade renamed members),
-    # nothing will parse — retry with the crossjoin MDX before declaring
-    # success.  Only triggers when parse ratio is near zero.
-    parse_ratio = len(cleaned) / len(rows) if rows else 0.0
-    if not use_crossjoin and rows and parse_ratio < 0.10:
-        log.warning(
-            "[Prod PN Loc] parse success ratio %.2f%% (cleaned=%d / rows=%d) — "
-            "caption format may have drifted; falling back to crossjoin.",
-            parse_ratio * 100, len(cleaned), len(rows),
+        per_location_counts[loc_num] = loc_cleaned
+        log.info(
+            "  [%2d/%d] %s  rows=%d  cleaned=%d  (%.1fs)",
+            idx, len(ACTIVE_LOCATIONS), location_id,
+            len(rows), loc_cleaned, time.perf_counter() - loc_t0,
         )
-        try:
-            rows = client.execute_mdx(MDX_INVENTORY_SNAPSHOT_CROSSJOIN)
-            log.info("Crossjoin fallback rows returned: %d", len(rows))
-            use_crossjoin = True
-            cleaned, skipped_unparseable = _clean_rows(rows, True)
-        except Exception:
-            log.exception("Crossjoin fallback (post-parse) failed.")
-            return 1
 
     log.info(
-        "Cleaned %d inventory snapshot rows (skipped %d unparseable, path=%s).",
-        len(cleaned), skipped_unparseable,
-        "crossjoin" if use_crossjoin else "prod_pn_loc",
+        "Inventory extract: %d rows cleaned across %d/%d locations  "
+        "(skipped %d unparseable, failed locations: %s)",
+        len(cleaned),
+        len(ACTIVE_LOCATIONS) - len(failed_locations),
+        len(ACTIVE_LOCATIONS),
+        skipped_unparseable,
+        failed_locations or "none",
     )
 
     if dry_run:

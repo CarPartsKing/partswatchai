@@ -48,9 +48,14 @@ ANTHROPIC_API_KEY: str = _require("ANTHROPIC_API_KEY")
 # ---------------------------------------------------------------------------
 # Open-Meteo weather — Strongsville, OH (headquarters / central NE Ohio)
 # ---------------------------------------------------------------------------
-WEATHER_LAT: float = float(_optional("WEATHER_LAT", "41.3145"))
-WEATHER_LON: float = float(_optional("WEATHER_LON", "-81.8360"))
-WEATHER_TIMEZONE: str = _optional("WEATHER_TIMEZONE", "America/New_York")
+# NOTE: use `or "<default>"` rather than relying on os.getenv's default arg.
+# When CI defines `WEATHER_LAT: ${{ secrets.WEATHER_LAT }}` and the secret
+# is unset, the env var is exported as an empty string — not absent — so
+# the os.getenv default never fires.  `or "41.3145"` correctly falls back
+# whenever the value is missing, empty, or whitespace.
+WEATHER_LAT: float = float((os.getenv("WEATHER_LAT") or "41.3145").strip() or "41.3145")
+WEATHER_LON: float = float((os.getenv("WEATHER_LON") or "-81.8360").strip() or "-81.8360")
+WEATHER_TIMEZONE: str = (os.getenv("WEATHER_TIMEZONE") or "America/New_York").strip() or "America/New_York"
 
 # Open-Meteo endpoints (free, no key required)
 OPEN_METEO_FORECAST_URL: str = "https://api.open-meteo.com/v1/forecast"

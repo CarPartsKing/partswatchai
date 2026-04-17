@@ -38,8 +38,13 @@ jobs:
       ENVIRONMENT:        production
       LOG_LEVEL:          INFO
       # ── Open-Meteo NE Ohio coordinates (no API key needed) ──────────
-      WEATHER_LAT:        ${{ secrets.WEATHER_LAT }}
-      WEATHER_LON:        ${{ secrets.WEATHER_LON }}
+      # Hardcoded NE Ohio (Strongsville, OH HQ) fallbacks so the
+      # pipeline never fails validation when the secret is unset or
+      # blank — `${{ secrets.X }}` expands to an empty string when the
+      # secret is missing, so we cannot rely on the workflow env var
+      # alone; the `||` defaults this at the YAML layer.
+      WEATHER_LAT:        ${{ secrets.WEATHER_LAT  || '41.3145' }}
+      WEATHER_LON:        ${{ secrets.WEATHER_LON  || '-81.8360' }}
 
     steps:
       - name: Checkout repository

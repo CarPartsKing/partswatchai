@@ -71,6 +71,23 @@ from utils.logging_config import get_logger, setup_logging
 log = get_logger(__name__)
 
 # ---------------------------------------------------------------------------
+# Excluded locations
+# ---------------------------------------------------------------------------
+# These locations must never appear as a reorder destination OR as a
+# transfer source.  Filtering them at the inventory-fetch layer ensures
+# they're absent from every downstream computation (recommendations,
+# transfer routing, basket co-purchases, urgency rollups).
+#
+#   LOC-021 (INTERNET) is a virtual storefront, not a physical
+#     warehouse — it has no shelves to stock.
+#   LOC-014, LOC-019, LOC-022, LOC-023, LOC-030, LOC-031 are retired
+#     stores still present in legacy snapshots.
+EXCLUDED_LOCATIONS: frozenset[str] = frozenset({
+    "LOC-021",
+    "LOC-014", "LOC-019", "LOC-022", "LOC-023", "LOC-030", "LOC-031",
+})
+
+# ---------------------------------------------------------------------------
 # Tuneable constants
 # ---------------------------------------------------------------------------
 
@@ -294,8 +311,13 @@ def _fetch_inventory(client_holder: list, lookback_days: int = 7) -> dict[tuple[
         gte_filters={"snapshot_date": cutoff},
     )
     latest: dict[tuple[str, str], dict] = {}
+    skipped_excluded = 0
     for r in rows:
-        key = (r["sku_id"], r["location_id"])
+        loc_id = r["location_id"]
+        if loc_id in EXCLUDED_LOCATIONS:
+            skipped_excluded += 1
+            continue
+        key = (r["sku_id"], loc_id)
         existing = latest.get(key)
         if existing is None or r["snapshot_date"] > existing["snapshot_date"]:
             latest[key] = {
@@ -303,6 +325,11 @@ def _fetch_inventory(client_holder: list, lookback_days: int = 7) -> dict[tuple[
                 "qty_on_order":  float(r.get("qty_on_order") or 0),
                 "snapshot_date": r["snapshot_date"],
             }
+    if skipped_excluded:
+        log.info(
+            "Excluded %d snapshot rows from %d virtual/retired locations: %s",
+            skipped_excluded, len(EXCLUDED_LOCATIONS), sorted(EXCLUDED_LOCATIONS),
+        )
     return latest
 
 

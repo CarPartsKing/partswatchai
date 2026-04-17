@@ -76,6 +76,23 @@ ACTIVE_LOCATIONS: list[int] = [
     32, 33,
 ]
 
+def _dedupe_by_keys(rows: list[dict[str, Any]], keys: tuple[str, ...]) -> list[dict[str, Any]]:
+    """Collapse a list of dict rows so each composite key appears once.
+
+    Postgres' ON CONFLICT DO UPDATE raises 21000 ("cannot affect a row a
+    second time") when a single statement tries to upsert two rows that
+    map to the same conflict target.  Autocube can legitimately return
+    duplicate (sku_id, location_id) pairs (e.g. the same SKU under two
+    Prod Code aliases), so we deduplicate every batch on the same keys
+    that appear in the upsert's on_conflict clause, keeping the LAST
+    occurrence (most recent measure values win).
+    """
+    seen: dict[tuple, dict[str, Any]] = {}
+    for row in rows:
+        seen[tuple(row.get(k) for k in keys)] = row
+    return list(seen.values())
+
+
 MDX_INVENTORY_BY_LOCATION = """\
 SELECT
   {{
@@ -403,6 +420,14 @@ def run_inventory_extract(dry_run: bool = False) -> int:
         db.table("sku_master").upsert(batch, on_conflict="sku_id", ignore_duplicates=True).execute()
     log.info("sku_master populated.")
 
+    pre_dedup = len(cleaned)
+    cleaned = _dedupe_by_keys(cleaned, ("sku_id", "location_id", "snapshot_date"))
+    if pre_dedup != len(cleaned):
+        log.info(
+            "Deduplicated inventory rows: %d → %d (removed %d duplicate keys).",
+            pre_dedup, len(cleaned), pre_dedup - len(cleaned),
+        )
+
     loaded = 0
     for i in range(0, len(cleaned), _BATCH_SIZE):
         batch = cleaned[i:i + _BATCH_SIZE]
@@ -483,6 +508,14 @@ def run_transfer_extract(dry_run: bool = False) -> int:
     for i in range(0, len(unique_skus), _BATCH_SIZE):
         batch = [{"sku_id": s} for s in unique_skus[i:i + _BATCH_SIZE]]
         db.table("sku_master").upsert(batch, on_conflict="sku_id", ignore_duplicates=True).execute()
+
+    pre_dedup = len(cleaned)
+    cleaned = _dedupe_by_keys(cleaned, ("transfer_id",))
+    if pre_dedup != len(cleaned):
+        log.info(
+            "Deduplicated transfer rows: %d → %d (removed %d duplicate keys).",
+            pre_dedup, len(cleaned), pre_dedup - len(cleaned),
+        )
 
     loaded = 0
     for i in range(0, len(cleaned), _BATCH_SIZE):
@@ -639,6 +672,14 @@ def run_pricing_extract(dry_run: bool = False) -> int:
     for i in range(0, len(unique_skus), _BATCH_SIZE):
         batch = [{"sku_id": s} for s in unique_skus[i:i + _BATCH_SIZE]]
         db.table("sku_master").upsert(batch, on_conflict="sku_id", ignore_duplicates=True).execute()
+
+    pre_dedup = len(cleaned)
+    cleaned = _dedupe_by_keys(cleaned, ("sku_id", "price_tier", "snapshot_date"))
+    if pre_dedup != len(cleaned):
+        log.info(
+            "Deduplicated pricing rows: %d → %d (removed %d duplicate keys).",
+            pre_dedup, len(cleaned), pre_dedup - len(cleaned),
+        )
 
     loaded = 0
     for i in range(0, len(cleaned), _BATCH_SIZE):

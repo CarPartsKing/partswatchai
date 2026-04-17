@@ -97,6 +97,47 @@ DEFAULT_UNIT_COST:      float = 10.0   # fallback when no PO cost found
 PAGE_SIZE: int = 1_000
 
 # ---------------------------------------------------------------------------
+# Retry configuration for transient Supabase errors (57014 statement
+# timeout, dropped HTTP/2 streams, read timeouts, …).  Mirrors the pattern
+# used in engine/reorder.py and ml/forecast_rolling.py.
+# ---------------------------------------------------------------------------
+_MAX_RETRIES: int = 5
+_RETRY_DELAY: float = 5.0
+_RETRYABLE_TOKENS: tuple[str, ...] = (
+    "57014",
+    "statement timeout",
+    "canceling statement",
+    "ConnectionTerminated",
+    "RemoteProtocolError",
+    "ReadTimeout",
+    "ReadError",
+    "ProtocolError",
+    "RemoteDisconnected",
+    "Server disconnected",
+    "Connection aborted",
+)
+
+
+def _is_retryable_error(exc: Exception) -> bool:
+    """True if exc looks like a Supabase timeout / dropped-connection error."""
+    blob = type(exc).__name__ + " " + str(exc)
+    return any(tok in blob for tok in _RETRYABLE_TOKENS)
+
+
+def _get_fresh_client() -> Any:
+    """Return a brand-new Supabase client (bypasses lru_cache when available).
+
+    Only ImportError / AttributeError fall back to the cached client — any
+    other failure (auth, network, config) must surface so we don't paper
+    over a real outage by reusing a known-bad cached connection.
+    """
+    try:
+        from db.connection import get_new_client  # type: ignore[attr-defined]
+        return get_new_client()
+    except (ImportError, AttributeError):
+        return get_client()
+
+# ---------------------------------------------------------------------------
 # Classification labels
 # ---------------------------------------------------------------------------
 
@@ -168,7 +209,7 @@ class ScoredPosition:
 # ---------------------------------------------------------------------------
 
 def _paginate(
-    client: Any,
+    client_holder: list,
     table:  str,
     select: str,
     filters:     dict | None = None,
@@ -177,19 +218,40 @@ def _paginate(
     order_col:   str | None  = None,
     order_desc:  bool        = False,
 ) -> list[dict]:
+    """Paginated fetch with retry + reconnect on transient Supabase errors.
+
+    ``client_holder`` is a single-element list; the reference is replaced
+    in-place when a 57014 / dropped-connection error forces a reconnect.
+    """
     rows: list[dict] = []
     offset = 0
     while True:
-        q = client.table(table).select(select)
-        for col, val in (filters  or {}).items():
-            q = q.eq(col, val)
-        for col, val in (gte_filters or {}).items():
-            q = q.gte(col, val)
-        for col, val in (eq_bool or {}).items():
-            q = q.eq(col, val)
-        if order_col:
-            q = q.order(order_col, desc=order_desc)
-        page = q.range(offset, offset + PAGE_SIZE - 1).execute().data or []
+        page: list[dict] | None = None
+        for attempt in range(1, _MAX_RETRIES + 1):
+            try:
+                q = client_holder[0].table(table).select(select)
+                for col, val in (filters  or {}).items():
+                    q = q.eq(col, val)
+                for col, val in (gte_filters or {}).items():
+                    q = q.gte(col, val)
+                for col, val in (eq_bool or {}).items():
+                    q = q.eq(col, val)
+                if order_col:
+                    q = q.order(order_col, desc=order_desc)
+                page = q.range(offset, offset + PAGE_SIZE - 1).execute().data or []
+                break
+            except Exception as exc:
+                if _is_retryable_error(exc) and attempt < _MAX_RETRIES:
+                    log.warning(
+                        "  %s fetch retry %d/%d (offset=%d): %s — reconnecting in %.0fs …",
+                        table, attempt, _MAX_RETRIES, offset,
+                        type(exc).__name__, _RETRY_DELAY,
+                    )
+                    time.sleep(_RETRY_DELAY)
+                    client_holder[0] = _get_fresh_client()
+                    continue
+                raise
+        assert page is not None
         rows.extend(page)
         if len(page) < PAGE_SIZE:
             break
@@ -201,9 +263,9 @@ def _paginate(
 # Data fetchers
 # ---------------------------------------------------------------------------
 
-def _fetch_latest_inventory(client: Any) -> dict[tuple[str, str], dict]:
+def _fetch_latest_inventory(client_holder: list) -> dict[tuple[str, str], dict]:
     """Latest inventory snapshot per (sku_id, location_id)."""
-    rows = _paginate(client, "inventory_snapshots",
+    rows = _paginate(client_holder, "inventory_snapshots",
                      "sku_id,location_id,snapshot_date,qty_on_hand")
     latest: dict[tuple[str, str], dict] = {}
     for r in rows:
@@ -213,17 +275,17 @@ def _fetch_latest_inventory(client: Any) -> dict[tuple[str, str], dict]:
     return {k: v for k, v in latest.items() if (v.get("qty_on_hand") or 0) > 0}
 
 
-def _fetch_sku_master(client: Any) -> dict[str, dict]:
+def _fetch_sku_master(client_holder: list) -> dict[str, dict]:
     """sku_id → sku_master row."""
-    rows = _paginate(client, "sku_master",
+    rows = _paginate(client_holder, "sku_master",
                      "sku_id,abc_class,last_sale_date,avg_weekly_units,"
                      "is_dead_stock,part_category,sub_category")
     return {r["sku_id"]: r for r in rows}
 
 
-def _fetch_unit_costs(client: Any) -> dict[str, float]:
+def _fetch_unit_costs(client_holder: list) -> dict[str, float]:
     """sku_id → most recent unit_cost from received purchase orders."""
-    rows = _paginate(client, "purchase_orders",
+    rows = _paginate(client_holder, "purchase_orders",
                      "sku_id,unit_cost,actual_delivery_date",
                      filters={"status": "received"},
                      order_col="actual_delivery_date", order_desc=True)
@@ -235,9 +297,9 @@ def _fetch_unit_costs(client: Any) -> dict[str, float]:
     return costs
 
 
-def _fetch_supplier_map(client: Any) -> dict[str, str]:
+def _fetch_supplier_map(client_holder: list) -> dict[str, str]:
     """sku_id → supplier_id from the most recent received PO."""
-    rows = _paginate(client, "purchase_orders",
+    rows = _paginate(client_holder, "purchase_orders",
                      "sku_id,supplier_id,actual_delivery_date",
                      filters={"status": "received"},
                      order_col="actual_delivery_date", order_desc=True)
@@ -251,10 +313,15 @@ def _fetch_supplier_map(client: Any) -> dict[str, str]:
 
 
 def _fetch_location_sales(
-    client: Any,
+    client_holder: list,
     today:  date,
 ) -> tuple[dict[tuple[str, str], date], dict[tuple[str, str], int]]:
     """Per-(sku_id, location_id): last sale date and 365-day sale frequency.
+
+    Only the most-recent ``LOOKBACK_DAYS`` (365) of sales_transactions are
+    fetched.  Dead stock detection only needs recent sale history; pulling
+    the full ~8 M-row history triggers Supabase statement timeouts (57014).
+    Pagination is wrapped in retry/reconnect via ``_paginate``.
 
     Returns
     -------
@@ -262,9 +329,12 @@ def _fetch_location_sales(
     frequency_map  : (sku_id, location_id) → count of distinct sale days
     """
     cutoff = (today - timedelta(days=LOOKBACK_DAYS)).isoformat()
-    rows   = _paginate(client, "sales_transactions",
+    log.info("  Fetching sales_transactions since %s (last %d days) …",
+             cutoff, LOOKBACK_DAYS)
+    rows   = _paginate(client_holder, "sales_transactions",
                        "sku_id,location_id,transaction_date",
                        gte_filters={"transaction_date": cutoff})
+    log.info("  Fetched %d transaction row(s) within lookback window.", len(rows))
 
     last_sale_map: dict[tuple[str, str], date]  = {}
     freq_dates:    dict[tuple[str, str], set[str]] = defaultdict(set)
@@ -392,10 +462,36 @@ def score_positions(
 # DB writes
 # ---------------------------------------------------------------------------
 
+def _upsert_with_retry(
+    client_holder: list,
+    table: str,
+    rows: list[dict],
+    on_conflict: str,
+) -> None:
+    """Upsert rows with retry/reconnect on transient Supabase errors."""
+    for attempt in range(1, _MAX_RETRIES + 1):
+        try:
+            client_holder[0].table(table).upsert(
+                rows, on_conflict=on_conflict,
+            ).execute()
+            return
+        except Exception as exc:
+            if _is_retryable_error(exc) and attempt < _MAX_RETRIES:
+                log.warning(
+                    "  upsert retry %d/%d (%d rows): %s — reconnecting in %.0fs …",
+                    attempt, _MAX_RETRIES, len(rows),
+                    type(exc).__name__, _RETRY_DELAY,
+                )
+                time.sleep(_RETRY_DELAY)
+                client_holder[0] = _get_fresh_client()
+                continue
+            raise
+
+
 def _update_is_dead_stock(
-    client:   Any,
-    scored:   list[ScoredPosition],
-    dry_run:  bool,
+    client_holder: list,
+    scored:        list[ScoredPosition],
+    dry_run:       bool,
 ) -> tuple[int, int]:
     """Set is_dead_stock = TRUE for LIQUIDATE SKUs; clear for HEALTHY SKUs.
 
@@ -420,9 +516,9 @@ def _update_is_dead_stock(
 
     PAGE = 100
     for batch in [set_true[i:i+PAGE] for i in range(0, len(set_true), PAGE)]:
-        client.table("sku_master").upsert(batch, on_conflict="sku_id").execute()
+        _upsert_with_retry(client_holder, "sku_master", batch, "sku_id")
     for batch in [set_false[i:i+PAGE] for i in range(0, len(set_false), PAGE)]:
-        client.table("sku_master").upsert(batch, on_conflict="sku_id").execute()
+        _upsert_with_retry(client_holder, "sku_master", batch, "sku_id")
 
     log.info("is_dead_stock flag updated: TRUE=%d  FALSE=%d", len(set_true), len(set_false))
     return len(set_true), len(set_false)
@@ -612,8 +708,10 @@ def run_dead_stock(
     log.info("Analysis date: %s", today.isoformat())
 
     # ── Connect ───────────────────────────────────────────────────────
+    # Wrap the client in a single-element list so retry helpers can swap
+    # in a freshly minted client when Supabase drops the connection.
     try:
-        client = get_client()
+        client_holder: list = [_get_fresh_client()]
     except Exception:
         log.exception("Failed to initialise Supabase client.")
         return 1
@@ -621,11 +719,11 @@ def run_dead_stock(
     # ── Fetch all data ────────────────────────────────────────────────
     log.info("Fetching inventory positions …")
     try:
-        inventory    = _fetch_latest_inventory(client)
-        sku_master   = _fetch_sku_master(client)
-        unit_costs   = _fetch_unit_costs(client)
-        suppliers    = _fetch_supplier_map(client)
-        last_sale_map, freq_map = _fetch_location_sales(client, today)
+        inventory    = _fetch_latest_inventory(client_holder)
+        sku_master   = _fetch_sku_master(client_holder)
+        unit_costs   = _fetch_unit_costs(client_holder)
+        suppliers    = _fetch_supplier_map(client_holder)
+        last_sale_map, freq_map = _fetch_location_sales(client_holder, today)
     except Exception:
         log.exception("Data fetch failed.")
         return 1
@@ -683,7 +781,7 @@ def run_dead_stock(
 
     # ── Update is_dead_stock flag ─────────────────────────────────────
     try:
-        set_true, set_false = _update_is_dead_stock(client, scored, dry_run)
+        set_true, set_false = _update_is_dead_stock(client_holder, scored, dry_run)
     except Exception:
         log.exception("is_dead_stock update failed (non-fatal).")
         set_true = set_false = 0

@@ -21,13 +21,15 @@ from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
 from flask import Flask, jsonify, request, send_from_directory
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from assistant.claude_api import PurchasingAssistant
-from db.connection import get_client
+from db.connection import get_client, get_new_client
 from utils.logging_config import get_logger, setup_logging
 
 setup_logging()
@@ -187,22 +189,88 @@ def _build_alerts(client: Any, today: date) -> dict:
     }
 
 
-def _build_reorder(client: Any, today: date) -> list[dict]:
+def _build_reorder(client: Any, today: date) -> dict:
+    """Reorder recommendations summary for today.
+
+    Returns a dict with:
+      - kpis:  network roll-ups (totals, urgency split, type split,
+               top suppliers, top destination locations)
+      - items: top 10 most-urgent unapproved recommendations for the
+               table view
+    """
+    # Pull EVERY row for today (full network, not just first 100) so the
+    # KPIs reflect the real volume the buying team faces.  The reorder
+    # writer batches at 200/row so we can have ~20k+ recs/day.
     rows = _paginate(
         client, "reorder_recommendations",
         "sku_id,location_id,recommendation_type,urgency,qty_to_order,"
-        "days_of_supply_remaining,forecast_model_used,transfer_from_location",
+        "supplier_id,days_of_supply_remaining,forecast_model_used,"
+        "transfer_from_location,is_approved",
         filters={"recommendation_date": today.isoformat()},
-        eq_bool={"is_approved": False},
-        limit=100,
     )
-    urgency_order = {"critical": 0, "high": 1, "medium": 2, "low": 3}
-    rows.sort(key=lambda r: urgency_order.get(r.get("urgency", "low"), 9))
+
+    urgency_order = {"critical": 0, "warning": 1, "high": 1,
+                     "normal": 2, "medium": 2, "low": 3}
+
+    by_urgency = {"critical": 0, "warning": 0, "normal": 0}
+    by_type = {"po": 0, "transfer": 0}
+    by_supplier: dict[str, int] = defaultdict(int)
+    by_dest_loc: dict[str, int] = defaultdict(int)
+    total_qty = 0.0
+    approved = 0
+
     for r in rows:
+        u = (r.get("urgency") or "normal").lower()
+        if u in by_urgency:
+            by_urgency[u] += 1
+        t = (r.get("recommendation_type") or "po").lower()
+        if t in by_type:
+            by_type[t] += 1
+        sup = r.get("supplier_id") or ""
+        if sup and t == "po":
+            by_supplier[sup] += 1
+        loc = r.get("location_id") or ""
+        if loc:
+            by_dest_loc[loc] += 1
+        total_qty += float(r.get("qty_to_order") or 0)
+        if r.get("is_approved"):
+            approved += 1
+
+    top_suppliers = sorted(by_supplier.items(), key=lambda kv: kv[1], reverse=True)[:5]
+    top_dest_locs = sorted(by_dest_loc.items(), key=lambda kv: kv[1], reverse=True)[:5]
+
+    # Top-10 most-urgent unapproved for the on-screen action list
+    unapproved = [r for r in rows if not r.get("is_approved")]
+    unapproved.sort(key=lambda r: (
+        urgency_order.get((r.get("urgency") or "low").lower(), 9),
+        float(r.get("days_of_supply_remaining") or 9999),
+    ))
+    items = unapproved[:10]
+    for r in items:
         r["location_display"] = _loc_display(r.get("location_id", ""))
         if r.get("transfer_from_location"):
             r["transfer_from_display"] = _loc_display(r["transfer_from_location"])
-    return rows[:10]
+
+    return {
+        "kpis": {
+            "total_recommendations":  len(rows),
+            "approved":               approved,
+            "pending":                len(rows) - approved,
+            "total_qty_recommended":  round(total_qty, 1),
+            "by_urgency":             by_urgency,
+            "by_type":                by_type,
+            "top_suppliers": [
+                {"supplier_id": sid, "count": n} for sid, n in top_suppliers
+            ],
+            "top_destinations": [
+                {"location_id": lid,
+                 "location_display": _loc_display(lid),
+                 "count": n}
+                for lid, n in top_dest_locs
+            ],
+        },
+        "items": items,
+    }
 
 
 def _build_supplier_health(client: Any, today: date) -> dict:
@@ -241,47 +309,269 @@ def _build_supplier_health(client: Any, today: date) -> dict:
 
 
 def _build_inventory_health(client: Any, today: date) -> dict:
-    cutoff = (today - timedelta(days=7)).isoformat()
-    inv_rows = _paginate(
-        client, "inventory_snapshots",
-        "sku_id,location_id,snapshot_date,is_stockout",
-        gte_filters={"snapshot_date": cutoff},
-    )
-    latest: dict[tuple[str, str], dict] = {}
-    for r in inv_rows:
-        key = (r["sku_id"], r["location_id"])
-        if key not in latest or r["snapshot_date"] > latest[key]["snapshot_date"]:
-            latest[key] = r
+    """Network-wide inventory health from the latest per-location snapshots.
 
-    stockouts = [v for v in latest.values() if v.get("is_stockout")]
+    inventory_snapshots can have 200K+ rows for a single date, so we never
+    paginate the whole thing.  Instead we issue a handful of cheap server-
+    side `count='exact', head=True` queries plus one `.limit(N)` fetch for
+    the headline stockout examples.  Total round-trips: ~5 + one per active
+    location for the per-location stockout breakdown.
+    """
+    # 1. Find the freshest snapshot date.
+    try:
+        latest_row = (
+            client.table("inventory_snapshots")
+            .select("snapshot_date")
+            .order("snapshot_date", desc=True)
+            .limit(1)
+            .execute()
+            .data or []
+        )
+        latest_date = latest_row[0]["snapshot_date"] if latest_row else today.isoformat()
+    except Exception:
+        latest_date = today.isoformat()
 
-    recs = _paginate(
-        client, "reorder_recommendations",
-        "sku_id,location_id,days_of_supply_remaining",
-        filters={"recommendation_date": today.isoformat()},
+    def _count(query) -> int:
+        try:
+            return int(query.execute().count or 0)
+        except Exception:
+            return 0
+
+    base = lambda: client.table("inventory_snapshots").select(
+        "*", count="exact", head=True
+    ).eq("snapshot_date", latest_date)
+
+    snapshot_count = _count(base())
+    stockout_count = _count(base().eq("is_stockout", True))
+
+    # Pull just the stockout rows (small subset) for examples + per-location
+    # aggregation.  We cap at 5000 to stay under Supabase's 8s timeout even
+    # in worst-case (the table is indexed on snapshot_date+is_stockout).
+    stockout_rows: list[dict] = []
+    try:
+        stockout_rows = (
+            client.table("inventory_snapshots")
+            .select("sku_id,location_id")
+            .eq("snapshot_date", latest_date)
+            .eq("is_stockout", True)
+            .limit(5000)
+            .execute()
+            .data or []
+        )
+    except Exception:
+        pass
+
+    by_location: dict[str, dict[str, int]] = defaultdict(
+        lambda: {"snapshots": 0, "stockouts": 0, "below_reorder": 0}
     )
-    low_supply = [
-        r for r in recs
-        if r.get("days_of_supply_remaining") is not None
-        and 0 < float(r["days_of_supply_remaining"]) < _LOW_SUPPLY_DAYS
-    ]
+    stockouts: list[dict] = []
+    for r in stockout_rows:
+        loc = r.get("location_id") or ""
+        by_location[loc]["stockouts"] += 1
+        if len(stockouts) < 10:
+            stockouts.append(r)
+
+    # Pull per-location snapshot counts (cheap aggregation via the index).
+    # We can't easily GROUP BY through PostgREST, so issue one head count
+    # per active location — at ~27 locations × ~80ms each this is well
+    # under a second.
+    try:
+        loc_ids = [r["location_id"] for r in (
+            client.table("locations").select("location_id").execute().data or []
+        )]
+    except Exception:
+        loc_ids = list(by_location.keys())
+
+    for loc in loc_ids:
+        snaps = _count(base().eq("location_id", loc))
+        if snaps:
+            by_location[loc]["snapshots"] = snaps
+
+    # Top 5 locations by stockout count.
+    top_stockout_locs = sorted(
+        ((loc, stats["stockouts"], stats["snapshots"])
+         for loc, stats in by_location.items()
+         if stats["stockouts"] > 0),
+        key=lambda x: x[1], reverse=True,
+    )[:5]
+
+    # The expensive aggregates (below_reorder, overstock, total_on_hand,
+    # total_on_order) require a full table scan with arithmetic which the
+    # PostgREST `head=True` count can't satisfy.  Surface them as None so
+    # the dashboard can render "—" rather than blocking on a multi-minute
+    # paginate.  A future RPC view can backfill these.
+    below_reorder = None
+    overstock = None
+    total_on_hand = None
+    total_on_order = None
+
+    # Low-supply count from today's reorder recommendations (kept for
+    # parity with the old metric — 'days_of_supply < 3').
+    try:
+        recs = _paginate(
+            client, "reorder_recommendations",
+            "days_of_supply_remaining",
+            filters={"recommendation_date": today.isoformat()},
+        )
+        low_supply = sum(
+            1 for r in recs
+            if r.get("days_of_supply_remaining") is not None
+            and 0 < float(r["days_of_supply_remaining"]) < _LOW_SUPPLY_DAYS
+        )
+    except Exception:
+        low_supply = 0
 
     return {
-        "stockout_count": len(stockouts),
-        "low_supply_count": len(low_supply),
-        "snapshot_count": len(latest),
+        "snapshot_date":     latest_date,
+        "snapshot_count":    snapshot_count,
+        "stockout_count":    stockout_count,
+        "below_reorder":     below_reorder,
+        "overstock_count":   overstock,
+        "low_supply_count":  low_supply,
+        "total_on_hand_qty": round(total_on_hand, 0) if total_on_hand is not None else None,
+        "total_on_order_qty":round(total_on_order, 0) if total_on_order is not None else None,
+        "locations_covered": len(by_location),
         "stockout_pairs": [
             {"sku_id": r["sku_id"], "location_id": r["location_id"],
              "location_display": _loc_display(r["location_id"])}
-            for r in stockouts[:10]
+            for r in stockouts
+        ],
+        "top_stockout_locations": [
+            {"location_id": loc,
+             "location_display": _loc_display(loc),
+             "stockouts": cnt,
+             "snapshots": snaps,
+             "stockout_pct": round(100.0 * cnt / snaps, 1) if snaps else 0.0}
+            for loc, cnt, snaps in top_stockout_locs
+        ],
+    }
+
+
+def _build_transfer_activity(client: Any, today: date) -> dict:
+    """Recent inter-location transfer activity (last 30 days).
+
+    Surfaces top transfer routes (from→to) and top moving SKUs so the
+    buying team can see whether the network is rebalancing itself
+    organically before issuing transfer recommendations.
+    """
+    cutoff = (today - timedelta(days=30)).isoformat()
+    try:
+        rows = _paginate(
+            client, "location_transfers",
+            "sku_id,from_location,to_location,transfer_date,"
+            "qty_transferred,transfer_cost",
+            gte_filters={"transfer_date": cutoff},
+        )
+    except Exception:
+        return {"total_transfers": 0, "total_qty": 0.0,
+                "top_routes": [], "top_skus": []}
+
+    by_route: dict[tuple[str, str], dict[str, float]] = defaultdict(
+        lambda: {"qty": 0.0, "count": 0, "cost": 0.0}
+    )
+    by_sku: dict[str, float] = defaultdict(float)
+    total_qty = 0.0
+    total_cost = 0.0
+
+    for r in rows:
+        f = r.get("from_location") or ""
+        t = r.get("to_location") or ""
+        sku = r.get("sku_id") or ""
+        qty = float(r.get("qty_transferred") or 0)
+        cost = float(r.get("transfer_cost") or 0) if r.get("transfer_cost") else 0.0
+        by_route[(f, t)]["qty"] += qty
+        by_route[(f, t)]["count"] += 1
+        by_route[(f, t)]["cost"] += cost
+        by_sku[sku] += qty
+        total_qty += qty
+        total_cost += cost
+
+    top_routes = sorted(
+        by_route.items(), key=lambda kv: kv[1]["qty"], reverse=True,
+    )[:8]
+    top_skus = sorted(by_sku.items(), key=lambda kv: kv[1], reverse=True)[:5]
+
+    return {
+        "total_transfers": len(rows),
+        "total_qty":       round(total_qty, 1),
+        "total_cost":      round(total_cost, 2),
+        "window_days":     30,
+        "top_routes": [
+            {
+                "from_location":     f,
+                "to_location":       t,
+                "from_display":      _loc_display(f),
+                "to_display":        _loc_display(t),
+                "qty":               round(stats["qty"], 1),
+                "transfer_count":    int(stats["count"]),
+                "cost":              round(stats["cost"], 2),
+            }
+            for (f, t), stats in top_routes
+        ],
+        "top_skus": [
+            {"sku_id": sku, "qty": round(qty, 1)}
+            for sku, qty in top_skus
         ],
     }
 
 
 def _build_forecast_accuracy(client: Any, today: date) -> list[dict]:
+    """Forecast MAPE by ABC class × model.
+
+    The forecast_results table is 4M+ rows and there is no PostgREST view
+    that can compute MAPE server-side, so the full Python join requires
+    pulling hundreds of thousands of rows — well past Supabase's 8s
+    statement timeout.  Until a SQL view (e.g. v_forecast_accuracy_daily)
+    is added, prefer the pre-computed ml/accuracy.py output table instead.
+    """
+    yesterday = (today - timedelta(days=1)).isoformat()
+    cutoff    = (today - timedelta(days=_MAPE_LOOKBACK_DAYS)).isoformat()
+
+    # Try the materialised accuracy table first (cheap, indexed by date).
+    try:
+        rows = (
+            client.table("forecast_accuracy_daily")
+            .select("abc_class,model_type,mape_pct,n_obs")
+            .gte("accuracy_date", cutoff)
+            .lte("accuracy_date", yesterday)
+            .limit(2000)
+            .execute()
+            .data or []
+        )
+    except Exception:
+        rows = []
+
+    if not rows:
+        return []
+
+    # Aggregate to one row per (abc_class, model_type).
+    agg: dict[tuple[str, str], dict[str, float]] = defaultdict(
+        lambda: {"weighted_ape": 0.0, "n": 0}
+    )
+    for r in rows:
+        key = (r.get("abc_class") or "?", r.get("model_type") or "?")
+        n   = int(r.get("n_obs") or 0)
+        if n <= 0:
+            continue
+        agg[key]["weighted_ape"] += float(r.get("mape_pct") or 0) * n
+        agg[key]["n"]            += n
+
+    return [
+        {
+            "abc_class":       abc,
+            "model_type":      model,
+            "mape_pct":        round(v["weighted_ape"] / v["n"], 1) if v["n"] else 0.0,
+            "n_obs":           v["n"],
+            "above_threshold": (v["weighted_ape"] / v["n"]) > 25.0 if v["n"] else False,
+        }
+        for (abc, model), v in sorted(agg.items())
+    ]
+
+
+def _build_forecast_accuracy_legacy(client: Any, today: date) -> list[dict]:
+    """Original on-the-fly MAPE compute — kept for reference, not wired up."""
     window_start = (today - timedelta(days=_MAPE_LOOKBACK_DAYS)).isoformat()
     yesterday    = (today - timedelta(days=1)).isoformat()
-
     fc_rows = _paginate(
         client, "forecast_results",
         "sku_id,location_id,forecast_date,model_type,predicted_qty,run_date",
@@ -306,22 +596,30 @@ def _build_forecast_accuracy(client: Any, today: date) -> list[dict]:
             if d:
                 forecast_map[key][d] = float(r.get("predicted_qty") or 0)
 
-    sales_rows = _paginate(
-        client, "sales_transactions",
-        "sku_id,location_id,transaction_date,qty_sold",
-        gte_filters={"transaction_date": window_start},
-        lte_filters={"transaction_date": yesterday},
-    )
+    # Restrict the sales scan to only the SKUs we have a forecast for.  The
+    # raw sales_transactions table has millions of rows and an unfiltered
+    # 7-day pull blows past Supabase's 8s statement timeout (57014).  Most
+    # forecasts cover only a few thousand SKUs, so an `in_filters` batch is
+    # dramatically cheaper.
+    sku_ids = list({k[0] for k in forecast_map})
     actuals: dict[tuple[str, str, str], float] = defaultdict(float)
     actuals_all: dict[tuple[str, str], float] = defaultdict(float)
-    for r in sales_rows:
-        d = str(r.get("transaction_date", ""))[:10]
-        actuals[(r["sku_id"], r["location_id"], d)] += float(r.get("qty_sold") or 0)
-        actuals_all[(r["sku_id"], d)] += float(r.get("qty_sold") or 0)
-
-    sku_ids = list({k[0] for k in forecast_map})
-    abc_map: dict[str, str] = {}
     _IN_BATCH = 300
+    for i in range(0, len(sku_ids), _IN_BATCH):
+        batch = sku_ids[i:i + _IN_BATCH]
+        sales_rows = _paginate(
+            client, "sales_transactions",
+            "sku_id,location_id,transaction_date,qty_sold",
+            gte_filters={"transaction_date": window_start},
+            lte_filters={"transaction_date": yesterday},
+            in_filters={"sku_id": batch},
+        )
+        for r in sales_rows:
+            d = str(r.get("transaction_date", ""))[:10]
+            actuals[(r["sku_id"], r["location_id"], d)] += float(r.get("qty_sold") or 0)
+            actuals_all[(r["sku_id"], d)] += float(r.get("qty_sold") or 0)
+
+    abc_map: dict[str, str] = {}
     for i in range(0, len(sku_ids), _IN_BATCH):
         batch = sku_ids[i:i + _IN_BATCH]
         sku_rows = _paginate(client, "sku_master", "sku_id,abc_class",
@@ -493,34 +791,32 @@ def _build_anomaly_summary(client: Any, today: date) -> dict:
     except Exception:
         total_flagged = 0
 
-    cutoff = (today - timedelta(days=90)).isoformat()
+    # Tight 30-day window (was 90) and order by transaction_date (indexed)
+    # instead of qty_sold (not indexed) so Postgres can use the
+    # is_anomaly+transaction_date composite index and stop after 1000 rows.
+    cutoff = (today - timedelta(days=30)).isoformat()
+    recent_anom: list[dict] = []
     try:
-        top_high = (
+        recent_anom = (
             client.table("sales_transactions")
             .select("sku_id,location_id,transaction_date,qty_sold,unit_price,total_revenue")
             .eq("is_anomaly", True)
             .gte("transaction_date", cutoff)
-            .order("qty_sold", desc=True)
-            .limit(8)
+            .order("transaction_date", desc=True)
+            .limit(1000)
             .execute()
             .data or []
         )
     except Exception:
-        top_high = []
+        recent_anom = []
 
-    try:
-        top_low = (
-            client.table("sales_transactions")
-            .select("sku_id,location_id,transaction_date,qty_sold,unit_price,total_revenue")
-            .eq("is_anomaly", True)
-            .gte("transaction_date", cutoff)
-            .order("qty_sold", desc=False)
-            .limit(5)
-            .execute()
-            .data or []
-        )
-    except Exception:
-        top_low = []
+    sorted_by_qty = sorted(
+        recent_anom,
+        key=lambda r: float(r.get("qty_sold") or 0),
+        reverse=True,
+    )
+    top_high = sorted_by_qty[:8]
+    top_low  = sorted_by_qty[-5:][::-1] if len(sorted_by_qty) >= 5 else []
 
     loc_dist: dict[str, dict] = {}
     sample_locs = ["LOC-008", "LOC-025", "LOC-004", "LOC-001", "LOC-005"]
@@ -722,6 +1018,7 @@ def dashboard_data():
         ("supplier_health",      _build_supplier_health),
         ("supplier_detail",      _build_supplier_detail),
         ("inventory_health",     _build_inventory_health),
+        ("transfers",            _build_transfer_activity),
         ("forecast_accuracy",    _build_forecast_accuracy),
         ("location_performance", _build_location_performance),
         ("top_skus",             _build_top_skus),
@@ -729,16 +1026,44 @@ def dashboard_data():
         ("pipeline_status",      _build_pipeline_status),
     ]
 
-    for name, fn in sections:
+    # Run all sections in parallel.  Each section gets its OWN Supabase
+    # client because supabase-py's underlying httpx session is not safe
+    # to share across threads under load.  Falls back to the shared
+    # client only if get_new_client() fails.
+    section_timings: dict[str, int] = {}
+
+    def _run_section(name: str, fn: Any) -> tuple[str, Any, int]:
+        s_t0 = time.perf_counter()
+        log.info("[section] %s START", name)
         try:
-            payload[name] = fn(client, today)
+            section_client = get_new_client()
+        except Exception:
+            section_client = client
+        try:
+            data = fn(section_client, today)
         except Exception:
             log.exception("Dashboard section '%s' failed.", name)
-            payload[name] = None
+            data = None
+        ms = int((time.perf_counter() - s_t0) * 1000)
+        log.info("[section] %s DONE in %dms", name, ms)
+        return name, data, ms
+
+    with ThreadPoolExecutor(max_workers=min(8, len(sections))) as ex:
+        futures = [ex.submit(_run_section, name, fn) for name, fn in sections]
+        for fut in as_completed(futures):
+            name, data, ms = fut.result()
+            payload[name] = data
+            section_timings[name] = ms
 
     elapsed_ms = (time.perf_counter() - t0) * 1000
     payload["query_ms"] = round(elapsed_ms)
-    log.info("Dashboard data served in %.0fms", elapsed_ms)
+    payload["section_ms"] = section_timings
+    slowest = sorted(section_timings.items(), key=lambda kv: kv[1], reverse=True)[:3]
+    log.info(
+        "Dashboard data served in %.0fms (slowest: %s)",
+        elapsed_ms,
+        ", ".join(f"{n}={ms}ms" for n, ms in slowest),
+    )
     return jsonify(payload)
 
 

@@ -488,10 +488,19 @@
 
   <div class="section card" id="reorder-section">
     <div class="card-header">
-      <span class="card-title">Top Reorder Recommendations</span>
+      <span class="card-title">Reorder Recommendations</span>
       <span class="card-updated" id="reorder-updated"></span>
     </div>
+    <div id="reorder-kpis"></div>
     <div class="card-body" style="padding:0" id="reorder-body"><div class="skeleton" style="height:100px;margin:16px;border-radius:6px"></div></div>
+  </div>
+
+  <div class="section card" id="transfers-section">
+    <div class="card-header">
+      <span class="card-title">Inter-Location Transfers (Last 30 Days)</span>
+      <span class="card-updated" id="transfers-updated"></span>
+    </div>
+    <div class="card-body" id="transfers-body"><div class="skeleton" style="height:80px"></div></div>
   </div>
 
   <div class="section card" id="supplier-detail-section">
@@ -755,15 +764,58 @@ function renderTopSKUs(items) {
     '<table class="data-table"><thead><tr><th style="width:30px">#</th><th>SKU</th><th>Description</th><th class="right">Avg Wk Units</th></tr></thead><tbody>' + rows + '</tbody></table>';
 }
 
-function renderReorder(items) {
+function renderReorder(payload) {
   document.getElementById('reorder-updated').textContent = 'Updated ' + nowStr();
-  if (!items || !items.length) {
+
+  // Backwards-compat: server used to return a bare list; now returns
+  // { kpis, items }.  Accept either shape so the dashboard never crashes
+  // mid-deploy.
+  var kpis = (payload && payload.kpis) ? payload.kpis : null;
+  var items = Array.isArray(payload) ? payload : (payload && payload.items) || [];
+
+  // ---- KPI strip ----
+  var kpisEl = document.getElementById('reorder-kpis');
+  if (kpisEl) {
+    if (!kpis || !kpis.total_recommendations) {
+      kpisEl.innerHTML = '';
+    } else {
+      var u = kpis.by_urgency || {};
+      var t = kpis.by_type || {};
+      var topSup = (kpis.top_suppliers || []).slice(0, 3).map(function(s) {
+        return '<span style="color:var(--text)">' + escHtml(s.supplier_id) +
+               '</span> <span style="color:var(--muted)">(' + s.count + ')</span>';
+      }).join(', ') || '\u2014';
+      var topDest = (kpis.top_destinations || []).slice(0, 3).map(function(d) {
+        return '<span style="color:var(--text)">' + escHtml(d.location_display) +
+               '</span> <span style="color:var(--muted)">(' + d.count + ')</span>';
+      }).join(', ') || '\u2014';
+
+      kpisEl.innerHTML =
+        '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:1px;background:var(--border);border-bottom:1px solid var(--border)">' +
+          '<div style="background:var(--surface);padding:12px 14px"><div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:0.5px">Pending</div><div style="font-size:22px;font-weight:600;color:var(--text)">' + fmtNum(kpis.pending) + '</div></div>' +
+          '<div style="background:var(--surface);padding:12px 14px"><div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:0.5px">Critical</div><div style="font-size:22px;font-weight:600;color:var(--critical)">' + fmtNum(u.critical || 0) + '</div></div>' +
+          '<div style="background:var(--surface);padding:12px 14px"><div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:0.5px">Warning</div><div style="font-size:22px;font-weight:600;color:var(--warning)">' + fmtNum(u.warning || 0) + '</div></div>' +
+          '<div style="background:var(--surface);padding:12px 14px"><div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:0.5px">Normal</div><div style="font-size:22px;font-weight:600;color:var(--muted)">' + fmtNum(u.normal || 0) + '</div></div>' +
+          '<div style="background:var(--surface);padding:12px 14px"><div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:0.5px">PO / Transfer</div><div style="font-size:22px;font-weight:600;color:var(--blue)">' + fmtNum(t.po || 0) + '<span style="color:var(--muted);font-size:14px"> / ' + fmtNum(t.transfer || 0) + '</span></div></div>' +
+          '<div style="background:var(--surface);padding:12px 14px"><div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:0.5px">Total Qty</div><div style="font-size:22px;font-weight:600;color:var(--text)">' + fmtNum(kpis.total_qty_recommended) + '</div></div>' +
+        '</div>' +
+        '<div style="padding:10px 14px;font-size:12px;color:var(--muted);border-bottom:1px solid var(--border);background:var(--surface2)">' +
+          '<span style="margin-right:18px">Top suppliers: ' + topSup + '</span>' +
+          'Top destinations: ' + topDest +
+        '</div>';
+    }
+  }
+
+  // ---- Top-10 action table ----
+  if (!items.length) {
     document.getElementById('reorder-body').innerHTML = '<div class="card-body"><div class="empty-state"><div class="icon">&#10003;</div>No pending reorder recommendations today.</div></div>';
     return;
   }
   var rows = items.map(function(r) {
-    var u = r.urgency;
-    var ub = u === 'critical' ? badge('critical','CRITICAL') : u === 'high' ? badge('high','HIGH') : u === 'medium' ? badge('medium','MEDIUM') : badge('low','LOW');
+    var u = (r.urgency || '').toLowerCase();
+    var ub = u === 'critical' ? badge('critical','CRITICAL')
+           : (u === 'warning' || u === 'high') ? badge('high','WARNING')
+           : badge('low','NORMAL');
     var rtype = (r.recommendation_type || 'po').toUpperCase();
     var tb = rtype === 'TRANSFER' ? badge('transfer','TRANSFER') : badge('po','PO');
     var days = r.days_of_supply_remaining != null ? fmtNum(r.days_of_supply_remaining,1) + 'd' : '\u2014';
@@ -775,6 +827,39 @@ function renderReorder(items) {
   }).join('');
   document.getElementById('reorder-body').innerHTML =
     '<table class="data-table"><thead><tr><th>Urgency</th><th>SKU</th><th>Location</th><th>Qty</th><th>Supply</th><th>Type</th></tr></thead><tbody>' + rows + '</tbody></table>';
+}
+
+function renderTransfers(data) {
+  document.getElementById('transfers-updated').textContent = 'Updated ' + nowStr();
+  var body = document.getElementById('transfers-body');
+  if (!data || !data.total_transfers) {
+    body.innerHTML = '<div class="empty-state"><div class="icon">&#8644;</div>No inter-location transfers in the last 30 days.</div>';
+    return;
+  }
+  var routesHtml = (data.top_routes || []).map(function(r) {
+    return '<tr><td><span class="loc-id">' + escHtml(r.from_display) + '</span></td>' +
+      '<td style="text-align:center;color:var(--muted)">&rarr;</td>' +
+      '<td><span class="loc-id">' + escHtml(r.to_display) + '</span></td>' +
+      '<td style="text-align:right;font-weight:600">' + fmtNum(r.qty) + '</td>' +
+      '<td style="text-align:right;color:var(--muted)">' + fmtNum(r.transfer_count) + ' xfers</td>' +
+      (r.cost > 0 ? '<td style="text-align:right;color:var(--muted)">' + fmtMoney(r.cost) + '</td>' : '<td></td>') +
+      '</tr>';
+  }).join('');
+
+  var topSkus = (data.top_skus || []).map(function(s) {
+    return '<span class="sku-id" style="font-size:11px">' + escHtml(s.sku_id) + '</span> <span style="color:var(--muted);font-size:11px">(' + fmtNum(s.qty) + ')</span>';
+  }).join(' &nbsp; ');
+
+  body.innerHTML =
+    '<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:14px">' +
+      '<div><div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:0.5px">Total Transfers</div><div style="font-size:22px;font-weight:600;color:var(--text)">' + fmtNum(data.total_transfers) + '</div></div>' +
+      '<div><div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:0.5px">Total Units Moved</div><div style="font-size:22px;font-weight:600;color:var(--text)">' + fmtNum(data.total_qty) + '</div></div>' +
+      (data.total_cost > 0 ? '<div><div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:0.5px">Transfer Cost</div><div style="font-size:22px;font-weight:600;color:var(--text)">' + fmtMoney(data.total_cost) + '</div></div>' : '<div></div>') +
+    '</div>' +
+    (routesHtml ?
+      '<table class="data-table"><thead><tr><th>From</th><th></th><th>To</th><th style="text-align:right">Qty</th><th style="text-align:right">Count</th><th style="text-align:right">Cost</th></tr></thead><tbody>' + routesHtml + '</tbody></table>'
+      : '') +
+    (topSkus ? '<div style="margin-top:12px;font-size:11px;color:var(--muted)"><strong>Top moving SKUs:</strong> ' + topSkus + '</div>' : '');
 }
 
 function renderSupplierDetail(items) {
@@ -823,18 +908,56 @@ function renderSupplierDetail(items) {
 
 function renderInventoryHealth(data) {
   document.getElementById('inventory-updated').textContent = 'Updated ' + nowStr();
-  var pairs = (data.stockout_pairs || []).slice(0,5).map(function(p) {
+  var pairs = (data.stockout_pairs || []).slice(0, 5).map(function(p) {
     return '<span class="sku-id" style="font-size:11px">' + escHtml(p.sku_id) + '@' + escHtml(p.location_display || p.location_id) + '</span>';
   }).join(', ');
-  document.getElementById('inventory-body').innerHTML =
-    '<div class="stat-block">' +
-    '<div class="stat-row"><span class="stat-label">Active Stockouts</span><span class="stat-value" style="color:' + (data.stockout_count > 0 ? 'var(--critical)' : 'var(--success)') + '">' + data.stockout_count + '</span></div>' +
-    '<div class="stat-divider"></div>' +
-    '<div class="stat-row"><span class="stat-label">Low Supply (&lt; 3d)</span><span class="stat-value" style="color:' + (data.low_supply_count > 0 ? 'var(--warning)' : 'var(--success)') + '">' + data.low_supply_count + '</span></div>' +
-    '<div class="stat-divider"></div>' +
-    '<div class="stat-row"><span class="stat-label">Pairs Tracked</span><span class="stat-value" style="color:var(--muted)">' + data.snapshot_count + '</span></div>' +
-    (pairs ? '<div style="font-size:11px;color:var(--muted);padding-top:4px">' + pairs + '</div>' : '') +
+
+  var topLocs = (data.top_stockout_locations || []).map(function(l) {
+    return '<div style="display:flex;justify-content:space-between;font-size:12px;padding:3px 0">' +
+      '<span class="loc-id">' + escHtml(l.location_display) + '</span>' +
+      '<span><span style="color:var(--critical);font-weight:600">' + l.stockouts + '</span>' +
+      '<span style="color:var(--muted);font-size:11px"> / ' + fmtNum(l.snapshots) + ' SKUs (' + l.stockout_pct + '%)</span></span>' +
     '</div>';
+  }).join('');
+
+  var dateLabel = data.snapshot_date
+    ? '<div style="font-size:11px;color:var(--muted);padding-bottom:8px">As of ' + escHtml(data.snapshot_date) + ' &middot; ' + fmtNum(data.locations_covered || 0) + ' locations</div>'
+    : '';
+
+  // Render null/undefined as a neutral em-dash, never as "0", so unknown
+  // metrics aren't mistaken for healthy zero values.
+  function _val(v, color) {
+    if (v === null || v === undefined) {
+      return '<span class="stat-value" style="color:var(--muted)">&mdash;</span>';
+    }
+    return '<span class="stat-value" style="color:' + color(v) + '">' + fmtNum(v) + '</span>';
+  }
+  var critOrSuccess = function(n) { return n > 0 ? 'var(--critical)' : 'var(--success)'; };
+  var warnOrSuccess = function(n) { return n > 0 ? 'var(--warning)' : 'var(--success)'; };
+  var mutedAlways   = function(_) { return 'var(--muted)'; };
+  var textAlways    = function(_) { return 'var(--text)'; };
+  var blueAlways    = function(_) { return 'var(--blue)'; };
+
+  document.getElementById('inventory-body').innerHTML =
+    dateLabel +
+    '<div class="stat-block">' +
+      '<div class="stat-row"><span class="stat-label">Stockouts (qty&nbsp;=&nbsp;0)</span>' + _val(data.stockout_count, critOrSuccess) + '</div>' +
+      '<div class="stat-divider"></div>' +
+      '<div class="stat-row"><span class="stat-label">Below Reorder Point</span>' + _val(data.below_reorder, warnOrSuccess) + '</div>' +
+      '<div class="stat-divider"></div>' +
+      '<div class="stat-row"><span class="stat-label">Low Supply (&lt; 3d)</span>' + _val(data.low_supply_count, warnOrSuccess) + '</div>' +
+      '<div class="stat-divider"></div>' +
+      '<div class="stat-row"><span class="stat-label">Overstocked (&gt; 1.5&times; max)</span>' + _val(data.overstock_count, mutedAlways) + '</div>' +
+      '<div class="stat-divider"></div>' +
+      '<div class="stat-row"><span class="stat-label">Total On-Hand Qty</span>' + _val(data.total_on_hand_qty, textAlways) + '</div>' +
+      '<div class="stat-row"><span class="stat-label">Total On-Order Qty</span>' + _val(data.total_on_order_qty, blueAlways) + '</div>' +
+      '<div class="stat-divider"></div>' +
+      '<div class="stat-row"><span class="stat-label">SKU&times;Loc Snapshots</span>' + _val(data.snapshot_count, mutedAlways) + '</div>' +
+    '</div>' +
+    (topLocs
+      ? '<div style="margin-top:12px;padding-top:10px;border-top:1px solid var(--border2)"><div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:6px">Top stockout locations</div>' + topLocs + '</div>'
+      : '') +
+    (pairs ? '<div style="font-size:11px;color:var(--muted);padding-top:8px">' + pairs + '</div>' : '');
 }
 
 function renderForecastAccuracy(items) {
@@ -982,6 +1105,7 @@ async function loadData() {
     if (data.alerts)               renderAlertSummary(data.alerts.summary || {});
     if (data.alerts)               renderAlerts(data.alerts.items || []);
     if (data.reorder != null)      renderReorder(data.reorder);
+    if (data.transfers != null)    renderTransfers(data.transfers);
     if (data.supplier_detail)      renderSupplierDetail(data.supplier_detail);
     if (data.inventory_health)     renderInventoryHealth(data.inventory_health);
     if (data.forecast_accuracy != null) renderForecastAccuracy(data.forecast_accuracy);

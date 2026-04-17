@@ -96,6 +96,16 @@ DEFAULT_UNIT_COST:      float = 10.0   # fallback when no PO cost found
 
 PAGE_SIZE: int = 1_000
 
+# A single sales_transactions query against the entire ~317 K SKU catalog
+# blows past Supabase's statement timeout (error 57014) even with a 365-day
+# cutoff (~2 M rows).  1000 SKUs per batch keeps each call well inside the
+# timeout window — same value used by ml/forecast_rolling.py.
+SKU_BATCH_SIZE: int = 1_000
+
+# Cadence (in number of SKUs processed) for progress logging during the
+# location-sales fetch.  Reported as: "Processed N / total SKUs".
+PROGRESS_LOG_EVERY: int = 10_000
+
 # ---------------------------------------------------------------------------
 # Retry configuration for transient Supabase errors (57014 statement
 # timeout, dropped HTTP/2 streams, read timeouts, …).  Mirrors the pattern
@@ -312,16 +322,72 @@ def _fetch_supplier_map(client_holder: list) -> dict[str, str]:
     return suppliers
 
 
+def _fetch_transactions_for_sku_batch(
+    client_holder: list,
+    cutoff:        str,
+    sku_batch:     list[str],
+) -> list[dict]:
+    """Fetch sales_transactions for one SKU batch with retry + reconnect.
+
+    Restricting each query to ``len(sku_batch) ≤ SKU_BATCH_SIZE`` keeps the
+    call inside Supabase's statement timeout (error 57014) — the same
+    pattern used by ml/forecast_rolling.py.  Each page is retried on
+    transient errors, with a fresh client minted on repeat failures.
+    """
+    select = "sku_id,location_id,transaction_date"
+    rows: list[dict] = []
+    offset = 0
+    while True:
+        page: list[dict] | None = None
+        for attempt in range(1, _MAX_RETRIES + 1):
+            try:
+                page = (
+                    client_holder[0].table("sales_transactions")
+                    .select(select)
+                    .in_("sku_id", sku_batch)
+                    .gte("transaction_date", cutoff)
+                    .range(offset, offset + PAGE_SIZE - 1)
+                    .execute()
+                    .data
+                    or []
+                )
+                break
+            except Exception as exc:
+                if _is_retryable_error(exc) and attempt < _MAX_RETRIES:
+                    log.warning(
+                        "  tx fetch retry %d/%d (offset=%d, %d SKUs): %s — "
+                        "reconnecting in %.0fs …",
+                        attempt, _MAX_RETRIES, offset, len(sku_batch),
+                        type(exc).__name__, _RETRY_DELAY,
+                    )
+                    time.sleep(_RETRY_DELAY)
+                    client_holder[0] = _get_fresh_client()
+                    continue
+                raise
+        assert page is not None
+        rows.extend(page)
+        if len(page) < PAGE_SIZE:
+            break
+        offset += PAGE_SIZE
+    return rows
+
+
 def _fetch_location_sales(
     client_holder: list,
-    today:  date,
+    today:         date,
+    sku_ids:       list[str],
 ) -> tuple[dict[tuple[str, str], date], dict[tuple[str, str], int]]:
     """Per-(sku_id, location_id): last sale date and 365-day sale frequency.
 
-    Only the most-recent ``LOOKBACK_DAYS`` (365) of sales_transactions are
-    fetched.  Dead stock detection only needs recent sale history; pulling
-    the full ~8 M-row history triggers Supabase statement timeouts (57014).
-    Pagination is wrapped in retry/reconnect via ``_paginate``.
+    Fetches sales_transactions in SKU-id batches of ``SKU_BATCH_SIZE`` rather
+    than as a single all-catalog scan.  The whole-catalog scan — even with a
+    365-day cutoff — produces ~2 M rows and exceeds Supabase's statement
+    timeout (error 57014).  Per-batch fetching is the same pattern that
+    fixed forecast_rolling, forecast_lgbm, and reorder.
+
+    Each batch's rows are folded into the accumulator maps immediately and
+    then released, so peak memory is bounded by one batch's transactions
+    rather than the full ~2 M result set.
 
     Returns
     -------
@@ -329,25 +395,68 @@ def _fetch_location_sales(
     frequency_map  : (sku_id, location_id) → count of distinct sale days
     """
     cutoff = (today - timedelta(days=LOOKBACK_DAYS)).isoformat()
-    log.info("  Fetching sales_transactions since %s (last %d days) …",
-             cutoff, LOOKBACK_DAYS)
-    rows   = _paginate(client_holder, "sales_transactions",
-                       "sku_id,location_id,transaction_date",
-                       gte_filters={"transaction_date": cutoff})
-    log.info("  Fetched %d transaction row(s) within lookback window.", len(rows))
+    total  = len(sku_ids)
 
-    last_sale_map: dict[tuple[str, str], date]  = {}
-    freq_dates:    dict[tuple[str, str], set[str]] = defaultdict(set)
+    if total == 0:
+        log.warning("  _fetch_location_sales received empty sku_ids list.")
+        return {}, {}
 
-    for r in rows:
-        key = (r["sku_id"], r["location_id"])
-        d   = str(r.get("transaction_date", ""))[:10]
-        if not d:
-            continue
-        freq_dates[key].add(d)
-        tx_date = date.fromisoformat(d)
-        if key not in last_sale_map or tx_date > last_sale_map[key]:
-            last_sale_map[key] = tx_date
+    n_batches = (total + SKU_BATCH_SIZE - 1) // SKU_BATCH_SIZE
+    log.info(
+        "  Fetching sales_transactions since %s (last %d days) "
+        "in %d SKU batch(es) of up to %d …",
+        cutoff, LOOKBACK_DAYS, n_batches, SKU_BATCH_SIZE,
+    )
+
+    last_sale_map: dict[tuple[str, str], date]      = {}
+    freq_dates:    dict[tuple[str, str], set[str]]  = defaultdict(set)
+
+    processed       = 0
+    next_log_at     = PROGRESS_LOG_EVERY
+    total_tx_rows   = 0
+
+    for start in range(0, total, SKU_BATCH_SIZE):
+        sku_batch = sku_ids[start:start + SKU_BATCH_SIZE]
+        rows = _fetch_transactions_for_sku_batch(
+            client_holder, cutoff, sku_batch,
+        )
+        total_tx_rows += len(rows)
+
+        # Fold this batch's rows into the accumulator maps immediately so
+        # we don't carry the entire ~2 M-row dataset in memory at once.
+        for r in rows:
+            sid = r.get("sku_id")
+            lid = r.get("location_id")
+            if not sid or not lid:
+                continue
+            d = str(r.get("transaction_date", ""))[:10]
+            if not d:
+                continue
+            key = (sid, lid)
+            freq_dates[key].add(d)
+            try:
+                tx_date = date.fromisoformat(d)
+            except ValueError:
+                continue
+            if key not in last_sale_map or tx_date > last_sale_map[key]:
+                last_sale_map[key] = tx_date
+
+        processed += len(sku_batch)
+        if processed >= next_log_at or processed >= total:
+            log.info(
+                "[DEAD_STOCK] Processed %d / %d SKUs  (tx rows so far: %d)",
+                processed, total, total_tx_rows,
+            )
+            # Bump the next checkpoint past `processed` in PROGRESS_LOG_EVERY
+            # increments so we don't spam at end-of-run.
+            while next_log_at <= processed:
+                next_log_at += PROGRESS_LOG_EVERY
+
+    log.info(
+        "  Done: %d transaction row(s) across %d SKU batch(es); "
+        "%d (sku, location) pair(s) had at least one sale.",
+        total_tx_rows, n_batches, len(freq_dates),
+    )
 
     frequency_map = {k: len(v) for k, v in freq_dates.items()}
     return last_sale_map, frequency_map
@@ -723,7 +832,12 @@ def run_dead_stock(
         sku_master   = _fetch_sku_master(client_holder)
         unit_costs   = _fetch_unit_costs(client_holder)
         suppliers    = _fetch_supplier_map(client_holder)
-        last_sale_map, freq_map = _fetch_location_sales(client_holder, today)
+        # Reuse the SKU IDs already fetched into sku_master so we don't make
+        # a second pass over the catalog just to get the id list.  Sorted
+        # for deterministic batch boundaries across runs.
+        last_sale_map, freq_map = _fetch_location_sales(
+            client_holder, today, sorted(sku_master.keys()),
+        )
     except Exception:
         log.exception("Data fetch failed.")
         return 1

@@ -1,19 +1,20 @@
 name: Nightly Pipeline
 
-# Runs every night at 2am EST (7am UTC).
-# For EDT (UTC-4) adjust the cron to '0 6 * * *'.
+# Runs every night at 2:00 AM EST (07:00 UTC).
+# For EDT (UTC-4) the effective local time becomes 3:00 AM — adjust to
+# '0 6 * * *' if you want a strict 2:00 AM local across DST.
 on:
   schedule:
-    - cron: '0 7 * * *'   # 7:00 UTC = 2:00 AM EST
-  workflow_dispatch:        # allow manual trigger from GitHub UI
+    - cron: '0 7 * * *'
+  workflow_dispatch:
     inputs:
       dry_run:
-        description: 'Dry run — no DB writes'
+        description: 'Dry run — no DB writes (single-stage path only)'
         required: false
         type: boolean
         default: false
       stage:
-        description: 'Single stage key to run (leave blank for full pipeline)'
+        description: 'Single stage key to run (leave blank for the full ordered pipeline)'
         required: false
         type: string
         default: ''
@@ -22,7 +23,7 @@ jobs:
   nightly-pipeline:
     name: PartsWatch AI — Nightly Pipeline
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 240
 
     env:
       # ── Required secrets ────────────────────────────────────────────
@@ -31,6 +32,9 @@ jobs:
       ANTHROPIC_API_KEY:  ${{ secrets.ANTHROPIC_API_KEY }}
       # ── Optional secrets (have defaults in config.py) ───────────────
       PARTSWATCH_SOURCE:  ${{ secrets.PARTSWATCH_SOURCE }}
+      AUTOCUBE_BASE_URL:  ${{ secrets.AUTOCUBE_BASE_URL }}
+      AUTOCUBE_USER:      ${{ secrets.AUTOCUBE_USER }}
+      AUTOCUBE_PASSWORD:  ${{ secrets.AUTOCUBE_PASSWORD }}
       ENVIRONMENT:        production
       LOG_LEVEL:          INFO
       # ── Open-Meteo NE Ohio coordinates (no API key needed) ──────────
@@ -55,22 +59,211 @@ jobs:
       - name: Validate environment
         run: python -c "import config; print('Config OK — ENVIRONMENT:', config.ENVIRONMENT)"
 
-      # ── Full pipeline (default) ──────────────────────────────────────
-      - name: Run nightly pipeline
-        if: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.event.inputs.stage == '' && !fromJSON(github.event.inputs.dry_run || 'false')) }}
-        run: python main.py
+      # ============================================================
+      # Manual single-stage / dry-run shortcut paths
+      # ============================================================
 
-      # ── Dry run (manual trigger) ─────────────────────────────────────
-      - name: Run nightly pipeline (dry run)
+      - name: Manual dry run (full pipeline)
         if: ${{ github.event_name == 'workflow_dispatch' && fromJSON(github.event.inputs.dry_run || 'false') && github.event.inputs.stage == '' }}
         run: python main.py --dry-run
 
-      # ── Single stage (manual trigger) ────────────────────────────────
-      - name: Run single stage
+      - name: Manual single stage
         if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.stage != '' }}
         run: python main.py --stage ${{ github.event.inputs.stage }}
 
-      # ── Post-run summary ─────────────────────────────────────────────
-      - name: Output pipeline date
-        if: always()
-        run: echo "Pipeline run date $(date -u '+%Y-%m-%d %H:%M UTC')"
+      # ============================================================
+      # Full ordered pipeline — runs on schedule and on manual trigger
+      # when neither dry_run nor stage was specified.
+      #
+      # Every step uses `continue-on-error: true` so a soft warning
+      # (non-zero return from a stage that handled its own errors) does
+      # not abort the run.  A hard process crash still appears as
+      # outcome=failure and is reported in the summary.  The final
+      # "Aggregate result" step exits non-zero if any step failed so
+      # the overall workflow still reflects pipeline health.
+      # ============================================================
+
+      - name: Record pipeline start time
+        id: t_start
+        if: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.event.inputs.stage == '' && !fromJSON(github.event.inputs.dry_run || 'false')) }}
+        run: |
+          START_EPOCH=$(date -u +%s)
+          START_HUMAN=$(date -u '+%Y-%m-%d %H:%M:%S UTC')
+          echo "epoch=${START_EPOCH}" >> "$GITHUB_OUTPUT"
+          echo "human=${START_HUMAN}" >> "$GITHUB_OUTPUT"
+          echo "::notice title=Pipeline start::${START_HUMAN}"
+
+      - name: 01 — Sales transactions (incremental)
+        id: s01_extract_sales
+        if: ${{ steps.t_start.conclusion == 'success' }}
+        continue-on-error: true
+        run: python -m extract.autocube_pull --mode incremental
+
+      - name: 02 — Product cube (full inventory + master)
+        id: s02_extract_product
+        if: ${{ steps.t_start.conclusion == 'success' }}
+        continue-on-error: true
+        run: python -m extract.autocube_product_pull --mode full
+
+      - name: 03 — Weather pull
+        id: s03_extract_weather
+        if: ${{ steps.t_start.conclusion == 'success' }}
+        continue-on-error: true
+        run: python -m extract.weather_pull
+
+      - name: 04 — Clean
+        id: s04_clean
+        if: ${{ steps.t_start.conclusion == 'success' }}
+        continue-on-error: true
+        run: python main.py --stage clean
+
+      - name: 05 — Derive
+        id: s05_derive
+        if: ${{ steps.t_start.conclusion == 'success' }}
+        continue-on-error: true
+        run: python main.py --stage derive
+
+      - name: 06 — Location classify
+        id: s06_location_classify
+        if: ${{ steps.t_start.conclusion == 'success' }}
+        continue-on-error: true
+        run: python main.py --stage location_classify
+
+      - name: 07 — Anomaly detection
+        id: s07_anomaly
+        if: ${{ steps.t_start.conclusion == 'success' }}
+        continue-on-error: true
+        run: python main.py --stage anomaly
+
+      - name: 08 — Forecast (rolling avg)
+        id: s08_forecast_rolling
+        if: ${{ steps.t_start.conclusion == 'success' }}
+        continue-on-error: true
+        run: python main.py --stage forecast_rolling
+
+      - name: 09 — Forecast (LightGBM)
+        id: s09_forecast_lgbm
+        if: ${{ steps.t_start.conclusion == 'success' }}
+        continue-on-error: true
+        run: python main.py --stage forecast_lgbm
+
+      - name: 10 — Reorder engine
+        id: s10_reorder
+        if: ${{ steps.t_start.conclusion == 'success' }}
+        continue-on-error: true
+        run: python main.py --stage reorder
+
+      - name: 11 — Alerts engine
+        id: s11_alerts
+        if: ${{ steps.t_start.conclusion == 'success' }}
+        continue-on-error: true
+        run: python main.py --stage alerts
+
+      # ============================================================
+      # Completion summary — runs even if individual steps failed.
+      # ============================================================
+
+      - name: Pipeline summary
+        if: ${{ always() && steps.t_start.conclusion == 'success' }}
+        env:
+          START_EPOCH:  ${{ steps.t_start.outputs.epoch }}
+          START_HUMAN:  ${{ steps.t_start.outputs.human }}
+          R01: ${{ steps.s01_extract_sales.outcome }}
+          R02: ${{ steps.s02_extract_product.outcome }}
+          R03: ${{ steps.s03_extract_weather.outcome }}
+          R04: ${{ steps.s04_clean.outcome }}
+          R05: ${{ steps.s05_derive.outcome }}
+          R06: ${{ steps.s06_location_classify.outcome }}
+          R07: ${{ steps.s07_anomaly.outcome }}
+          R08: ${{ steps.s08_forecast_rolling.outcome }}
+          R09: ${{ steps.s09_forecast_lgbm.outcome }}
+          R10: ${{ steps.s10_reorder.outcome }}
+          R11: ${{ steps.s11_alerts.outcome }}
+        run: |
+          set -u
+          END_EPOCH=$(date -u +%s)
+          END_HUMAN=$(date -u '+%Y-%m-%d %H:%M:%S UTC')
+          ELAPSED=$(( END_EPOCH - START_EPOCH ))
+          ELAPSED_MIN=$(( ELAPSED / 60 ))
+          ELAPSED_SEC=$(( ELAPSED % 60 ))
+
+          # GitHub `outcome` values: success | failure | cancelled | skipped
+          # We map:  success → PASS   skipped → WARN   failure → FAIL
+          # (skipped happens when continue-on-error swallows a soft warning
+          #  via a downstream `if:` — kept as a distinct status for clarity.)
+          classify() {
+            case "$1" in
+              success)   echo "PASS" ;;
+              skipped)   echo "WARN" ;;
+              cancelled) echo "WARN" ;;
+              failure)   echo "FAIL" ;;
+              *)         echo "????" ;;
+            esac
+          }
+
+          declare -a NAMES=(
+            "01 Sales transactions (incremental)"
+            "02 Product cube (full)"
+            "03 Weather pull"
+            "04 Clean"
+            "05 Derive"
+            "06 Location classify"
+            "07 Anomaly detection"
+            "08 Forecast — rolling avg"
+            "09 Forecast — LightGBM"
+            "10 Reorder engine"
+            "11 Alerts engine"
+          )
+          declare -a OUTCOMES=(
+            "$R01" "$R02" "$R03" "$R04" "$R05" "$R06"
+            "$R07" "$R08" "$R09" "$R10" "$R11"
+          )
+
+          PASS=0; WARN=0; FAIL=0
+          {
+            echo "## PartsWatch AI — Nightly Pipeline Summary"
+            echo ""
+            echo "- **Started:** \`${START_HUMAN}\`"
+            echo "- **Finished:** \`${END_HUMAN}\`"
+            echo "- **Elapsed:** ${ELAPSED_MIN}m ${ELAPSED_SEC}s"
+            echo ""
+            echo "| # | Stage | Status |"
+            echo "|---|-------|--------|"
+            for i in "${!NAMES[@]}"; do
+              status=$(classify "${OUTCOMES[$i]}")
+              case "$status" in
+                PASS) PASS=$((PASS+1)); icon=":white_check_mark:" ;;
+                WARN) WARN=$((WARN+1)); icon=":warning:" ;;
+                FAIL) FAIL=$((FAIL+1)); icon=":x:" ;;
+                *)    icon=":grey_question:" ;;
+              esac
+              printf "| %s | %s | %s %s |\n" \
+                "$((i+1))" "${NAMES[$i]}" "$icon" "$status"
+            done
+            echo ""
+            echo "**Totals:** ${PASS} passed · ${WARN} warned · ${FAIL} failed"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+          # Also emit to the plain log so it shows up without expanding the summary tab
+          echo ""
+          echo "================================================================"
+          echo "  Pipeline complete:  ${PASS} passed · ${WARN} warned · ${FAIL} failed"
+          echo "  Elapsed:            ${ELAPSED_MIN}m ${ELAPSED_SEC}s"
+          echo "  Started:            ${START_HUMAN}"
+          echo "  Finished:           ${END_HUMAN}"
+          echo "================================================================"
+
+          # Persist counts for the aggregator step
+          echo "pass=${PASS}" >> "$GITHUB_OUTPUT"
+          echo "warn=${WARN}" >> "$GITHUB_OUTPUT"
+          echo "fail=${FAIL}" >> "$GITHUB_OUTPUT"
+        id: summary
+
+      - name: Aggregate result
+        if: ${{ always() && steps.summary.conclusion == 'success' }}
+        run: |
+          if [ "${{ steps.summary.outputs.fail }}" -gt 0 ]; then
+            echo "::error title=Pipeline failed::${{ steps.summary.outputs.fail }} stage(s) failed"
+            exit 1
+          fi
+          echo "All stages completed (warnings tolerated)."

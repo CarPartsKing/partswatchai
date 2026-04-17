@@ -83,7 +83,16 @@ WEEKLY_STAGES: list[Stage] = [
     Stage("accuracy_report", "ml.accuracy",    "run",            "dry_run"),
 ]
 
-STAGE_INDEX: dict[str, Stage] = {s.key: s for s in NIGHTLY_STAGES + WEEKLY_STAGES}
+# On-demand extract stages — not part of the nightly default loop, but
+# individually runnable via `python main.py --stage <key>`.
+EXTRACT_STAGES: list[Stage] = [
+    Stage("product_extract", "extract.autocube_product_pull",
+          "run_inventory_extract", dry_run_kwarg="dry_run"),
+]
+
+STAGE_INDEX: dict[str, Stage] = {
+    s.key: s for s in NIGHTLY_STAGES + WEEKLY_STAGES + EXTRACT_STAGES
+}
 
 # ---------------------------------------------------------------------------
 # Stage result
@@ -249,6 +258,7 @@ _STAGE_DISPLAY: dict[str, str] = {
     "basket_analysis":   "Basket analysis (weekly)",
     "accuracy_report":   "Forecast accuracy report (weekly)",
     "dead_stock":        "Dead stock — capital-weighted (weekly)",
+    "product_extract":   "Product extract (Autocube inventory + master)",
 }
 
 

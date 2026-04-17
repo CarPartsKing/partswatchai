@@ -190,23 +190,40 @@ def _build_alerts(client: Any, today: date) -> dict:
 
 
 def _build_reorder(client: Any, today: date) -> dict:
-    """Reorder recommendations summary for today.
+    """Reorder recommendations summary for the most recent run.
 
     Returns a dict with:
       - kpis:  network roll-ups (totals, urgency split, type split,
                top suppliers, top destination locations)
-      - items: top 10 most-urgent unapproved recommendations for the
+      - items: top 20 most-urgent unapproved recommendations for the
                table view
+      - recommendation_date: the date the recs were written for
     """
-    # Pull EVERY row for today (full network, not just first 100) so the
-    # KPIs reflect the real volume the buying team faces.  The reorder
-    # writer batches at 200/row so we can have ~20k+ recs/day.
+    # Use the latest run we actually have rows for, not strictly today —
+    # the nightly pipeline writes recs dated for the *next* business day,
+    # and a partial day (no run yet) would silently show "no recs".
+    try:
+        latest = (
+            client.table("reorder_recommendations")
+            .select("recommendation_date")
+            .order("recommendation_date", desc=True)
+            .limit(1)
+            .execute()
+            .data or []
+        )
+        rec_date = latest[0]["recommendation_date"] if latest else today.isoformat()
+    except Exception:
+        rec_date = today.isoformat()
+
+    # Pull EVERY row for that date (full network) so the KPIs reflect the
+    # real volume the buying team faces.  The reorder writer batches at
+    # 200/row so we can have ~20k+ recs/day.
     rows = _paginate(
         client, "reorder_recommendations",
         "sku_id,location_id,recommendation_type,urgency,qty_to_order,"
         "supplier_id,days_of_supply_remaining,forecast_model_used,"
         "transfer_from_location,is_approved",
-        filters={"recommendation_date": today.isoformat()},
+        filters={"recommendation_date": rec_date},
     )
 
     urgency_order = {"critical": 0, "warning": 1, "high": 1,
@@ -239,19 +256,22 @@ def _build_reorder(client: Any, today: date) -> dict:
     top_suppliers = sorted(by_supplier.items(), key=lambda kv: kv[1], reverse=True)[:5]
     top_dest_locs = sorted(by_dest_loc.items(), key=lambda kv: kv[1], reverse=True)[:5]
 
-    # Top-10 most-urgent unapproved for the on-screen action list
+    # Top-20 most-urgent unapproved for the on-screen action list:
+    # urgency DESC (critical → warning → normal), then qty_to_order DESC
+    # so the biggest buys float to the top.
     unapproved = [r for r in rows if not r.get("is_approved")]
     unapproved.sort(key=lambda r: (
         urgency_order.get((r.get("urgency") or "low").lower(), 9),
-        float(r.get("days_of_supply_remaining") or 9999),
+        -float(r.get("qty_to_order") or 0),
     ))
-    items = unapproved[:10]
+    items = unapproved[:20]
     for r in items:
         r["location_display"] = _loc_display(r.get("location_id", ""))
         if r.get("transfer_from_location"):
             r["transfer_from_display"] = _loc_display(r["transfer_from_location"])
 
     return {
+        "recommendation_date": rec_date,
         "kpis": {
             "total_recommendations":  len(rows),
             "approved":               approved,
@@ -919,70 +939,79 @@ def _build_supplier_detail(client: Any, today: date) -> list[dict]:
 
 
 def _build_pipeline_status(client: Any, today: date) -> list[dict]:
-    stages = [
-        "extract", "clean", "derive", "location_classify",
-        "anomaly", "forecast_rolling", "forecast_lgbm",
-        "reorder", "alerts", "dead_stock", "accuracy_report",
+    """Last-run summary for the four core nightly stages.
+
+    There is no pipeline_runs ledger table, so instead of guessing at
+    job state we surface what the buyer actually cares about: when did
+    each stage last produce output, and how much did it produce.
+
+    Returns a list of dicts shaped:
+      {stage, status, last_run, row_count, label}
+    """
+    def _latest(table: str, ts_col: str, date_only: bool = False) -> tuple[str, int]:
+        """Return (latest_value, total_row_count_for_that_value)."""
+        try:
+            rows = (
+                client.table(table)
+                .select(ts_col)
+                .order(ts_col, desc=True)
+                .limit(1)
+                .execute()
+                .data or []
+            )
+            if not rows:
+                return ("", 0)
+            latest_val = rows[0].get(ts_col)
+            if not latest_val:
+                return ("", 0)
+            # If it's a timestamp, slice to the date for the count filter.
+            if date_only:
+                count_filter = latest_val
+            else:
+                count_filter = str(latest_val)[:10]
+                # Use a half-open day range so we count the whole day even
+                # though latest_val is just one row's timestamp.
+                next_day = (date.fromisoformat(count_filter) + timedelta(days=1)).isoformat()
+                count_resp = (
+                    client.table(table)
+                    .select("*", count="exact", head=True)
+                    .gte(ts_col, count_filter)
+                    .lt(ts_col, next_day)
+                    .execute()
+                )
+                return (str(latest_val), int(count_resp.count or 0))
+            count_resp = (
+                client.table(table)
+                .select("*", count="exact", head=True)
+                .eq(ts_col, count_filter)
+                .execute()
+            )
+            return (str(latest_val), int(count_resp.count or 0))
+        except Exception:
+            log.exception("Pipeline status probe failed for %s.%s", table, ts_col)
+            return ("", 0)
+
+    # Each stage maps to the table whose freshness it owns.
+    extract_ts,   extract_n   = _latest("sales_transactions",       "transaction_date",   date_only=True)
+    forecast_ts,  forecast_n  = _latest("forecast_results",         "forecast_date",      date_only=True)
+    reorder_ts,   reorder_n   = _latest("reorder_recommendations",  "recommendation_date", date_only=True)
+    alerts_ts,    alerts_n    = _latest("alerts",                   "alert_date",         date_only=True)
+
+    def _row(stage: str, label: str, ts: str, n: int) -> dict:
+        return {
+            "stage":     stage,
+            "label":     label,
+            "last_run":  ts or None,
+            "row_count": n,
+            "status":    "ok" if ts else "never_run",
+        }
+
+    return [
+        _row("extract",  "Last extract",  extract_ts,  extract_n),
+        _row("forecast", "Last forecast", forecast_ts, forecast_n),
+        _row("reorder",  "Last reorder",  reorder_ts,  reorder_n),
+        _row("alerts",   "Last alerts",   alerts_ts,   alerts_n),
     ]
-    try:
-        client.table("pipeline_runs").select("run_id", count="exact").limit(1).execute()
-        table_exists = True
-    except Exception:
-        table_exists = False
-
-    result = []
-    if not table_exists:
-        for stage in stages:
-            result.append({
-                "stage": stage,
-                "status": "no_table",
-                "started_at": None,
-                "ended_at": None,
-                "duration_s": None,
-                "error": "",
-            })
-        return result
-
-    for stage in stages:
-        rows = _paginate(
-            client, "pipeline_runs",
-            "run_id,stage_name,status,started_at,ended_at,error_message",
-            filters={"stage_name": stage},
-            order_col="started_at",
-            order_desc=True,
-            limit=1,
-        )
-        if rows:
-            r = rows[0]
-            started = r.get("started_at") or ""
-            ended = r.get("ended_at") or ""
-            duration_s = None
-            if started and ended:
-                try:
-                    from datetime import datetime as dt
-                    t0 = dt.fromisoformat(started.replace("Z", "+00:00"))
-                    t1 = dt.fromisoformat(ended.replace("Z", "+00:00"))
-                    duration_s = round((t1 - t0).total_seconds())
-                except Exception:
-                    pass
-            result.append({
-                "stage": stage,
-                "status": r.get("status", "unknown"),
-                "started_at": started,
-                "ended_at": ended,
-                "duration_s": duration_s,
-                "error": (r.get("error_message") or "")[:200],
-            })
-        else:
-            result.append({
-                "stage": stage,
-                "status": "never_run",
-                "started_at": None,
-                "ended_at": None,
-                "duration_s": None,
-                "error": "",
-            })
-    return result
 
 
 # ---------------------------------------------------------------------------

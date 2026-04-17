@@ -806,9 +806,12 @@ function renderReorder(payload) {
     }
   }
 
-  // ---- Top-10 action table ----
+  // ---- Top-20 action table ----
   if (!items.length) {
-    document.getElementById('reorder-body').innerHTML = '<div class="card-body"><div class="empty-state"><div class="icon">&#10003;</div>No pending reorder recommendations today.</div></div>';
+    var emptyMsg = payload && payload.recommendation_date
+      ? 'No pending reorder recommendations for ' + escHtml(payload.recommendation_date) + '.'
+      : 'No pending reorder recommendations.';
+    document.getElementById('reorder-body').innerHTML = '<div class="card-body"><div class="empty-state"><div class="icon">&#10003;</div>' + emptyMsg + '</div></div>';
     return;
   }
   var rows = items.map(function(r) {
@@ -1075,16 +1078,19 @@ function renderPipelineStatus(items) {
     document.getElementById('pipeline-body').innerHTML = '<div class="no-data">No pipeline run data.</div>';
     return;
   }
+  // New shape: list of { stage, label, last_run, row_count, status }.
   var html = items.map(function(s) {
-    var cls = s.status === 'ok' || s.status === 'completed' || s.status === 'success' ? 'ok' : s.status === 'failed' || s.status === 'error' ? 'failed' : s.status === 'running' ? 'running' : 'never';
-    var icon = cls === 'ok' ? '\u2713' : cls === 'failed' ? '\u2717' : cls === 'running' ? '\u25CB' : '\u2014';
-    var dur = s.duration_s != null ? (s.duration_s < 60 ? s.duration_s + 's' : Math.floor(s.duration_s/60) + 'm' + (s.duration_s%60) + 's') : '';
-    var when = s.started_at ? s.started_at.slice(5, 16).replace('T', ' ') : '';
-    return '<div class="pipeline-stage ' + cls + '">' +
-      '<div class="pipeline-stage-name">' + icon + ' ' + escHtml(s.stage) + '</div>' +
-      '<div class="pipeline-stage-status">' + escHtml(s.status) + (dur ? ' &middot; ' + dur : '') + '</div>' +
-      '<div class="pipeline-stage-time">' + when + '</div>' +
-      (s.error ? '<div style="font-size:10px;color:var(--critical);margin-top:2px">' + escHtml(s.error).substring(0,60) + '</div>' : '') +
+    var ok    = s.status === 'ok';
+    var color = ok ? 'var(--success)' : 'var(--muted)';
+    var icon  = ok ? '\u2713' : '\u2014';
+    var when  = s.last_run
+      ? (String(s.last_run).length > 10 ? String(s.last_run).slice(0,16).replace('T',' ') : String(s.last_run))
+      : 'never';
+    var qty   = (s.row_count != null) ? fmtNum(s.row_count) + ' rows' : '\u2014';
+    return '<div class="pipeline-stage ' + (ok ? 'ok' : 'never') + '">' +
+      '<div class="pipeline-stage-name" style="color:' + color + '">' + icon + ' ' + escHtml(s.label || s.stage) + '</div>' +
+      '<div class="pipeline-stage-status">' + qty + '</div>' +
+      '<div class="pipeline-stage-time">' + escHtml(when) + '</div>' +
       '</div>';
   }).join('');
   document.getElementById('pipeline-body').innerHTML = '<div class="pipeline-grid">' + html + '</div>';

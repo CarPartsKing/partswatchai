@@ -147,6 +147,21 @@ SELECT
 FROM [Product]
 """
 
+# Prod Desc / Ext Desc / UOM live as MEMBER PROPERTIES of [Prod Code],
+# not as their own hierarchies — so we read them via DIMENSION PROPERTIES.
+MDX_PRODUCT_DESC = """\
+SELECT
+  NON EMPTY { [Measures].[Product Count] } ON COLUMNS,
+  NON EMPTY [Product].[Prod Code].[Prod Code].MEMBERS
+  DIMENSION PROPERTIES
+    MEMBER_NAME,
+    [Product].[Prod Code].[Prod Desc],
+    [Product].[Prod Code].[Ext Desc],
+    [Product].[Prod Code].[UOM]
+  ON ROWS
+FROM [Product]
+"""
+
 _PRICE_TIERS = [
     "1", "2", "3", "4", "5", "6", "7", "8", "9", "10",
     "A", "B", "C", "S", "ST",
@@ -563,6 +578,14 @@ def run_enrich_extract(dry_run: bool = False) -> int:
         log.exception("Product line extract failed.")
         line_rows = []
 
+    log.info("Pulling product descriptions …")
+    try:
+        desc_rows = client.execute_mdx(MDX_PRODUCT_DESC)
+        log.info("Description rows: %d", len(desc_rows))
+    except Exception:
+        log.exception("Description extract failed.")
+        desc_rows = []
+
     enrichment: dict[str, dict[str, Any]] = {}
 
     for r in vendor_rows:
@@ -576,6 +599,28 @@ def run_enrich_extract(dry_run: bool = False) -> int:
         prod_line = r.get("[Product].[Prod Line].[Prod Line]", "").strip()
         if sku and prod_line:
             enrichment.setdefault(sku, {})["product_line"] = prod_line
+
+    # Description rows come back via DIMENSION PROPERTIES, so the SKU is in
+    # the MEMBER_NAME slot rather than the usual caption slot.  Skip Autocube
+    # filler rows ("---", placeholder "UNKNOWN" / "~").
+    _NULLISH = {"", "~", "---", "UNKNOWN"}
+    for r in desc_rows:
+        sku = (r.get("[Product].[Prod Code].[Prod Code].[MEMBER_NAME]")
+               or r.get("[Product].[Prod Code].[Prod Code]")
+               or "").strip()
+        if not sku or sku in _NULLISH:
+            continue
+        prod_desc = (r.get("[Product].[Prod Code].[Prod Code].[Prod Desc]") or "").strip()
+        ext_desc  = (r.get("[Product].[Prod Code].[Prod Code].[Ext Desc]") or "").strip()
+        uom       = (r.get("[Product].[Prod Code].[Prod Code].[UOM]") or "").strip()
+
+        # Prefer the longer Ext Desc when it carries real content; fall
+        # back to the short Prod Desc otherwise.
+        description = ext_desc if ext_desc and ext_desc not in _NULLISH else prod_desc
+        if description and description not in _NULLISH:
+            enrichment.setdefault(sku, {})["description"] = description[:500]
+        if uom and uom not in _NULLISH:
+            enrichment.setdefault(sku, {})["unit_of_measure"] = uom[:16]
 
     if not enrichment:
         log.info("No enrichment data to apply.")

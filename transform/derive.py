@@ -62,6 +62,11 @@ MIN_XYZ_WEEKS: int = 4
 XYZ_CV_X: float = 0.5    # CV < this  → X (consistent)
 XYZ_CV_Y: float = 1.0    # CV < this  → Y (variable); else → Z (erratic)
 
+# How many SKUs to compute + upsert per chunk.  Keeps peak memory bounded
+# regardless of catalog size (currently ~317K active SKUs) and gives the
+# upsert step a natural progress checkpoint to log against.
+XYZ_BATCH_SIZE: int = 5_000
+
 # Purchase-order lookback for supplier scoring
 SUPPLIER_LOOKBACK_DAYS: int = 90
 
@@ -561,62 +566,135 @@ def derive_xyz_classification(client: Any) -> dict:
         callback=_acc_weekly,
     )
 
+    # Detect whether the cv_score column has been created (migration 019).
+    # If it hasn't, we still classify but skip persisting cv_score so the
+    # upsert doesn't 400 with "column not found".
+    persist_cv = True
+    try:
+        client.table("sku_master").select("cv_score").limit(1).execute()
+    except Exception:
+        persist_cv = False
+        log.warning(
+            "  cv_score column not found in sku_master — apply migration "
+            "019_xyz_cv_score.sql to persist CV alongside xyz_class. "
+            "Continuing without cv_score persistence."
+        )
+
     # Fetch current abc_class for the combined field
     sku_rows = _fetch_all(client, "sku_master", "sku_id,abc_class")
     abc_map  = {r["sku_id"]: (r.get("abc_class") or "C") for r in sku_rows}
     all_skus = list(abc_map.keys())
 
-    updates: list[dict] = []
-    class_counts: dict[str, int] = {"X": 0, "Y": 0, "Z": 0}
+    # Running totals across all batches.  Memory stays bounded because
+    # each batch's `updates` list is upserted and discarded before the
+    # next batch starts.
+    class_counts: dict[str, int] = {"X": 0, "Y": 0, "Z": 0, "UNKNOWN": 0}
+    most_erratic_overall: tuple[float, str] | None = None      # (cv, sku_id)
+    most_predictable_a:   tuple[float, str] | None = None      # (cv, sku_id)
+    rows_upserted = 0
 
-    for sku_id in all_skus:
-        week_data = weekly.get(sku_id, {})
-
-        if not week_data:
-            # No sales at all in the window
-            xyz = "Z"
-        else:
-            # Build the full weekly series including zero-sales weeks
-            series = [week_data.get(wk, 0.0) for wk in all_iso_weeks]
-            total  = sum(series)
-
-            if total == 0:
-                xyz = "Z"
-            elif n_weeks < MIN_XYZ_WEEKS:
-                # Too few weeks — flag Y (not enough data to confirm stability)
-                xyz = "Y"
-            else:
-                mean_w = total / n_weeks
-                std_w  = pstdev(series)   # population std dev
-                cv     = std_w / mean_w if mean_w > 0 else float("inf")
-
-                if cv < XYZ_CV_X:
-                    xyz = "X"
-                elif cv < XYZ_CV_Y:
-                    xyz = "Y"
-                else:
-                    xyz = "Z"
-
-        class_counts[xyz] += 1
-        abc = abc_map.get(sku_id, "C")
-        updates.append({
-            "sku_id":        sku_id,
-            "xyz_class":     xyz,
-            "abc_xyz_class": abc + xyz,
-        })
-
-    _upsert(
-        client, "sku_master", updates, on_conflict="sku_id",
-        progress_label="XYZ class upsert",
-    )
-
+    total_skus  = len(all_skus)
+    n_batches   = (total_skus + XYZ_BATCH_SIZE - 1) // XYZ_BATCH_SIZE
     log.info(
-        "  XYZ classified %d SKU(s): X=%d  Y=%d  Z=%d  "
-        "(lookback=%dd  weeks=%d  min_weeks=%d  cv_x=%.1f  cv_y=%.1f)",
-        len(updates), class_counts["X"], class_counts["Y"], class_counts["Z"],
-        XYZ_LOOKBACK_DAYS, n_weeks, MIN_XYZ_WEEKS, XYZ_CV_X, XYZ_CV_Y,
+        "  Classifying %d SKU(s) in %d batch(es) of %d …",
+        total_skus, n_batches, XYZ_BATCH_SIZE,
     )
-    return {"rows_updated": len(updates)}
+
+    for batch_idx in range(n_batches):
+        chunk     = all_skus[batch_idx * XYZ_BATCH_SIZE : (batch_idx + 1) * XYZ_BATCH_SIZE]
+        updates: list[dict] = []
+
+        for sku_id in chunk:
+            week_data = weekly.get(sku_id, {})
+
+            # Count weeks where this SKU actually had sales (not just
+            # weeks present in the calendar window).  A SKU needs at
+            # least MIN_XYZ_WEEKS weeks of real activity to earn a
+            # CV-based class — anything sparser becomes UNKNOWN.
+            active_weeks = sum(1 for v in week_data.values() if v > 0)
+
+            xyz: str | None
+            cv_value: float | None = None
+
+            if active_weeks < MIN_XYZ_WEEKS:
+                # Insufficient history: cannot compute a reliable CV.
+                # Stored as NULL (xyz_class CHAR(1) cannot hold "UNKNOWN");
+                # surfaced as "UNKNOWN" only in the summary log.
+                xyz = None
+            else:
+                # Build the full weekly series including zero-sales weeks
+                # so a SKU that sells only sporadically gets a high CV.
+                series = [week_data.get(wk, 0.0) for wk in all_iso_weeks]
+                mean_w = sum(series) / n_weeks
+
+                if mean_w == 0:
+                    # Defensive: active_weeks ≥ MIN already implies sales,
+                    # but float arithmetic can produce ~0 in edge cases.
+                    xyz, cv_value = "Z", None
+                else:
+                    std_w    = pstdev(series)
+                    cv_value = std_w / mean_w
+                    if cv_value < XYZ_CV_X:
+                        xyz = "X"
+                    elif cv_value < XYZ_CV_Y:
+                        xyz = "Y"
+                    else:
+                        xyz = "Z"
+
+            # Tally + leaderboard tracking
+            if xyz is None:
+                class_counts["UNKNOWN"] += 1
+                abc_xyz = None
+            else:
+                class_counts[xyz] += 1
+                abc_xyz = abc_map.get(sku_id, "C") + xyz
+
+                if cv_value is not None:
+                    if (most_erratic_overall is None
+                            or cv_value > most_erratic_overall[0]):
+                        most_erratic_overall = (cv_value, sku_id)
+                    if (abc_map.get(sku_id) == "A"
+                            and (most_predictable_a is None
+                                 or cv_value < most_predictable_a[0])):
+                        most_predictable_a = (cv_value, sku_id)
+
+            row = {
+                "sku_id":        sku_id,
+                "xyz_class":     xyz,
+                "abc_xyz_class": abc_xyz,
+            }
+            if persist_cv:
+                # Round to 4 dp to match NUMERIC(8,4); None stays None.
+                row["cv_score"] = round(cv_value, 4) if cv_value is not None else None
+            updates.append(row)
+
+        _upsert(
+            client, "sku_master", updates, on_conflict="sku_id",
+            progress_label=None,    # one log line per batch is plenty
+        )
+        rows_upserted += len(updates)
+        log.info(
+            "  XYZ batch %d/%d  upserted %d  (cumulative %d)",
+            batch_idx + 1, n_batches, len(updates), rows_upserted,
+        )
+
+    # ── Summary ───────────────────────────────────────────────────────
+    log.info("  ─" * 30)
+    log.info("  XYZ classification summary  (lookback=%dd, weeks=%d, "
+             "min_active_weeks=%d, cv_x<%.2f, cv_y<%.2f)",
+             XYZ_LOOKBACK_DAYS, n_weeks, MIN_XYZ_WEEKS, XYZ_CV_X, XYZ_CV_Y)
+    log.info("    X-class (predictable):           %6d SKUs", class_counts["X"])
+    log.info("    Y-class (variable):              %6d SKUs", class_counts["Y"])
+    log.info("    Z-class (erratic):               %6d SKUs", class_counts["Z"])
+    log.info("    Unknown (insufficient history):  %6d SKUs", class_counts["UNKNOWN"])
+    if most_erratic_overall is not None:
+        log.info("    Most erratic SKU:        %s  cv=%.2f",
+                 most_erratic_overall[1], most_erratic_overall[0])
+    if most_predictable_a is not None:
+        log.info("    Most predictable A-class SKU: %s  cv=%.2f",
+                 most_predictable_a[1], most_predictable_a[0])
+
+    return {"rows_updated": rows_upserted}
 
 
 # ---------------------------------------------------------------------------

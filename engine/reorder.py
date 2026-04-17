@@ -113,6 +113,25 @@ URGENCY_CRITICAL_DAYS: float = 3.0
 URGENCY_WARNING_DAYS: float = 7.0
 """days_of_supply_remaining in [CRITICAL, WARNING) → urgency = 'warning'."""
 
+# ---------------------------------------------------------------------------
+# Safety stock multipliers by XYZ class
+# ---------------------------------------------------------------------------
+# Applied to qty_to_order so that erratic SKUs (Z) carry more buffer than
+# consistent SKUs (X).  None handles SKUs whose xyz_class is NULL —
+# either UNKNOWN (insufficient history) or sku_master row not yet
+# reclassified after first appearance — and uses a moderate buffer.
+#
+#   X    1.0x — demand is stable, rely on the base reorder formula
+#   Y    1.3x — moderate variability, +30% buffer
+#   Z    1.8x — highly erratic, +80% buffer
+#   None 1.2x — unknown, slight conservative bump
+XYZ_SAFETY_MULTIPLIERS: dict[str | None, float] = {
+    "X":  1.0,
+    "Y":  1.3,
+    "Z":  1.8,
+    None: 1.2,
+}
+
 BASKET_CONFIDENCE_THRESHOLD: float = 0.30
 """Minimum confidence for a basket rule to trigger a co-purchase recommendation."""
 
@@ -255,30 +274,55 @@ def _fetch_skus(client_holder: list) -> dict[str, dict]:
     """
     from postgrest.exceptions import APIError  # local import — avoid polluting module ns
 
-    try:
-        rows = _paginate(
-            client_holder, "sku_master",
-            "sku_id,abc_class,primary_supplier_id,avg_weekly_units",
-            filters={"is_active": True},
-        )
-    except APIError as exc:
-        if "primary_supplier_id" in str(exc):
-            log.warning(
-                "Column sku_master.primary_supplier_id not found — "
-                "run migration 007 to enable primary supplier routing.  "
-                "Falling back to purchase_orders-derived suppliers only."
-            )
+    # xyz_class drives the safety-stock multiplier (XYZ_SAFETY_MULTIPLIERS);
+    # primary_supplier_id drives supplier routing.  Either column may be
+    # absent if its migration has not been applied.  We try the richest
+    # projection first and fall back step-by-step rather than parsing
+    # PostgREST error text (which only ever names one missing column at
+    # a time, so a single-pass branch on substring is unreliable when
+    # both are missing).
+    fallback_chain: list[tuple[str, str]] = [
+        ("sku_id,abc_class,xyz_class,primary_supplier_id,avg_weekly_units", ""),
+        ("sku_id,abc_class,xyz_class,avg_weekly_units",
+            "Column sku_master.primary_supplier_id not found — run migration 007 "
+            "to enable primary supplier routing.  Falling back to purchase_orders-"
+            "derived suppliers only."),
+        ("sku_id,abc_class,primary_supplier_id,avg_weekly_units",
+            "Column sku_master.xyz_class not found — apply migration 010 to enable "
+            "XYZ-based safety stock multipliers.  Defaulting all SKUs to the "
+            "unknown-class multiplier."),
+        ("sku_id,abc_class,avg_weekly_units",
+            "Both xyz_class and primary_supplier_id missing — apply migrations "
+            "007 and 010 for full reorder functionality.  Using minimum projection."),
+    ]
+
+    rows: list[dict] | None = None
+    for select, warn_msg in fallback_chain:
+        try:
             rows = _paginate(
-                client_holder, "sku_master",
-                "sku_id,abc_class,avg_weekly_units",
+                client_holder, "sku_master", select,
                 filters={"is_active": True},
             )
-        else:
-            raise
+            if warn_msg:
+                log.warning(warn_msg)
+            break
+        except APIError as exc:
+            # Only swallow "missing column" errors — anything else is a
+            # real problem (auth, connectivity, etc.) and must surface.
+            msg = str(exc).lower()
+            if "column" not in msg and "does not exist" not in msg:
+                raise
+            continue
+    if rows is None:
+        raise RuntimeError(
+            "sku_master is missing core columns (sku_id / abc_class / "
+            "avg_weekly_units) — re-run migration 001."
+        )
 
     return {
         r["sku_id"]: {
             "abc_class":           r.get("abc_class"),
+            "xyz_class":           r.get("xyz_class"),         # None if column or value missing
             "primary_supplier_id": r.get("primary_supplier_id"),  # None if migration pending
             "avg_weekly_units":    (
                 float(r["avg_weekly_units"])
@@ -695,8 +739,12 @@ def _add_basket_triggered(
                 qty_on_hand = summary["qty_on_hand"]
                 qty_on_order = summary["qty_on_order"]
                 reorder_threshold = summary["reorder_threshold"]
+                xyz_class = summary.get("xyz_class")
+                safety_multiplier = XYZ_SAFETY_MULTIPLIERS.get(
+                    xyz_class, XYZ_SAFETY_MULTIPLIERS[None]
+                )
 
-                demand_over_coverage = avg_daily * reorder_threshold
+                demand_over_coverage = avg_daily * reorder_threshold * safety_multiplier
                 qty_to_order = max(0.0, demand_over_coverage - qty_on_hand - qty_on_order)
                 if qty_to_order < MIN_ORDER_QTY:
                     continue
@@ -886,6 +934,7 @@ def run_reorder(dry_run: bool = False) -> int:
                 supplier_info.get("risk_flag") if supplier_info else None
             ),
             "abc_class":               abc_class,
+            "xyz_class":               sku_info.get("xyz_class"),  # may be None
             "model_used":              model_used,
         }
 
@@ -914,9 +963,13 @@ def run_reorder(dry_run: bool = False) -> int:
         qty_on_hand  = summary["qty_on_hand"]
         qty_on_order = summary["qty_on_order"]
         avg_lead     = summary["avg_lead_time_days"]
+        xyz_class    = summary.get("xyz_class")  # X / Y / Z / None
 
-        # Quantity needed to cover demand through the next replenishment cycle.
-        demand_over_coverage = avg_daily * reorder_threshold
+        # Quantity needed to cover demand through the next replenishment cycle,
+        # scaled by the XYZ safety multiplier so erratic SKUs (Z) carry more
+        # buffer than consistent SKUs (X).
+        safety_multiplier   = XYZ_SAFETY_MULTIPLIERS.get(xyz_class, XYZ_SAFETY_MULTIPLIERS[None])
+        demand_over_coverage = avg_daily * reorder_threshold * safety_multiplier
         qty_to_order = max(0.0, demand_over_coverage - qty_on_hand - qty_on_order)
 
         if qty_to_order < MIN_ORDER_QTY:

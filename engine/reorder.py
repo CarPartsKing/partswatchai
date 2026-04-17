@@ -109,6 +109,12 @@ SKU_BATCH_SIZE: int = 1_000
 """How many SKUs to pass to .in_() in a single forecast / PO fetch query.
 Keeps each query inside Supabase's statement timeout (error 57014)."""
 
+WRITE_BATCH_SIZE: int = 200
+"""How many recommendation rows to upsert per network round-trip.
+A single 19k-row upsert blows past Supabase's statement timeout (57014);
+200-row batches finish well inside the timeout window and let us retry
+individual batches on transient failure without losing prior progress."""
+
 AT_RISK_COVERAGE_DAYS: float = 60.0
 """Pre-filter threshold: a (SKU, location) with proxy days-of-supply
 (qty_on_hand / (avg_weekly_units / 7)) > this many days is clearly NOT
@@ -967,27 +973,59 @@ def run_reorder(dry_run: bool = False) -> int:
 
     if recommendations and not dry_run:
         log.info("-" * 60)
-        log.info("Writing %d recommendation(s) to reorder_recommendations …",
-                 len(recommendations))
-        try:
-            # Upsert with ignore_duplicates preserves same-day approvals.
-            # Always read client_holder[0] fresh — earlier retry paths may
-            # have swapped in a reconnected client.
-            resp = (
-                client_holder[0].table("reorder_recommendations")
-                .upsert(
-                    recommendations,
-                    on_conflict="sku_id,location_id,recommendation_date",
-                    ignore_duplicates=True,
-                )
-                .execute()
-            )
-            rows_written = len(resp.data or [])
-            log.info("  Rows inserted (new): %d  (existing approved rows preserved)",
-                     rows_written)
-        except Exception:
-            log.exception("Failed to write recommendations to database.")
-            return 1
+        log.info("Writing %d recommendation(s) to reorder_recommendations "
+                 "in batches of %d …",
+                 len(recommendations), WRITE_BATCH_SIZE)
+
+        total = len(recommendations)
+        next_progress_at = 1000  # log every 1000 rows written
+
+        for offset in range(0, total, WRITE_BATCH_SIZE):
+            batch = recommendations[offset:offset + WRITE_BATCH_SIZE]
+
+            for attempt in range(1, _MAX_RETRIES + 1):
+                try:
+                    # Always read client_holder[0] fresh — retry paths
+                    # may have swapped in a reconnected client.
+                    # ignore_duplicates=True preserves same-day approvals.
+                    resp = (
+                        client_holder[0].table("reorder_recommendations")
+                        .upsert(
+                            batch,
+                            on_conflict="sku_id,location_id,recommendation_date",
+                            ignore_duplicates=True,
+                        )
+                        .execute()
+                    )
+                    rows_written += len(resp.data or [])
+                    break
+                except Exception as exc:
+                    if _is_retryable_error(exc) and attempt < _MAX_RETRIES:
+                        log.warning(
+                            "  reorder_recommendations write retry %d/%d "
+                            "(offset=%d, batch=%d): %s — reconnecting in %.0fs …",
+                            attempt, _MAX_RETRIES, offset, len(batch),
+                            type(exc).__name__, _RETRY_DELAY,
+                        )
+                        time.sleep(_RETRY_DELAY)
+                        client_holder[0] = _get_fresh_client()
+                        continue
+                    log.exception(
+                        "Failed to write recommendations batch at offset %d "
+                        "(size=%d).", offset, len(batch),
+                    )
+                    return 1
+
+            written_so_far = offset + len(batch)
+            if written_so_far >= next_progress_at or written_so_far == total:
+                log.info("  Progress: %d / %d rows written (%.1f%%)",
+                         written_so_far, total,
+                         100.0 * written_so_far / total)
+                while next_progress_at <= written_so_far:
+                    next_progress_at += 1000
+
+        log.info("  Rows inserted (new): %d  (existing approved rows preserved)",
+                 rows_written)
     elif dry_run:
         rows_written = len(recommendations)
 

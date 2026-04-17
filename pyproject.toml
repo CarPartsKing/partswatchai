@@ -2,7 +2,7 @@
 name = "python-template"
 version = "0.1.0"
 description = ""
-authors = ["Your Name <you@example.com>"]
+authors = [{name = "Tony D"}]
 requires-python = ">=3.11"
 dependencies = [
     "anthropic>=0.86.0",
@@ -19,3 +19,26 @@ dependencies = [
     "supabase>=2.28.3",
     "tenacity>=9.1.4",
 ]
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+# Explicit package list — setuptools auto-discovery refuses when more than
+# one top-level package is present, so we enumerate the real Python
+# packages here.  `config/`, `dashboard/`, and `sample_data/` are
+# intentionally omitted: they are data/asset directories, not importable
+# packages (no __init__.py).  The repo's `config.py` module is picked
+# up via `py-modules`.
+[tool.setuptools]
+packages = [
+    "assistant",
+    "db",
+    "engine",
+    "extract",
+    "ml",
+    "models",
+    "transform",
+    "utils",
+]
+py-modules = ["config", "main"]

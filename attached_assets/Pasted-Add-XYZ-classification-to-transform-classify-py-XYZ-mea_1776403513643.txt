@@ -1,0 +1,82 @@
+Add XYZ classification to transform/classify.py
+
+XYZ measures demand variability alongside 
+existing ABC revenue classification.
+
+1. Pull last 13 weeks of sales per SKU from 
+   sales_transactions where is_anomaly = FALSE
+   Group by sku_id + week number to get 
+   weekly_qty for each SKU
+
+2. For each SKU calculate:
+   mean_weekly = average of weekly_qty values
+   std_weekly = standard deviation of weekly_qty
+   cv = std_weekly / mean_weekly
+   If mean_weekly = 0, classify as Z
+   Minimum 4 weeks of history to classify
+   Below 4 weeks = UNKNOWN
+
+3. XYZ classification thresholds:
+   X = cv < 0.5    (highly predictable)
+   Y = cv 0.5-1.0  (moderately variable)
+   Z = cv > 1.0    (highly erratic)
+
+4. Combined class:
+   abc_xyz_class = abc_class + xyz_class
+   Examples: AX, BZ, CY, AZ, UNKNOWN
+
+5. Add to sku_master via migration 020:
+   xyz_class VARCHAR(1)
+   cv_score NUMERIC(8,4)
+   abc_xyz_class VARCHAR(2)
+
+6. Update safety stock multipliers in 
+   engine/reorder.py based on XYZ:
+   Add constant at top of file:
+   XYZ_SAFETY_MULTIPLIERS = {
+     'X': 1.0,
+     'Y': 1.3,
+     'Z': 1.8,
+     None: 1.2
+   }
+   Apply multiplier to qty_to_order calculation
+   for each recommendation
+
+7. Update forecast_lgbm.py to include 
+   xyz_class as a categorical feature:
+   Add to feature engineering:
+   xyz_map = {'X': 0, 'Y': 1, 'Z': 2}
+   df['xyz_encoded'] = df['xyz_class'].map(xyz_map).fillna(1)
+   Include xyz_encoded in feature list
+
+8. Process in batches of 5000 SKUs to avoid 
+   memory issues — never load all 317K SKUs 
+   at once
+
+9. Log summary:
+   X-class (predictable): X SKUs
+   Y-class (variable): X SKUs
+   Z-class (erratic): X SKUs
+   Unknown (insufficient history): X SKUs
+   Most erratic SKU: [sku_id] cv=X.XX
+   Most predictable A-class SKU: [sku_id] cv=X.XX
+
+10. Add to nightly pipeline in main.py 
+    after derive stage:
+    Stage name: classify
+    Label: ABC + XYZ classification
+
+Migration 020 for the three new sku_master columns.
+Run migration 020 in Supabase SQL Editor after building.
+
+Constants at top of classify.py — all thresholds 
+configurable:
+CV_X_THRESHOLD = 0.5
+CV_Y_THRESHOLD = 1.0
+MIN_WEEKS_HISTORY = 4
+XYZ_BATCH_SIZE = 5000
+
+Follow all coding standards.
+This is an addition to classify.py — not a new file.
+After building, push to GitHub via Shell:
+git push origin main

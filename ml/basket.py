@@ -140,13 +140,25 @@ def _keyset_paginate(client_holder: list, select: str,
 
 
 def _build_baskets(client, lookback_start: str, lookback_end: str) -> list[list[str]]:
+    """Group sales lines into baskets keyed by REAL invoice number.
+
+    `transaction_id` is synthesized from (date, sku, location) so it is NOT
+    a valid basket key — every synthetic transaction contains exactly one
+    SKU by construction.  The real grouping key is `invoice_number`, which
+    is populated by migration 022 from the Sales Detail cube's
+    [Invoice Nbr] dimension.  Rows with `invoice_number IS NULL` are legacy
+    rows from before migration 022 and cannot participate in basket analysis.
+    To scope the basket key to a single store-day (invoice numbers can repeat
+    across locations and recycle over time) we key on
+    (transaction_date, location_id, invoice_number).
+    """
     log.info("Fetching transactions in [%s, %s] (last %d days) …",
              lookback_start, lookback_end, LOOKBACK_DAYS)
 
     client_holder = [client]
     rows = _keyset_paginate(
         client_holder,
-        "id,transaction_id,transaction_date,location_id,sku_id",
+        "id,invoice_number,transaction_date,location_id,sku_id",
         date_lo=lookback_start,
         date_hi=lookback_end,
     )
@@ -154,23 +166,25 @@ def _build_baskets(client, lookback_start: str, lookback_end: str) -> list[list[
     if not rows:
         return []
 
-    groups: dict[str, set[str]] = defaultdict(set)
-    no_tid = 0
+    groups: dict[tuple, set[str]] = defaultdict(set)
+    no_invoice = 0
     for r in rows:
-        tid = r.get("transaction_id")
-        if tid:
-            key = str(tid)
-        else:
-            no_tid += 1
-            tdate = r.get("transaction_date") or "unknown"
-            loc = r.get("location_id") or "unknown"
-            key = f"{tdate}|{loc}"
+        inv = r.get("invoice_number")
         sku = r.get("sku_id")
-        if sku:
-            groups[key].add(str(sku))
-    if no_tid:
-        log.warning("  %d rows had no transaction_id — fell back to "
-                    "(date|location) grouping for those.", no_tid)
+        if not sku:
+            continue
+        if not inv:
+            no_invoice += 1
+            continue
+        key = (r.get("transaction_date"), r.get("location_id"), str(inv))
+        groups[key].add(str(sku))
+
+    if no_invoice:
+        pct = 100.0 * no_invoice / len(rows)
+        log.warning("  %d rows (%.1f%%) had no invoice_number and were "
+                    "excluded — these are legacy rows from before "
+                    "migration 022 / the historical re-extract.",
+                    no_invoice, pct)
 
     baskets = [
         list(skus) for skus in groups.values()

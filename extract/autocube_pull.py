@@ -192,7 +192,12 @@ _FLAG_AXES = (
     "    [Sales Detail].[Warranty Flag].[Warranty Flag].MEMBERS,\n"
     "    [Sales Detail].[Backorder Flag].[Backorder Flag].MEMBERS,\n"
     "    [Sales Detail].[Core Flag].[Core Flag].MEMBERS,\n"
-    "    [Sales Detail].[Price Override Flag].[Price Override Flag].MEMBERS"
+    "    [Sales Detail].[Price Override Flag].[Price Override Flag].MEMBERS,\n"
+    # Invoice number — the real document number per line item.  Adds ~3x to
+    # row volume but is mandatory for basket/co-purchase analysis (without it
+    # multiple invoices on the same date+sku+location collapse into a single
+    # synthetic "transaction" and Apriori finds zero multi-item baskets).
+    "    [Sales Detail].[Invoice Nbr].[Invoice Nbr].MEMBERS"
 )
 
 MDX_FULL_SALES = (
@@ -978,6 +983,10 @@ _DB_COLUMNS = frozenset({
     # leaving every row at the column default (FALSE) and rendering the
     # forecast/dead-stock `is_warranty=False` exclusions a no-op.
     "is_warranty", "is_backorder", "is_core_return", "is_price_override",
+    # Real invoice number from migration 022.  MUST be in the allow-list or
+    # it is silently dropped before upsert and basket analysis collapses
+    # back to single-item baskets.
+    "invoice_number",
 })
 
 _GENERATED_COLS = frozenset({
@@ -1025,10 +1034,20 @@ def clean_date(value: Any) -> str | None:
 
 
 def _generate_transaction_id(row: dict[str, Any]) -> str:
-    """Generate a deterministic transaction ID from date + SKU + location."""
+    """Generate a deterministic transaction ID.
+
+    When the row carries a real `invoice_number` (post-migration 022) we
+    append it so each invoice line gets its own row — required for basket
+    analysis to see multi-item invoices.  Without an invoice number we fall
+    back to the legacy 4-part key so old rows extracted before migration 022
+    keep their original IDs.
+    """
     dt = row.get("transaction_date", "")
     sku = row.get("sku_id", "")
     loc = row.get("location_id", "")
+    inv = row.get("invoice_number")
+    if inv:
+        return f"AC-{dt}-{sku}-{loc}-INV{inv}"
     return f"AC-{dt}-{sku}-{loc}"
 
 
@@ -1230,6 +1249,55 @@ def _load_to_supabase(
         except Exception:
             log.exception("Upsert failed at batch offset %d.", i)
             raise
+
+    # ----------------------------------------------------------------
+    # Migration 022 transition guardrail (runs AFTER successful upsert).
+    #
+    # The new 5-part transaction_ids (`AC-{date}-{sku}-{loc}-INV{inv}`) are
+    # different keys from the legacy 4-part ids, so the upsert above does
+    # NOT replace the pre-022 aggregated rows for the same (date,sku,loc)
+    # tuples — both would coexist and downstream forecast/dead_stock would
+    # double-count demand.  Delete the legacy NULL-invoice rows in this
+    # chunk's date range now that the new rows are safely persisted.
+    #
+    # Ordering rationale (delete-AFTER-upsert is intentional):
+    #   * Crash mid-upsert → no legacy data lost; next chunk retry re-upserts
+    #     idempotently, then deletes.
+    #   * Crash between upsert-finish and delete → that chunk's date range is
+    #     briefly double-counted, but the next chunk attempt re-runs the
+    #     delete and self-heals.  Worst case: the optional final-sweep DELETE
+    #     in migration 022's runbook cleans up any orphan rows.
+    #   * Reversed order (delete-first) would risk an EMPTY date range on
+    #     crash mid-upsert — strictly worse.
+    # ----------------------------------------------------------------
+    have_invoices = any(r.get("invoice_number") for r in cleaned)
+    if have_invoices:
+        dates_in_chunk = sorted({r["transaction_date"] for r in cleaned
+                                 if r.get("transaction_date")})
+        if dates_in_chunk:
+            d_lo, d_hi = dates_in_chunk[0], dates_in_chunk[-1]
+            try:
+                resp = (
+                    db.table("sales_transactions")
+                    .delete(count="exact")
+                    .gte("transaction_date", d_lo)
+                    .lte("transaction_date", d_hi)
+                    .is_("invoice_number", "null")
+                    .execute()
+                )
+                deleted = resp.count or 0
+                if deleted:
+                    log.info("Deleted %d legacy (NULL invoice_number) rows in "
+                             "[%s, %s] after loading invoice-bearing chunk.",
+                             deleted, d_lo, d_hi)
+            except Exception:
+                # Don't re-raise — the new rows are already persisted.  Log
+                # and continue; final-sweep DELETE in migration 022 runbook
+                # will clean up any stragglers.
+                log.exception("Legacy-row cleanup failed for [%s, %s] AFTER "
+                              "successful upsert — chunk may briefly "
+                              "double-count until next attempt or final sweep.",
+                              d_lo, d_hi)
 
     log.info("Loaded %d rows to Supabase.", loaded)
     return loaded
@@ -1608,6 +1676,14 @@ def main() -> int:
         default=0,
         help="Process at most N chunks (0 = all remaining)",
     )
+    parser.add_argument(
+        "--no-resume",
+        action="store_true",
+        help="Disable auto-resume — process every chunk in the historical "
+             "range from scratch even if rows already exist for those dates. "
+             "Required after migration 022 (and any other schema change that "
+             "needs all historical rows repopulated with new columns).",
+    )
     args = parser.parse_args()
 
     if not args.test and not args.discover_all and not args.mode:
@@ -1631,6 +1707,7 @@ def main() -> int:
             dry_run=args.dry_run,
             start_chunk=args.start_chunk,
             max_chunks=args.max_chunks,
+            auto_resume=not args.no_resume,
         )
 
     if args.mode == "retry-failed":
@@ -1642,6 +1719,7 @@ def main() -> int:
             start_chunk=args.start_chunk,
             max_chunks=args.max_chunks,
             months_filter=args.months,
+            auto_resume=not args.no_resume,
         )
 
     return 1

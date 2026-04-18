@@ -7,6 +7,7 @@
     "transaction_date": "[Sales Date].[Invoice Date].[Inv Date]",
     "sku_id":           "[Product].[Prod Code].[Prod Code]",
     "location_id":      "[Location].[Loc].[Loc]",
+    "invoice_number":   "[Sales Detail].[Invoice Nbr].[Invoice Nbr]",
     "qty_sold":         "[Measures].[Qty Ship]",
     "unit_price":       "[Measures].[Unit Price]",
     "total_revenue":    "[Measures].[Ext Price]",

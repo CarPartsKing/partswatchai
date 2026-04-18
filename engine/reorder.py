@@ -145,6 +145,14 @@ SKU_BATCH_SIZE: int = 1_000
 """How many SKUs to pass to .in_() in a single forecast / PO fetch query.
 Keeps each query inside Supabase's statement timeout (error 57014)."""
 
+_RECONCILE_THRESHOLD: float = 0.5
+"""Relative-difference cutoff for AI-vs-buyer Min-Qty reconciliation.
+
+When |ai_reorder_level - buyer_min_qty| / max(buyer_min_qty, 1) exceeds
+this value, the discrepancy is logged to data_quality_issues so buyers
+can review.  0.5 = 50% relative gap — chosen to surface only material
+disagreements, not routine rounding noise."""
+
 WRITE_BATCH_SIZE: int = 200
 """How many recommendation rows to upsert per network round-trip.
 A single 19k-row upsert blows past Supabase's statement timeout (57014);
@@ -351,7 +359,7 @@ def _fetch_inventory(client_holder: list, lookback_days: int = 7) -> dict[tuple[
     cutoff = (date.today() - timedelta(days=lookback_days)).isoformat()
     rows = _paginate(
         client_holder, "inventory_snapshots",
-        "sku_id,location_id,snapshot_date,qty_on_hand,qty_on_order",
+        "sku_id,location_id,snapshot_date,qty_on_hand,qty_on_order,reorder_point",
         gte_filters={"snapshot_date": cutoff},
     )
     latest: dict[tuple[str, str], dict] = {}
@@ -364,9 +372,14 @@ def _fetch_inventory(client_holder: list, lookback_days: int = 7) -> dict[tuple[
         key = (r["sku_id"], loc_id)
         existing = latest.get(key)
         if existing is None or r["snapshot_date"] > existing["snapshot_date"]:
+            # reorder_point may legitimately be NULL for SKUs the buyers
+            # haven't manually set a Min Qty on — keep the None so the
+            # downstream reconciliation can skip those pairs entirely.
+            rp_raw = r.get("reorder_point")
             latest[key] = {
                 "qty_on_hand":   float(r.get("qty_on_hand") or 0),
                 "qty_on_order":  float(r.get("qty_on_order") or 0),
+                "reorder_point": float(rp_raw) if rp_raw is not None else None,
                 "snapshot_date": r["snapshot_date"],
             }
     if skipped_excluded:
@@ -929,6 +942,7 @@ def run_reorder(dry_run: bool = False) -> int:
             "days_of_supply_remaining": days_of_supply,
             "avg_lead_time_days":      avg_lead_time,
             "reorder_threshold":       avg_lead_time + SAFETY_BUFFER_DAYS,
+            "buyer_reorder_point":     inv.get("reorder_point"),
             "supplier_id":             supplier_id,
             "supplier_risk_flag":      (
                 supplier_info.get("risk_flag") if supplier_info else None
@@ -951,6 +965,12 @@ def run_reorder(dry_run: bool = False) -> int:
         "critical": 0, "warning": 0, "normal": 0,
         "transfer": 0, "po": 0, "skipped_covered": 0,
     }
+    # Min-Qty reconciliation accumulator.  Each entry will be written to the
+    # data_quality_issues table after the recommendation loop finishes so we
+    # only pay one round-trip cost for the whole catalog.  See
+    # _RECONCILE_THRESHOLD for the relative-difference cutoff that flags a
+    # mismatch between the AI-derived reorder level and the buyer's Min Qty.
+    quality_issues: list[dict] = []
 
     for (sku_id, loc_id), summary in sorted(inventory_summary.items()):
         days_supply      = summary["days_of_supply_remaining"]
@@ -971,6 +991,38 @@ def run_reorder(dry_run: bool = False) -> int:
         safety_multiplier   = XYZ_SAFETY_MULTIPLIERS.get(xyz_class, XYZ_SAFETY_MULTIPLIERS[None])
         demand_over_coverage = avg_daily * reorder_threshold * safety_multiplier
         qty_to_order = max(0.0, demand_over_coverage - qty_on_hand - qty_on_order)
+
+        # ---- Min-Qty reconciliation -----------------------------------
+        # demand_over_coverage is the AI's preferred on-hand level at which
+        # a replenishment cycle should kick off — directly comparable to
+        # the buyer's manually-maintained Min Qty (reorder_point).  Flag
+        # significant disagreements for buyer review.  Skip when:
+        #   * Buyer never set a Min Qty (NULL) — nothing to compare.
+        #   * Both numbers are tiny (≤ 1) — relative diff explodes on noise.
+        buyer_min = summary.get("buyer_reorder_point")
+        if buyer_min is not None and (buyer_min > 1 or demand_over_coverage > 1):
+            denom = max(buyer_min, 1.0)
+            rel_diff = abs(demand_over_coverage - buyer_min) / denom
+            if rel_diff > _RECONCILE_THRESHOLD:
+                quality_issues.append({
+                    "source_table": "reorder_recommendations",
+                    "source_id":    f"{sku_id}|{loc_id}|{today.isoformat()}",
+                    "issue_type":   "reorder_threshold_mismatch",
+                    "issue_detail": (
+                        f"AI reorder level={demand_over_coverage:.2f} vs "
+                        f"buyer Min Qty={buyer_min:.2f} "
+                        f"(rel_diff={rel_diff:.2f}, "
+                        f"avg_daily={avg_daily:.3f}, "
+                        f"lead_time={avg_lead:.1f}d, xyz={xyz_class or 'NA'})"
+                    ),
+                    "field_name":   "reorder_point",
+                    "field_value":  f"{buyer_min:.2f}",
+                    # data_quality_issues.severity has a CHECK constraint
+                    # that only permits 'warning' or 'error' (see
+                    # db/migrations/003_data_quality_issues.sql).  Map our
+                    # two-tier reconciliation severity onto those.
+                    "severity":     "error" if rel_diff > 1.0 else "warning",
+                })
 
         if qty_to_order < MIN_ORDER_QTY:
             counts["skipped_covered"] += 1
@@ -1110,6 +1162,53 @@ def run_reorder(dry_run: bool = False) -> int:
         rows_written = len(recommendations)
 
     # ------------------------------------------------------------------
+    # 4b. Write Min-Qty reconciliation findings to data_quality_issues
+    # ------------------------------------------------------------------
+    # These rows give buyers a single auditable list of SKU/location pairs
+    # where their hand-tuned Min Qty diverges materially from what the
+    # forecast-driven engine would set.  Insert (not upsert) — each nightly
+    # run produces a new audit trail dated by checked_at.
+    quality_written = 0
+    if quality_issues and not dry_run:
+        log.info("-" * 60)
+        log.info(
+            "Writing %d Min-Qty reconciliation issue(s) to "
+            "data_quality_issues in batches of %d …",
+            len(quality_issues), WRITE_BATCH_SIZE,
+        )
+        for offset in range(0, len(quality_issues), WRITE_BATCH_SIZE):
+            batch = quality_issues[offset:offset + WRITE_BATCH_SIZE]
+            for attempt in range(1, _MAX_RETRIES + 1):
+                try:
+                    resp = (
+                        client_holder[0].table("data_quality_issues")
+                        .insert(batch)
+                        .execute()
+                    )
+                    quality_written += len(resp.data or [])
+                    break
+                except Exception as exc:
+                    if _is_retryable_error(exc) and attempt < _MAX_RETRIES:
+                        log.warning(
+                            "  data_quality_issues write retry %d/%d "
+                            "(offset=%d, batch=%d): %s",
+                            attempt, _MAX_RETRIES, offset, len(batch),
+                            type(exc).__name__,
+                        )
+                        time.sleep(_RETRY_DELAY)
+                        client_holder[0] = _get_fresh_client()
+                        continue
+                    log.exception(
+                        "Failed to write data_quality_issues batch at "
+                        "offset %d (size=%d).", offset, len(batch),
+                    )
+                    break  # don't fail the whole reorder run on audit-write
+        log.info("  Reconciliation issues recorded: %d", quality_written)
+    elif quality_issues and dry_run:
+        log.info("[DRY RUN] %d Min-Qty reconciliation issue(s) detected "
+                 "(not written).", len(quality_issues))
+
+    # ------------------------------------------------------------------
     # 5. Summary log
     # ------------------------------------------------------------------
     elapsed = time.monotonic() - t0
@@ -1130,6 +1229,8 @@ def run_reorder(dry_run: bool = False) -> int:
              URGENCY_WARNING_DAYS, counts["normal"])
     log.info("  Rows written to DB:            %d%s",
              rows_written, "  (DRY RUN — no writes made)" if dry_run else "")
+    log.info("  Min-Qty reconciliation issues: %d (>%.0f%% relative gap)",
+             len(quality_issues), _RECONCILE_THRESHOLD * 100)
     log.info("=" * 60)
     return 0
 

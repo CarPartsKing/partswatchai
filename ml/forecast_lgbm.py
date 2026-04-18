@@ -338,7 +338,7 @@ def _fetch_transactions_for_skus(
     """
     select = (
         "sku_id,location_id,transaction_date,"
-        "qty_sold,lost_sales_imputation,is_stockout,is_anomaly"
+        "qty_sold,lost_sales_imputation,is_stockout,is_anomaly,is_warranty"
     )
     rows: list[dict] = []
     offset = 0
@@ -353,6 +353,7 @@ def _fetch_transactions_for_skus(
                     .gte("transaction_date", cutoff)
                     .eq("is_anomaly", False)
                     .eq("is_residual_demand", False)
+                    .eq("is_warranty", False)
                     .range(offset, offset + _PAGE_SIZE - 1)
                     .execute()
                     .data

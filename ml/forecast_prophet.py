@@ -184,12 +184,16 @@ def _fetch_a_class_skus(client: Any) -> list[dict]:
 def _fetch_transactions(client: Any, cutoff: str) -> list[dict]:
     select = (
         "sku_id,location_id,transaction_date,"
-        "qty_sold,lost_sales_imputation,is_stockout,is_anomaly"
+        "qty_sold,lost_sales_imputation,is_stockout,is_anomaly,is_warranty"
     )
     return _fetch_chunked_by_date(
         client, "sales_transactions", select,
         date_col="transaction_date", since=cutoff,
-        extra_eq={"is_anomaly": False, "is_residual_demand": False},
+        extra_eq={
+            "is_anomaly": False,
+            "is_residual_demand": False,
+            "is_warranty": False,
+        },
     )
 
 

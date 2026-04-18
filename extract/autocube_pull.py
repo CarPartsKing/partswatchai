@@ -174,12 +174,34 @@ _MEASURES_BLOCK = """\
     [Measures].[Gross Profit],
     [Measures].[Gross Profit %]"""
 
+# ---------------------------------------------------------------------------
+# Sales Detail flag dimensions captured alongside the core CROSSJOIN.
+# Each member is 'Y' or 'N' (verified empirically 2026-04-18 against the
+# AutoCube_DTR_23160 catalog).  Adding them to the CROSSJOIN expands every
+# returned row by the cardinality of the flag (≤ 2), so worst-case row count
+# grows by 16x.  In practice each invoice line has exactly ONE non-NULL
+# combination of flags so NON EMPTY collapses the result back to roughly the
+# original cardinality.
+#
+#   Warranty Flag         — warranty-replacement sales (excluded from forecast)
+#   Backorder Flag        — backorder lines (subset of normal demand)
+#   Core Flag             — core return lines (negative qty, separate stream)
+#   Price Override Flag   — manually-priced lines (kept; useful for margin work)
+# ---------------------------------------------------------------------------
+_FLAG_AXES = (
+    "    [Sales Detail].[Warranty Flag].[Warranty Flag].MEMBERS,\n"
+    "    [Sales Detail].[Backorder Flag].[Backorder Flag].MEMBERS,\n"
+    "    [Sales Detail].[Core Flag].[Core Flag].MEMBERS,\n"
+    "    [Sales Detail].[Price Override Flag].[Price Override Flag].MEMBERS"
+)
+
 MDX_FULL_SALES = (
     "SELECT\n  NON EMPTY {{\n" + _MEASURES_BLOCK + "\n  }} ON COLUMNS,\n"
     "  NON EMPTY CROSSJOIN(\n"
     "    [Sales Date].[Invoice Date].[Inv Date].MEMBERS,\n"
     "    [Product].[Prod Code].[Prod Code].MEMBERS,\n"
-    "    [Location].[Loc].[Loc].MEMBERS\n"
+    "    [Location].[Loc].[Loc].MEMBERS,\n"
+    + _FLAG_AXES + "\n"
     "  ) ON ROWS\n"
     "FROM [{cube}]\n"
 )
@@ -189,7 +211,8 @@ MDX_INCREMENTAL_DAY = (
     "  NON EMPTY CROSSJOIN(\n"
     "    {{ [Sales Date].[Invoice Date].[Inv Date].&[{date_key}] }},\n"
     "    [Product].[Prod Code].[Prod Code].MEMBERS,\n"
-    "    [Location].[Loc].[Loc].MEMBERS\n"
+    "    [Location].[Loc].[Loc].MEMBERS,\n"
+    + _FLAG_AXES + "\n"
     "  ) ON ROWS\n"
     "FROM [{cube}]\n"
 )
@@ -200,7 +223,8 @@ MDX_MONTHLY_RANGE = (
     "    {{ [Sales Date].[Invoice Date].[Inv Date].&[{start_key}]"
     " : [Sales Date].[Invoice Date].[Inv Date].&[{end_key}] }},\n"
     "    [Product].[Prod Code].[Prod Code].MEMBERS,\n"
-    "    [Location].[Loc].[Loc].MEMBERS\n"
+    "    [Location].[Loc].[Loc].MEMBERS,\n"
+    + _FLAG_AXES + "\n"
     "  ) ON ROWS\n"
     "FROM [{cube}]\n"
 )
@@ -949,6 +973,11 @@ _NUMERIC_FIELDS = frozenset({
 _DB_COLUMNS = frozenset({
     "transaction_id", "sku_id", "location_id", "transaction_date",
     "qty_sold", "unit_price", "total_revenue",
+    # Sales Detail flag dimensions added by migration 014.  Without these
+    # in the allow-list the booleans are silently dropped before upsert,
+    # leaving every row at the column default (FALSE) and rendering the
+    # forecast/dead-stock `is_warranty=False` exclusions a no-op.
+    "is_warranty", "is_backorder", "is_core_return", "is_price_override",
 })
 
 _GENERATED_COLS = frozenset({
@@ -1072,6 +1101,18 @@ def _map_and_clean_rows(
             if field in mapped:
                 mapped[field] = clean_numeric(mapped[field])
 
+        # Sales Detail flag dimensions arrive as 'Y' / 'N' strings.  Coerce
+        # to booleans so the rows match the schema's BOOLEAN columns.  Any
+        # value other than 'Y' (case-insensitive) becomes False — covers
+        # 'N', None, and unexpected blanks safely.
+        for flag_field in ("is_warranty", "is_backorder",
+                           "is_core_return", "is_price_override"):
+            if flag_field in mapped:
+                v = mapped[flag_field]
+                mapped[flag_field] = (
+                    isinstance(v, str) and v.strip().upper() == "Y"
+                )
+
         if "location_id" in mapped:
             mapped["location_id"] = _extract_location_code(mapped["location_id"])
 
@@ -1100,6 +1141,14 @@ def _deduplicate_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     This handles the case where the cube returns multiple invoice lines
     for the same SKU × location × date combination.
     """
+    # Sales Detail flag dimensions are added to the MDX CROSSJOIN, so a
+    # single transaction can appear as multiple rows that differ only in
+    # flag values.  Use OR semantics when collapsing them so that a TRUE
+    # warranty / backorder / core-return / price-override on ANY contributing
+    # line propagates to the merged record — never silently lost.
+    _BOOL_OR_FIELDS = (
+        "is_warranty", "is_backorder", "is_core_return", "is_price_override",
+    )
     groups: dict[str, dict[str, Any]] = {}
     for row in rows:
         tid = row.get("transaction_id", "")
@@ -1109,6 +1158,9 @@ def _deduplicate_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
             existing["total_revenue"] = (existing.get("total_revenue") or 0) + (row.get("total_revenue") or 0)
             if row.get("unit_price") is not None:
                 existing["unit_price"] = row["unit_price"]
+            for f in _BOOL_OR_FIELDS:
+                if row.get(f):
+                    existing[f] = True
         else:
             groups[tid] = dict(row)
     return list(groups.values())

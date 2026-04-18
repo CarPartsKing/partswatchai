@@ -13,7 +13,11 @@
     "cost_per_unit":    "[Measures].[Unit Cost]",
     "ext_cost":         "[Measures].[Ext Cost]",
     "gross_profit":     "[Measures].[Gross Profit]",
-    "gross_profit_pct": "[Measures].[Gross Profit %]"
+    "gross_profit_pct": "[Measures].[Gross Profit %]",
+    "is_warranty":       "[Sales Detail].[Warranty Flag].[Warranty Flag]",
+    "is_backorder":      "[Sales Detail].[Backorder Flag].[Backorder Flag]",
+    "is_core_return":    "[Sales Detail].[Core Flag].[Core Flag]",
+    "is_price_override": "[Sales Detail].[Price Override Flag].[Price Override Flag]"
   },
   "supplemental_dimensions": {
     "product_line":     "[Product].[Prod Line].[Prod Line]",

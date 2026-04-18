@@ -101,7 +101,8 @@ SELECT
     [Measures].[Max Qty],
     [Measures].[Qty On Order],
     [Measures].[Ext Cost On Hand],
-    [Measures].[Unit Cost]
+    [Measures].[Unit Cost on Hand],
+    [Measures].[Cost]
   }} ON COLUMNS,
   NON EMPTY
     [Product].[Prod Code].[Prod Code].MEMBERS
@@ -109,6 +110,22 @@ SELECT
 FROM [Product]
 WHERE ([Location].[Loc].&[{loc_num}])
 """
+# ---------------------------------------------------------------------------
+# Cost-measure selection — empirical findings 2026-04-18:
+#   [Unit Cost]            — almost always NULL across the catalog (deprecated
+#                            or not populated in this Autocube deployment).
+#   [Unit Cost on Hand]    — true per-unit replacement cost of inventory
+#                            CURRENTLY on hand.  NULL when qty_on_hand = 0.
+#   [Cost]                 — catalog / master per-unit cost.  Populated for
+#                            essentially every active SKU regardless of stock
+#                            level.  Used as fallback when on-hand cost is
+#                            absent (e.g. fully sold-down SKUs we still want
+#                            to value historically).
+#   [Ext Cost On Hand]     — extended (qty × cost) on hand value.  Used as
+#                            secondary derivation when both unit-cost
+#                            measures are absent but on-hand qty > 0.
+# Resolution order in extraction: UCoH → Cost → ExtCoH/qty.
+# ---------------------------------------------------------------------------
 
 MDX_TRANSFERS = """\
 SELECT
@@ -393,15 +410,20 @@ def run_inventory_extract(dry_run: bool = False) -> int:
                 skipped_unparseable += 1
                 continue
 
-            qty_on_hand  = clean_numeric(r.get("[Measures].[On Hand Qty]")) or 0
-            qty_on_order = clean_numeric(r.get("[Measures].[Qty On Order]")) or 0
-            unit_cost    = clean_numeric(r.get("[Measures].[Unit Cost]"))
-            ext_cost     = clean_numeric(r.get("[Measures].[Ext Cost On Hand]"))
+            qty_on_hand   = clean_numeric(r.get("[Measures].[On Hand Qty]")) or 0
+            qty_on_order  = clean_numeric(r.get("[Measures].[Qty On Order]")) or 0
+            unit_cost_oh  = clean_numeric(r.get("[Measures].[Unit Cost on Hand]"))
+            catalog_cost  = clean_numeric(r.get("[Measures].[Cost]"))
+            ext_cost      = clean_numeric(r.get("[Measures].[Ext Cost On Hand]"))
 
-            # Fallback: if [Unit Cost] is null/zero but we have non-zero
-            # Ext Cost On Hand and on-hand qty, derive per-unit cost.  The
-            # cube occasionally returns Unit Cost=NULL on slow movers but
-            # still carries an Ext Cost On Hand from the most recent receipt.
+            # Cost resolution order:
+            #   1. Unit Cost on Hand  — true per-unit cost of CURRENT stock
+            #   2. Cost               — catalog/master cost (works for SKUs
+            #                           with qty=0 too)
+            #   3. Ext Cost On Hand / qty — derived (last-resort fallback)
+            unit_cost = unit_cost_oh
+            if (not unit_cost or unit_cost <= 0) and catalog_cost and catalog_cost > 0:
+                unit_cost = catalog_cost
             if (not unit_cost or unit_cost <= 0) and ext_cost and qty_on_hand > 0:
                 unit_cost = round(ext_cost / qty_on_hand, 4)
 

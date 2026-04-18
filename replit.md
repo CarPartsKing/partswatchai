@@ -395,6 +395,47 @@ On NixOS the linker path is not automatically configured. Two things were done t
 
 If the nix store hash changes (after a NixOS update), re-run the patchelf command and update `_GOMP_DIR` in `ml/forecast_lgbm.py`.
 
+## Data Accuracy Audit Findings (2026-04-18)
+
+### Cube cost measures — `[Measures].[Unit Cost]` is unusable
+Empirical finding against `AutoCube_DTR_23160`: `[Measures].[Unit Cost]` returns
+NULL for nearly every Product-cube SKU. Real costs live in:
+- `[Unit Cost on Hand]` — true per-unit cost of stock currently on hand (NULL when qty=0)
+- `[Cost]` — catalog/master cost, populated for essentially every active SKU
+- `[Ext Cost On Hand]` — extended on-hand value, used as last-resort `/qty` derivation
+
+`extract/autocube_product_pull.py` resolves cost in that exact order. Same
+substitution applies to the Sales Detail cube as well — to be revisited.
+
+### Sales Detail flag dimensions
+The Sales Detail cube exposes per-line flag dimensions (`Warranty Flag`,
+`Backorder Flag`, `Core Flag`, `Price Override Flag`) with members `'Y'` / `'N'`
+(Price Override returns `'-'` instead of `'N'` for the not-set case — boolean
+coercion treats anything ≠ `'Y'` as False). They're now added to the MDX
+CROSSJOIN in `extract/autocube_pull.py` (`MDX_FULL_SALES`,
+`MDX_INCREMENTAL_DAY`, `MDX_MONTHLY_RANGE`) and stored on
+`sales_transactions` (migration 014). Forecast and dead-stock pipelines
+exclude `is_warranty=True` rows alongside `is_anomaly` and `is_residual_demand`.
+
+**Important:** when adding new mapped fields to `config/autocube_column_map.json`,
+also add the destination column to `_DB_COLUMNS` in `extract/autocube_pull.py`,
+or the field will be silently dropped before upsert.
+
+### No real PO source in this AutoCube deployment
+Catalog only contains 3 cubes: `Product`, `Sales Detail`, `Sales Summary`.
+No PO / Purchase Order cube exists. `purchase_orders` table is sample data
+(20 rows, sequential numbering, identical timestamps). No extraction job
+can be built until a real source is provisioned.
+
+### Min-Qty reconciliation (engine/reorder.py)
+After computing `demand_over_coverage` (the AI-derived ideal on-hand level
+that should trigger a reorder cycle), `engine/reorder.py` compares it to the
+buyer-set `inventory_snapshots.reorder_point`. If `|rel_diff| > 50%`
+(`_RECONCILE_THRESHOLD = 0.5`), the discrepancy is written to
+`data_quality_issues` with `issue_type='reorder_threshold_mismatch'` and
+severity mapped to `'error'` (>100% gap) or `'warning'` (the CHECK constraint
+in migration 003 only permits those two values).
+
 ## Coding Standards
 - Full docstrings on every function
 - try/except with logging on all external calls

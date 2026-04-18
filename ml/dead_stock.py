@@ -471,11 +471,15 @@ def _fetch_transactions_for_sku_batch(
         page: list[dict] | None = None
         for attempt in range(1, _MAX_RETRIES + 1):
             try:
+                # Exclude warranty replacements — they're not real demand and
+                # would skew "last sold" toward a recent date for SKUs that
+                # haven't actually sold (causing missed dead-stock detection).
                 page = (
                     client_holder[0].table("sales_transactions")
                     .select(select)
                     .in_("sku_id", sku_batch)
                     .gte("transaction_date", cutoff)
+                    .eq("is_warranty", False)
                     .range(offset, offset + PAGE_SIZE - 1)
                     .execute()
                     .data

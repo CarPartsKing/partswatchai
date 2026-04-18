@@ -294,16 +294,78 @@ def _fetch_sku_master(client_holder: list) -> dict[str, dict]:
 
 
 def _fetch_unit_costs(client_holder: list) -> dict[str, float]:
-    """sku_id → most recent unit_cost from received purchase orders."""
-    rows = _paginate(client_holder, "purchase_orders",
-                     "sku_id,unit_cost,actual_delivery_date",
-                     filters={"status": "received"},
-                     order_col="actual_delivery_date", order_desc=True)
+    """sku_id → per-unit cost.
+
+    Resolution order (first non-null wins):
+      1. ``sku_master.unit_cost`` — populated by the Product cube extract
+         (extract/autocube_product_pull.py); reflects current replacement
+         cost on a per-SKU basis.
+      2. Most recent ``purchase_orders.unit_cost`` for received POs —
+         fallback for SKUs that have never appeared in a Product cube
+         inventory snapshot (e.g. brand-new SKUs).
+    Anything still missing falls through to ``DEFAULT_UNIT_COST`` at the
+    scoring call site.
+
+    The ``sku_master.unit_cost`` column is added by migration 021; if the
+    migration has not been applied, the lookup degrades gracefully to
+    PO-only behaviour (matches the prior implementation).
+    """
     costs: dict[str, float] = {}
-    for r in rows:
+
+    # ---- 1. sku_master.unit_cost ---------------------------------------
+    try:
+        master_rows = _paginate(
+            client_holder, "sku_master", "sku_id,unit_cost",
+        )
+    except Exception as exc:
+        # Treat ONLY a missing-unit_cost-column error as a soft failure
+        # (migration 021 not yet applied).  We require both "unit_cost"
+        # and a missing-column signal so unrelated PostgREST errors that
+        # happen to mention the word "column" still surface loudly.
+        msg = str(exc).lower()
+        is_missing_col = (
+            "unit_cost" in msg
+            and ("does not exist" in msg or "could not find" in msg
+                 or "schema cache" in msg)
+        )
+        if is_missing_col:
+            log.warning(
+                "sku_master.unit_cost missing — apply migration 021 to "
+                "use Product-cube costs in dead_stock.  Falling back to "
+                "purchase-order costs only."
+            )
+            master_rows = []
+        else:
+            raise
+
+    for r in master_rows:
+        sid = r.get("sku_id")
+        c   = r.get("unit_cost")
+        if sid and c is not None and float(c) > 0:
+            costs[sid] = float(c)
+
+    master_hits = len(costs)
+
+    # ---- 2. purchase_orders fallback for SKUs not covered above --------
+    po_rows = _paginate(
+        client_holder, "purchase_orders",
+        "sku_id,unit_cost,actual_delivery_date",
+        filters={"status": "received"},
+        order_col="actual_delivery_date", order_desc=True,
+    )
+    for r in po_rows:
         sid = r.get("sku_id")
         if sid and sid not in costs and r.get("unit_cost") is not None:
-            costs[sid] = float(r["unit_cost"])
+            try:
+                costs[sid] = float(r["unit_cost"])
+            except (TypeError, ValueError):
+                continue
+
+    log.info(
+        "  Unit cost sources: sku_master=%d  +  purchase_orders fallback=%d  "
+        "→ total=%d",
+        master_hits, len(costs) - master_hits, len(costs),
+    )
     return costs
 
 

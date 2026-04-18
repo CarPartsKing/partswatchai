@@ -100,7 +100,8 @@ SELECT
     [Measures].[Min Qty],
     [Measures].[Max Qty],
     [Measures].[Qty On Order],
-    [Measures].[Ext Cost On Hand]
+    [Measures].[Ext Cost On Hand],
+    [Measures].[Unit Cost]
   }} ON COLUMNS,
   NON EMPTY
     [Product].[Prod Code].[Prod Code].MEMBERS
@@ -391,14 +392,28 @@ def run_inventory_extract(dry_run: bool = False) -> int:
             if not sku:
                 skipped_unparseable += 1
                 continue
+
+            qty_on_hand  = clean_numeric(r.get("[Measures].[On Hand Qty]")) or 0
+            qty_on_order = clean_numeric(r.get("[Measures].[Qty On Order]")) or 0
+            unit_cost    = clean_numeric(r.get("[Measures].[Unit Cost]"))
+            ext_cost     = clean_numeric(r.get("[Measures].[Ext Cost On Hand]"))
+
+            # Fallback: if [Unit Cost] is null/zero but we have non-zero
+            # Ext Cost On Hand and on-hand qty, derive per-unit cost.  The
+            # cube occasionally returns Unit Cost=NULL on slow movers but
+            # still carries an Ext Cost On Hand from the most recent receipt.
+            if (not unit_cost or unit_cost <= 0) and ext_cost and qty_on_hand > 0:
+                unit_cost = round(ext_cost / qty_on_hand, 4)
+
             cleaned.append({
                 "sku_id":        sku,
                 "location_id":   location_id,
                 "snapshot_date": today.isoformat(),
-                "qty_on_hand":   clean_numeric(r.get("[Measures].[On Hand Qty]")) or 0,
-                "qty_on_order":  clean_numeric(r.get("[Measures].[Qty On Order]")) or 0,
+                "qty_on_hand":   qty_on_hand,
+                "qty_on_order":  qty_on_order,
                 "reorder_point": clean_numeric(r.get("[Measures].[Min Qty]")),
                 "reorder_qty":   clean_numeric(r.get("[Measures].[Max Qty]")),
+                "unit_cost":     round(unit_cost, 4) if unit_cost is not None else None,
             })
             loc_cleaned += 1
 
@@ -454,6 +469,53 @@ def run_inventory_extract(dry_run: bool = False) -> int:
         except Exception:
             log.exception("Upsert failed at batch offset %d.", i)
             raise
+
+    # ----------------------------------------------------------------------
+    # Propagate the latest non-null per-unit cost up to sku_master.unit_cost
+    # so ml/dead_stock.py can read a single global value rather than scanning
+    # snapshots per SKU.  We keep the LAST observed non-null cost per SKU
+    # across all locations processed this run (locations are iterated in a
+    # stable order, so the last one wins deterministically).
+    # ----------------------------------------------------------------------
+    sku_cost: dict[str, float] = {}
+    for r in cleaned:
+        c = r.get("unit_cost")
+        if c is None or c <= 0:
+            continue
+        sku_cost[r["sku_id"]] = float(c)
+
+    if sku_cost:
+        cost_updates = [
+            {"sku_id": sid, "unit_cost": round(c, 4)}
+            for sid, c in sku_cost.items()
+        ]
+        log.info(
+            "Propagating unit_cost into sku_master for %d SKU(s) "
+            "(%d snapshot row(s) had no cost) …",
+            len(cost_updates), len(cleaned) - sum(
+                1 for r in cleaned
+                if r.get("unit_cost") and r["unit_cost"] > 0
+            ),
+        )
+        cost_loaded = 0
+        for i in range(0, len(cost_updates), _BATCH_SIZE):
+            batch = cost_updates[i:i + _BATCH_SIZE]
+            try:
+                db.table("sku_master").upsert(
+                    batch, on_conflict="sku_id"
+                ).execute()
+                cost_loaded += len(batch)
+            except Exception:
+                log.exception(
+                    "sku_master.unit_cost upsert failed at batch offset %d.", i,
+                )
+                raise
+        log.info("sku_master.unit_cost updated for %d SKU(s).", cost_loaded)
+    else:
+        log.warning(
+            "No non-null unit_cost values present in this extract — "
+            "sku_master.unit_cost was not updated.",
+        )
 
     elapsed = time.perf_counter() - t0
     log.info("Loaded %d inventory snapshots in %.1fs.", loaded, elapsed)

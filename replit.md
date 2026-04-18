@@ -232,8 +232,9 @@ partswatch-ai/
 
 ## Dashboard
 - **URL**: served from port 5000 via `python dashboard/server.py` (workflow: "Start application")
-- **Endpoint**: `GET /api/dashboard` — returns all 7 sections as JSON in ~1s
-- **Sections**: Weather (freeze warnings), Alert Summary, Critical Alerts, Top Reorder Recommendations, Supplier Health, Inventory Health, Forecast Accuracy, Location Tiers
+- **Endpoint**: `GET /api/dashboard` — returns all sections as JSON, parallelized via ThreadPoolExecutor
+- **Sections**: Network KPIs, Weather (freeze warnings), Alert Summary, Critical Alerts, Top Reorder Recommendations, **Dead Stock — Capital at Risk**, Supplier Health, Inventory Health, Inter-Location Transfers, Forecast Accuracy, Top SKUs, Anomaly Summary, Location Tiers, Pipeline Status
+- **Dead Stock panel** (added 2026-04-18): KPI strip (capital_at_risk / liquidate_count+value / markdown_count+value / total_positions in red/amber), top-10 LIQUIDATE candidates by inventory value, "Export Full Liquidation List" button → `GET /api/dead-stock/export.csv`. Backed by `dead_stock_recommendations` table (migration 023) which `ml/dead_stock.py` populates per-day with normalized action codes (WRITEOFF/RETURN/MARKDOWN/LIQUIDATE). CSV output has CWE-1236 formula-injection guard.
 - **Refresh**: JS auto-refreshes every 5 minutes with countdown; manual refresh button
 - **Status**: Green dot = live, amber = loading, red = offline (retries in 30s)
 

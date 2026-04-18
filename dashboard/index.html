@@ -510,6 +510,22 @@
     <div class="card-body" style="padding:0" id="reorder-body"><div class="skeleton" style="height:100px;margin:16px;border-radius:6px"></div></div>
   </div>
 
+  <div class="section card" id="dead-stock-section">
+    <div class="card-header">
+      <span class="card-title">Dead Stock &mdash; Capital at Risk</span>
+      <span class="card-updated" id="dead-stock-updated"></span>
+    </div>
+    <div id="dead-stock-kpis"></div>
+    <div class="card-body" style="padding:0" id="dead-stock-body"><div class="skeleton" style="height:120px;margin:16px;border-radius:6px"></div></div>
+    <div style="padding:12px 14px;border-top:1px solid var(--border);background:var(--surface2);text-align:right">
+      <button id="dead-stock-export-btn"
+              onclick="exportLiquidation()"
+              style="background:var(--critical);color:#fff;border:0;border-radius:4px;padding:8px 14px;font-size:12px;font-weight:600;cursor:pointer;letter-spacing:0.3px">
+        Export Full Liquidation List
+      </button>
+    </div>
+  </div>
+
   <div class="section card" id="transfers-section">
     <div class="card-header">
       <span class="card-title">Inter-Location Transfers (Last 30 Days)</span>
@@ -857,6 +873,67 @@ function renderReorder(payload) {
     '<table class="data-table"><thead><tr><th>Urgency</th><th>SKU</th><th>Location</th><th>Qty</th><th>Supply</th><th>Type</th></tr></thead><tbody>' + rows + '</tbody></table>';
 }
 
+function renderDeadStock(payload) {
+  document.getElementById('dead-stock-updated').textContent = 'Updated ' + nowStr();
+
+  var kpis  = (payload && payload.kpis) || {};
+  var top10 = (payload && payload.top10) || [];
+
+  // ---- KPI strip (red/amber to match critical alerts) ----
+  var kpisEl = document.getElementById('dead-stock-kpis');
+  if (kpisEl) {
+    if (!kpis.total_positions) {
+      kpisEl.innerHTML = '';
+    } else {
+      kpisEl.innerHTML =
+        '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:1px;background:var(--border);border-bottom:1px solid var(--border)">' +
+          '<div style="background:var(--surface);padding:14px 16px"><div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:0.5px">Total Capital at Risk</div><div style="font-size:28px;font-weight:700;color:var(--critical)">' + fmtMoney(kpis.capital_at_risk) + '</div></div>' +
+          '<div style="background:var(--surface);padding:14px 16px"><div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:0.5px">Liquidate Candidates</div><div style="font-size:22px;font-weight:600;color:var(--critical)">' + fmtNum(kpis.liquidate_count) + '</div><div style="font-size:11px;color:var(--muted);margin-top:2px">' + fmtMoney(kpis.liquidate_value) + '</div></div>' +
+          '<div style="background:var(--surface);padding:14px 16px"><div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:0.5px">Markdown Candidates</div><div style="font-size:22px;font-weight:600;color:var(--amber)">' + fmtNum(kpis.markdown_count) + '</div><div style="font-size:11px;color:var(--muted);margin-top:2px">' + fmtMoney(kpis.markdown_value) + '</div></div>' +
+          '<div style="background:var(--surface);padding:14px 16px"><div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:0.5px">Total Positions</div><div style="font-size:22px;font-weight:600;color:var(--text)">' + fmtNum(kpis.total_positions) + '</div></div>' +
+        '</div>';
+    }
+  }
+
+  // ---- Top 10 LIQUIDATE table ----
+  if (!top10.length) {
+    var emptyMsg = payload && payload.report_date
+      ? 'No liquidation candidates for ' + escHtml(payload.report_date) + '.'
+      : 'No liquidation candidates.';
+    document.getElementById('dead-stock-body').innerHTML = '<div class="card-body"><div class="empty-state"><div class="icon">&#10003;</div>' + emptyMsg + '</div></div>';
+    return;
+  }
+  var rows = top10.map(function(r) {
+    var act = (r.action || '').toUpperCase();
+    var ab  = act === 'WRITEOFF' ? badge('critical', act)
+            : act === 'RETURN'   ? badge('high',     act)
+            : act === 'MARKDOWN' ? badge('medium',   act)
+                                 : badge('critical', act || 'LIQUIDATE');
+    var locLabel = r.location_display || r.location_id;
+    var days = r.days_since_sale != null ? fmtNum(r.days_since_sale) + 'd' : '\u2014';
+    return '<tr>' +
+      '<td><span class="sku-id">' + escHtml(r.sku_id) + '</span></td>' +
+      '<td><span class="loc-id">' + escHtml(locLabel) + '</span></td>' +
+      '<td style="text-align:right;font-weight:600;color:var(--critical)">' + fmtMoney(r.total_inv_value) + '</td>' +
+      '<td style="text-align:right">' + fmtNum(r.qty_on_hand) + '</td>' +
+      '<td style="text-align:right">' + days + '</td>' +
+      '<td>' + ab + '</td></tr>';
+  }).join('');
+  document.getElementById('dead-stock-body').innerHTML =
+    '<table class="data-table"><thead><tr><th>SKU</th><th>Location</th><th style="text-align:right">Inv Value</th><th style="text-align:right">Qty</th><th style="text-align:right">Days Idle</th><th>Action</th></tr></thead><tbody>' + rows + '</tbody></table>';
+}
+
+function exportLiquidation() {
+  var btn = document.getElementById('dead-stock-export-btn');
+  var orig = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = 'Preparing CSV…';
+  // Plain navigation triggers the browser's download flow; the endpoint
+  // sets Content-Disposition: attachment so this never replaces the page.
+  window.location.href = '/api/dead-stock/export.csv';
+  setTimeout(function() { btn.disabled = false; btn.textContent = orig; }, 2500);
+}
+
 function renderTransfers(data) {
   document.getElementById('transfers-updated').textContent = 'Updated ' + nowStr();
   var body = document.getElementById('transfers-body');
@@ -1136,6 +1213,7 @@ async function loadData() {
     if (data.alerts)               renderAlertSummary(data.alerts.summary || {});
     if (data.alerts)               renderAlerts(data.alerts.items || []);
     if (data.reorder != null)      renderReorder(data.reorder);
+    if (data.dead_stock != null)   renderDeadStock(data.dead_stock);
     if (data.transfers != null)    renderTransfers(data.transfers);
     if (data.supplier_detail)      renderSupplierDetail(data.supplier_detail);
     if (data.inventory_health)     renderInventoryHealth(data.inventory_health);

@@ -161,6 +161,18 @@ ACTION_MARKDOWN  = "Markdown — price reduction"
 ACTION_WRITEOFF  = "Write off"
 ACTION_LIQUIDATE = "Liquidate / delist"
 
+# Normalized codes persisted to dead_stock_recommendations.action.  The human
+# strings above stay the canonical labels for log/console output, but the DB
+# stores the codes so the dashboard, CSV export, and assistant context all
+# branch on a stable vocabulary instead of doing fragile string-matching on
+# free-form labels (architect-flagged inconsistency).
+_ACTION_CODE: dict[str, str] = {
+    ACTION_WRITEOFF:  "WRITEOFF",
+    ACTION_RETURN:    "RETURN",
+    ACTION_MARKDOWN:  "MARKDOWN",
+    ACTION_LIQUIDATE: "LIQUIDATE",
+}
+
 # ---------------------------------------------------------------------------
 # Data classes
 # ---------------------------------------------------------------------------
@@ -780,6 +792,79 @@ def _cls_badge(cls: str) -> str:
     }.get(cls, cls)
 
 
+def _persist_recommendations(
+    client_holder: list,
+    scored: list[ScoredPosition],
+    report_date: date,
+    dry_run: bool,
+) -> None:
+    """Upsert all LIQUIDATE+MARKDOWN positions to dead_stock_recommendations.
+
+    Idempotent: primary key (report_date, sku_id, location_id) means re-runs
+    overwrite the same day's rows in place.  MONITOR/HEALTHY are intentionally
+    skipped — only actionable rows are persisted.
+    """
+    actionable = [p for p in scored
+                  if p.classification in (CLASS_LIQUIDATE, CLASS_MARKDOWN)]
+
+    if dry_run:
+        log.info("DRY RUN — would upsert %d row(s) to dead_stock_recommendations",
+                 len(actionable))
+        return
+
+    # Idempotency: a same-day rerun where a SKU's classification CHANGES
+    # (e.g. moved from LIQUIDATE → MONITOR after fresh sales) would otherwise
+    # leave the stale row in place — upsert overwrites matching keys but
+    # never deletes vanished ones.  Wipe the day's rows up front so the
+    # write reflects exactly the current scoring run.  Same crash-safety
+    # tradeoff as elsewhere: process death between delete and upsert leaves
+    # the day empty until the next run; acceptable here because dead_stock
+    # is read-only by the dashboard/assistant (no downstream pipeline
+    # consumes this table) and the next nightly run self-heals.
+    try:
+        client_holder[0].table("dead_stock_recommendations") \
+            .delete() \
+            .eq("report_date", report_date.isoformat()) \
+            .execute()
+    except Exception:
+        log.exception("Pre-upsert wipe of dead_stock_recommendations[%s] "
+                      "failed — proceeding; stale rows may persist.",
+                      report_date.isoformat())
+
+    if not actionable:
+        log.info("No LIQUIDATE/MARKDOWN positions to persist.")
+        return
+
+    rows = [{
+        "report_date":      report_date.isoformat(),
+        "sku_id":           p.sku_id,
+        "location_id":      p.location_id,
+        "classification":   p.classification,
+        "action":           _ACTION_CODE.get(p.action, p.action),
+        "dead_stock_score": round(p.dead_stock_score, 2),
+        "total_inv_value":  round(p.total_inv_value, 2),
+        "qty_on_hand":      p.qty_on_hand,
+        "unit_cost":        round(p.unit_cost, 4) if p.unit_cost else None,
+        "days_since_sale":  p.days_since_sale,
+        "sale_frequency":   round(p.sale_frequency, 2),
+        "abc_class":        p.abc_class,
+        "supplier_id":      p.supplier_id,
+        "part_category":    p.part_category or None,
+        "sub_category":     p.sub_category or None,
+    } for p in actionable]
+
+    BATCH = 500
+    for i in range(0, len(rows), BATCH):
+        _upsert_with_retry(
+            client_holder,
+            "dead_stock_recommendations",
+            rows[i : i + BATCH],
+            on_conflict="report_date,sku_id,location_id",
+        )
+    log.info("Persisted %d row(s) to dead_stock_recommendations for %s.",
+             len(rows), report_date.isoformat())
+
+
 def _render_liquidation_table(positions: list[ScoredPosition], top_n: int = 20) -> None:
     """Print the ranked liquidation priority table to console."""
     candidates = [p for p in positions if p.classification in (CLASS_LIQUIDATE, CLASS_MARKDOWN)]
@@ -1033,6 +1118,17 @@ def run_dead_stock(
     except Exception:
         log.exception("is_dead_stock update failed (non-fatal).")
         set_true = set_false = 0
+
+    # ── Persist LIQUIDATE+MARKDOWN positions to DB ────────────────────
+    # Powers the dashboard "Dead Stock" panel and the assistant's
+    # dead-stock context section.  MONITOR/HEALTHY are skipped to keep
+    # the table size proportional to the actionable workload (~175k rows
+    # vs ~3M).  Per-day grain (report_date) so historical trending is
+    # possible without overwriting prior reports.
+    try:
+        _persist_recommendations(client_holder, scored, today, dry_run)
+    except Exception:
+        log.exception("dead_stock_recommendations persistence failed (non-fatal).")
 
     # ── Build and render summary ──────────────────────────────────────
     elapsed_s = time.monotonic() - t0

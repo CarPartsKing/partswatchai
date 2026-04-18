@@ -592,6 +592,75 @@ def _section_location_performance(client: Any, today: date) -> str:
 # Section 8 — Basket rules (co-purchase intelligence)
 # ---------------------------------------------------------------------------
 
+def _section_dead_stock(client: Any, today: date) -> str:
+    """Dead-stock summary for the most recent dead_stock pipeline run.
+
+    Surfaces the headline capital-at-risk numbers and the top liquidation
+    candidate so the assistant can answer questions like "what's our worst
+    dead stock?" or "how much capital is tied up?" without re-running ML.
+    """
+    # Latest report date (a missed nightly run shouldn't blank the section).
+    try:
+        latest = (
+            client.table("dead_stock_recommendations")
+            .select("report_date")
+            .order("report_date", desc=True)
+            .limit(1)
+            .execute()
+            .data or []
+        )
+    except Exception:
+        latest = []
+    if not latest:
+        return "[DEAD STOCK]\nNo dead-stock report available yet.\n"
+    report_date = latest[0]["report_date"]
+
+    rows = _paginate(
+        client, "dead_stock_recommendations",
+        "sku_id,location_id,classification,total_inv_value,days_since_sale,action",
+        filters={"report_date": report_date},
+    )
+    if not rows:
+        return f"[DEAD STOCK — {report_date}]\nNo LIQUIDATE/MARKDOWN positions.\n"
+
+    liquidate = [r for r in rows if r.get("classification") == "LIQUIDATE"]
+    markdown  = [r for r in rows if r.get("classification") == "MARKDOWN"]
+    total_val = sum(float(r.get("total_inv_value") or 0) for r in rows)
+    liq_val   = sum(float(r.get("total_inv_value") or 0) for r in liquidate)
+    md_val    = sum(float(r.get("total_inv_value") or 0) for r in markdown)
+
+    distinct_skus = len({r.get("sku_id") for r in rows if r.get("sku_id")})
+
+    top_liq = max(
+        liquidate,
+        key=lambda r: float(r.get("total_inv_value") or 0),
+        default=None,
+    )
+
+    lines = [f"[DEAD STOCK — {report_date}]"]
+    lines.append(
+        f"  ${total_val/1_000_000:.1f}M capital at risk across "
+        f"{distinct_skus:,} SKU positions ({len(rows):,} SKU×location pairs)."
+    )
+    lines.append(
+        f"  LIQUIDATE: {len(liquidate):,} positions  (${liq_val/1_000_000:.1f}M)"
+    )
+    lines.append(
+        f"  MARKDOWN:  {len(markdown):,} positions  (${md_val/1_000_000:.1f}M)"
+    )
+    if top_liq:
+        days = top_liq.get("days_since_sale")
+        days_str = f"{int(days)}d idle" if days is not None else "idle"
+        lines.append(
+            f"  Top liquidation candidate: {top_liq.get('sku_id')} "
+            f"@ {_loc_display(top_liq.get('location_id', ''))}  "
+            f"${float(top_liq.get('total_inv_value') or 0):,.0f}  "
+            f"{days_str}  → {top_liq.get('action', 'LIQUIDATE')}"
+        )
+
+    return "\n".join(lines) + "\n"
+
+
 def _section_basket_rules(client: Any, today: date) -> str:
     try:
         rows = _paginate(
@@ -655,6 +724,7 @@ def build_context(client: Any) -> str:
         ("Inventory health",     _section_inventory_health),
         ("Forecast accuracy",    _section_forecast_accuracy),
         ("Location performance", _section_location_performance),
+        ("Dead stock",           _section_dead_stock),
         ("Basket rules",         _section_basket_rules),
     ]
 

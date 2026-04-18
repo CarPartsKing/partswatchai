@@ -293,6 +293,64 @@ def _build_reorder(client: Any, today: date) -> dict:
     }
 
 
+def _build_dead_stock(client: Any, today: date) -> dict:
+    """Dead-stock summary for the most recent dead_stock pipeline run.
+
+    Returns:
+        kpis:   capital-at-risk totals (LIQUIDATE + MARKDOWN)
+        top10:  top-10 LIQUIDATE candidates by inventory dollar value
+        report_date: the date of the report being shown
+    """
+    # Latest report — same pattern as _build_reorder so a missed nightly
+    # run still shows the most recent valid data instead of an empty card.
+    try:
+        latest = (
+            client.table("dead_stock_recommendations")
+            .select("report_date")
+            .order("report_date", desc=True)
+            .limit(1)
+            .execute()
+            .data or []
+        )
+        report_date = latest[0]["report_date"] if latest else today.isoformat()
+    except Exception:
+        report_date = today.isoformat()
+
+    rows = _paginate(
+        client, "dead_stock_recommendations",
+        "sku_id,location_id,classification,action,total_inv_value,"
+        "qty_on_hand,days_since_sale,sale_frequency,abc_class,supplier_id",
+        filters={"report_date": report_date},
+    )
+
+    liquidate = [r for r in rows if r.get("classification") == "LIQUIDATE"]
+    markdown  = [r for r in rows if r.get("classification") == "MARKDOWN"]
+
+    liquidate_value = sum(float(r.get("total_inv_value") or 0) for r in liquidate)
+    markdown_value  = sum(float(r.get("total_inv_value") or 0) for r in markdown)
+
+    top10 = sorted(
+        liquidate,
+        key=lambda r: float(r.get("total_inv_value") or 0),
+        reverse=True,
+    )[:10]
+    for r in top10:
+        r["location_display"] = _loc_display(r.get("location_id", ""))
+
+    return {
+        "report_date": report_date,
+        "kpis": {
+            "capital_at_risk":   round(liquidate_value + markdown_value, 2),
+            "liquidate_count":   len(liquidate),
+            "liquidate_value":   round(liquidate_value, 2),
+            "markdown_count":    len(markdown),
+            "markdown_value":    round(markdown_value, 2),
+            "total_positions":   len(rows),
+        },
+        "top10": top10,
+    }
+
+
 def _build_supplier_health(client: Any, today: date) -> dict:
     cutoff = (today - timedelta(days=90)).isoformat()
     rows = _paginate(
@@ -1044,6 +1102,7 @@ def dashboard_data():
         ("weather",              _build_weather),
         ("alerts",               _build_alerts),
         ("reorder",              _build_reorder),
+        ("dead_stock",           _build_dead_stock),
         ("supplier_health",      _build_supplier_health),
         ("supplier_detail",      _build_supplier_detail),
         ("inventory_health",     _build_inventory_health),
@@ -1094,6 +1153,89 @@ def dashboard_data():
         ", ".join(f"{n}={ms}ms" for n, ms in slowest),
     )
     return jsonify(payload)
+
+
+@app.route("/api/dead-stock/export.csv")
+def dead_stock_export():
+    """Stream a CSV of every LIQUIDATE candidate from the latest report.
+
+    Used by the dashboard's "Export Full Liquidation List" button.
+    """
+    import csv
+    import io
+    from flask import Response
+
+    try:
+        client = get_client()
+    except Exception as exc:
+        log.exception("Supabase connection failed for dead-stock export.")
+        return jsonify({"error": str(exc)}), 503
+
+    try:
+        latest = (
+            client.table("dead_stock_recommendations")
+            .select("report_date")
+            .order("report_date", desc=True)
+            .limit(1)
+            .execute()
+            .data or []
+        )
+    except Exception:
+        latest = []
+    if not latest:
+        return jsonify({"error": "no dead-stock report available yet"}), 404
+    report_date = latest[0]["report_date"]
+
+    rows = _paginate(
+        client, "dead_stock_recommendations",
+        "sku_id,location_id,classification,action,dead_stock_score,"
+        "total_inv_value,qty_on_hand,unit_cost,days_since_sale,"
+        "sale_frequency,abc_class,supplier_id,part_category,sub_category",
+        filters={"report_date": report_date, "classification": "LIQUIDATE"},
+    )
+    rows.sort(key=lambda r: float(r.get("total_inv_value") or 0), reverse=True)
+
+    buf = io.StringIO()
+    headers = [
+        "sku_id", "location_id", "location_name", "classification", "action",
+        "dead_stock_score", "total_inv_value", "qty_on_hand", "unit_cost",
+        "days_since_sale", "sale_frequency", "abc_class", "supplier_id",
+        "part_category", "sub_category",
+    ]
+    # CSV-injection guard (CWE-1236): cells whose first char is `=`, `+`, `-`,
+    # `@`, TAB, or CR can trigger formula execution when the file is opened
+    # in Excel/Sheets.  Prefix any such value with a single quote so the
+    # spreadsheet treats it as text.  SKU/supplier IDs in this dataset can
+    # legitimately start with `-`, so we have to neutralize, not reject.
+    def _safe(v):
+        if v is None:
+            return ""
+        s = str(v)
+        if s and s[0] in ("=", "+", "-", "@", "\t", "\r"):
+            return "'" + s
+        return s
+
+    w = csv.writer(buf)
+    w.writerow(headers)
+    for r in rows:
+        w.writerow([
+            _safe(r.get("sku_id")), _safe(r.get("location_id")),
+            _safe(_loc_display(r.get("location_id", ""))),
+            _safe(r.get("classification")), _safe(r.get("action")),
+            _safe(r.get("dead_stock_score")), _safe(r.get("total_inv_value")),
+            _safe(r.get("qty_on_hand")), _safe(r.get("unit_cost")),
+            _safe(r.get("days_since_sale")), _safe(r.get("sale_frequency")),
+            _safe(r.get("abc_class")), _safe(r.get("supplier_id")),
+            _safe(r.get("part_category")), _safe(r.get("sub_category")),
+        ])
+
+    fname = f"liquidation_list_{report_date}.csv"
+    log.info("Dead-stock CSV export: %d LIQUIDATE rows for %s", len(rows), report_date)
+    return Response(
+        buf.getvalue(),
+        mimetype="text/csv",
+        headers={"Content-Disposition": f"attachment; filename={fname}"},
+    )
 
 
 @app.route("/api/chat", methods=["POST"])

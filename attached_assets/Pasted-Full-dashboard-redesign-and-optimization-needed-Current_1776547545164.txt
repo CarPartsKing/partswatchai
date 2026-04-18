@@ -1,0 +1,128 @@
+Full dashboard redesign and optimization needed.
+
+Current problems:
+1. $29.5M dead stock finding is not visible anywhere
+2. XYZ classification data not surfaced
+3. Basket rules not shown
+4. Transfer opportunities buried in reorder panel
+5. Location performance panel shows scores but 
+   not actionable intelligence
+6. No way to drill into a specific SKU
+7. No export functionality
+8. Mobile layout needs improvement
+9. Panel order doesn't match priority of information
+
+Redesign the dashboard with this panel order 
+and content — priority top to bottom:
+
+PANEL 1 — Morning Brief Header
+Keep existing: date, connection status, 
+last updated timestamp
+Add: "Good morning — here's what needs 
+your attention today" summary line
+Show: X critical alerts, X urgent reorders, 
+X transfer opportunities
+
+PANEL 2 — Weather & Freeze Alert
+Keep existing weather banner
+Add: if any freeze alert active, show which 
+specific SKU categories are at risk 
+(batteries, antifreeze, starting fluid)
+
+PANEL 3 — Critical Action Items
+NEW — most important panel on the page
+Combines the most urgent items from all sources:
+- Critical stockouts (qty=0, active demand)
+- Overdue supplier POs (past expected delivery)
+- Supplier risk flags (RED suppliers with open POs)
+Show as a prioritized action list, not separate panels
+Each item has: severity badge, description, 
+recommended action, one-click acknowledge button
+
+PANEL 4 — Reorder Recommendations
+Keep existing but improve:
+- Show total count by urgency prominently
+- Add filter buttons: All / Critical / Warning / 
+  Transfers / Purchase Orders
+- Show location names (already done)
+- Add "Export to CSV" button for purchasing team
+- Show forecast model used (Prophet/LightGBM/Rolling)
+
+PANEL 5 — Dead Stock Intelligence (NEW)
+This is your most powerful business insight
+Show:
+- Total capital at risk: $29,540,146 in large text
+- Liquidate: $25,994,142 (163,098 positions)
+- Markdown: $3,546,004 (12,082 positions)
+- Top 10 liquidate candidates table:
+  SKU | Description | Location | Value | Days Idle | Action
+- "Export Full Liquidation List" button 
+  (downloads all LIQUIDATE candidates as CSV)
+- Color: red background to signal urgency
+
+PANEL 6 — Transfer Opportunities
+Separate from reorder recommendations
+Show the 7,089 transfer opportunities clearly:
+- From location → To location
+- SKU, quantity, estimated days supply saved
+- Sort by largest quantity first
+- "Export Transfer List" button
+
+PANEL 7 — Supplier Health
+Keep existing supplier cards
+Add trend indicators (improving/worsening)
+Move the sample data warning banner to be 
+more prominent
+
+PANEL 8 — Inventory Health
+Restructure to show:
+- Network stockout rate (X% of SKUs at zero)
+- Top 5 locations by stockout count
+- Top 5 most critical SKUs by days supply
+- Dead stock as % of total inventory value
+
+PANEL 9 — Basket Intelligence (NEW)
+Show co-purchase rules:
+"When customers buy X, they almost always 
+buy Y (84% confidence, 71.9x more likely)"
+List top 10 rules by lift
+These are active signals for counter staff
+
+PANEL 10 — Location Performance
+Keep existing tier breakdown
+Add: for each Tier 3 location, show 
+specific recommendation:
+"PARMA — Third-call store confirmed. 
+Stock A-class mix at 40% depth. 
+Replenish from ELYRIA."
+
+PANEL 11 — ABC/XYZ Classification
+Combine ABC and XYZ into one panel
+Show the matrix:
+AX: X SKUs — stock confidently
+AY: X SKUs — watch seasonality  
+AZ: X SKUs — deep safety stock needed
+BX/BY/BZ: similar breakdown
+CX/CY/CZ: similar breakdown
+Highlight AZ SKUs as highest risk
+
+PANEL 12 — Forecast Accuracy
+Keep existing — will populate as system matures
+
+PANEL 13 — Pipeline Status
+Keep existing last-run summary
+
+TECHNICAL REQUIREMENTS:
+- Each panel has a collapse/expand toggle
+- Mobile-first layout — single column on phone
+- Export buttons generate real CSV downloads
+- Auto-refresh every 5 minutes (keep existing)
+- Loading skeletons while data fetches
+- Each panel shows its last-updated timestamp
+
+The most important change: 
+Dead Stock panel must be visible and prominent.
+$29.5M is the headline finding that justifies 
+this entire system.
+
+Push to GitHub when done.

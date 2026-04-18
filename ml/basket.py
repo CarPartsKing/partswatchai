@@ -25,7 +25,7 @@ import pandas as pd
 from mlxtend.frequent_patterns import apriori, association_rules
 from mlxtend.preprocessing import TransactionEncoder
 
-from db.connection import get_client
+from db.connection import get_client, get_new_client
 from utils.logging_config import get_logger, setup_logging
 
 log = logging.getLogger(__name__)
@@ -34,64 +34,143 @@ MIN_SUPPORT    = 0.001
 MIN_CONFIDENCE = 0.3
 MIN_LIFT       = 1.5
 HIGH_CONF      = 0.70
-LOOKBACK_DAYS  = 180
+LOOKBACK_DAYS  = 90
 MAX_BASKET_SIZE = 50
 _PAGE_SIZE     = 1000
+_PROGRESS_EVERY = 50_000
+_MAX_RETRIES    = 5
 
 
-def _paginate(client, table, select, filters=None, gte_filters=None,
-              lte_filters=None, order_col=None, order_desc=True, limit=None):
+def _is_statement_timeout(exc: Exception) -> bool:
+    """Detect Postgres 57014 (statement_timeout) inside Supabase errors."""
+    s = str(exc)
+    return "57014" in s or "statement timeout" in s.lower() or "canceling statement" in s.lower()
+
+
+def _keyset_paginate(client_holder: list, select: str,
+                     date_lo: str, date_hi: str) -> list[dict]:
+    """Keyset pagination over sales_transactions in [date_lo, date_hi].
+
+    Avoids OFFSET entirely (which is O(n²) at depth and unsafe under concurrent
+    writes). Uses the cursor `(transaction_date, id)` and walks forward with:
+
+        WHERE transaction_date BETWEEN date_lo AND date_hi
+          AND ( transaction_date > :last_date
+                OR (transaction_date = :last_date AND id > :last_id) )
+        ORDER BY transaction_date, id
+        LIMIT _PAGE_SIZE
+
+    The upper bound `date_hi` (captured once at run start) gives us a
+    bounded forward scan — rows inserted mid-run with a later date are
+    excluded so we never drift or revisit pages. Note: this is NOT a true
+    MVCC snapshot; rows inserted mid-run with a backdated `transaction_date`
+    earlier than the current cursor will be missed. Acceptable here because
+    sales ingest is append-only at near-current dates.
+
+    Each page is constant-cost given an index on (transaction_date, id) — or
+    even just (transaction_date), since each page covers a small date range.
+    On 57014 we reconnect via get_new_client() and retry with backoff.
+    """
     rows: list[dict] = []
-    offset = 0
+    last_date: str | None = None
+    last_id: int | None = None
+    page = 0
+    t_start = time.monotonic()
+    next_log_threshold = _PROGRESS_EVERY
+
     while True:
-        q = client.table(table).select(select)
-        for col, val in (filters or {}).items():
-            q = q.eq(col, val)
-        for col, val in (gte_filters or {}).items():
-            q = q.gte(col, val)
-        for col, val in (lte_filters or {}).items():
-            q = q.lte(col, val)
-        if order_col:
-            q = q.order(order_col, desc=order_desc)
-        end = offset + _PAGE_SIZE - 1
-        if limit and offset + _PAGE_SIZE > limit:
-            end = offset + (limit - offset) - 1
-        q = q.range(offset, end)
-        resp = q.execute()
-        batch = resp.data or []
+        attempt = 0
+        while True:
+            try:
+                q = client_holder[0].table("sales_transactions").select(select)
+                q = q.gte("transaction_date", date_lo).lte("transaction_date", date_hi)
+                if last_date is not None and last_id is not None:
+                    # PostgREST OR-of-AND: txn_date>last_date OR (txn_date=last_date AND id>last_id)
+                    q = q.or_(
+                        f"transaction_date.gt.{last_date},"
+                        f"and(transaction_date.eq.{last_date},id.gt.{last_id})"
+                    )
+                q = q.order("transaction_date", desc=False).order("id", desc=False)
+                q = q.limit(_PAGE_SIZE)
+                resp = q.execute()
+                batch = resp.data or []
+                break
+            except Exception as exc:
+                attempt += 1
+                if attempt > _MAX_RETRIES:
+                    log.error("  Page %d failed after %d retries: %s",
+                              page, _MAX_RETRIES, exc)
+                    raise
+                if _is_statement_timeout(exc):
+                    backoff = min(2 ** attempt, 30)
+                    log.warning("  Page %d: 57014 timeout (attempt %d/%d) — "
+                                "reconnecting, retrying in %ds …",
+                                page, attempt, _MAX_RETRIES, backoff)
+                    client_holder[0] = get_new_client()
+                    time.sleep(backoff)
+                    continue
+                if attempt >= 2:
+                    raise
+                log.warning("  Page %d: transient error '%s' — retrying once.",
+                            page, exc)
+                time.sleep(2)
+
+        if not batch:
+            break
+
         rows.extend(batch)
+        page += 1
+
+        last = batch[-1]
+        last_date = last["transaction_date"]
+        last_id = last["id"]
+
+        if len(rows) >= next_log_threshold or len(batch) < _PAGE_SIZE:
+            elapsed = time.monotonic() - t_start
+            rate = len(rows) / elapsed if elapsed > 0 else 0
+            log.info("  Fetched %d rows (%d pages, %.0f rows/s, cursor=%s/%d, %.1fs)",
+                     len(rows), page, rate, last_date, last_id, elapsed)
+            while next_log_threshold <= len(rows):
+                next_log_threshold += _PROGRESS_EVERY
+
         if len(batch) < _PAGE_SIZE:
             break
-        offset += _PAGE_SIZE
-        if limit and len(rows) >= limit:
-            break
+
     return rows
 
 
-def _build_baskets(client, lookback_start: str) -> list[list[str]]:
-    log.info("Fetching transactions since %s …", lookback_start)
+def _build_baskets(client, lookback_start: str, lookback_end: str) -> list[list[str]]:
+    log.info("Fetching transactions in [%s, %s] (last %d days) …",
+             lookback_start, lookback_end, LOOKBACK_DAYS)
 
-    rows = _paginate(
-        client, "sales_transactions",
-        "transaction_id,transaction_date,location_id,sku_id",
-        gte_filters={"transaction_date": lookback_start},
+    client_holder = [client]
+    rows = _keyset_paginate(
+        client_holder,
+        "id,transaction_id,transaction_date,location_id,sku_id",
+        date_lo=lookback_start,
+        date_hi=lookback_end,
     )
-    log.info("  Fetched %d transaction rows.", len(rows))
+    log.info("  Fetched %d transaction rows total.", len(rows))
     if not rows:
         return []
 
     groups: dict[str, set[str]] = defaultdict(set)
+    no_tid = 0
     for r in rows:
         tid = r.get("transaction_id")
         if tid:
             key = str(tid)
         else:
+            no_tid += 1
             tdate = r.get("transaction_date") or "unknown"
             loc = r.get("location_id") or "unknown"
             key = f"{tdate}|{loc}"
         sku = r.get("sku_id")
         if sku:
             groups[key].add(str(sku))
+    if no_tid:
+        log.warning("  %d rows had no transaction_id — fell back to "
+                    "(date|location) grouping for those.", no_tid)
 
     baskets = [
         list(skus) for skus in groups.values()
@@ -174,17 +253,19 @@ def run_basket(dry_run: bool = False) -> int:
     t0 = time.monotonic()
     today = date.today()
     lookback_start = (today - timedelta(days=LOOKBACK_DAYS)).isoformat()
+    lookback_end = today.isoformat()
 
     log.info("=" * 60)
     log.info("BASKET ANALYSIS — co-purchase association rules")
-    log.info("  Lookback: %d days (since %s)", LOOKBACK_DAYS, lookback_start)
+    log.info("  Lookback: %d days  [%s .. %s]",
+             LOOKBACK_DAYS, lookback_start, lookback_end)
     log.info("  Thresholds: support≥%.4f  confidence≥%.2f  lift≥%.1f",
              MIN_SUPPORT, MIN_CONFIDENCE, MIN_LIFT)
     log.info("=" * 60)
 
     client = get_client()
 
-    baskets = _build_baskets(client, lookback_start)
+    baskets = _build_baskets(client, lookback_start, lookback_end)
     if not baskets:
         log.warning("No multi-item baskets found — skipping Apriori.")
         return 0

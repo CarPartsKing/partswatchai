@@ -216,7 +216,8 @@ def _paginate(client_holder: list, table: str, select: str,
               filters: dict | None = None,
               gte_filters: dict | None = None,
               lte_filters: dict | None = None,
-              in_filters: dict | None = None) -> list[dict]:
+              in_filters: dict | None = None,
+              order_by: list[tuple[str, bool]] | None = None) -> list[dict]:
     """Generic paginated fetch with retry + reconnect on transient errors.
 
     Args:
@@ -229,10 +230,24 @@ def _paginate(client_holder: list, table: str, select: str,
         gte_filters:   {column: value} for column >= value.
         lte_filters:   {column: value} for column <= value.
         in_filters:    {column: [values]} for column IN (values).
+        order_by:      Optional list of (column, desc) tuples to apply
+                       with `.order(...)`.  Pass an explicit ordering on
+                       offset-paged queries that span large tables and
+                       could observe concurrent writes — the inventory
+                       fetch is the prime example.  Defaults to no
+                       ordering: forcing ORDER BY on already-bounded
+                       SKU-batched queries (e.g. forecast_results, where
+                       a single batch can pull >1M rows) makes Postgres
+                       perform a top-level Sort and times out (57014).
+                       The downstream dedupe by run_date / snapshot_date
+                       already handles read-time row shuffling in those
+                       cases.
 
     Returns:
         All matching rows as a list of dicts.
     """
+    if order_by is None:
+        order_by = []
     rows: list[dict] = []
     offset = 0
     while True:
@@ -248,6 +263,8 @@ def _paginate(client_holder: list, table: str, select: str,
                     q = q.lte(col, val)
                 for col, vals in (in_filters or {}).items():
                     q = q.in_(col, vals)
+                for col, desc in order_by:
+                    q = q.order(col, desc=desc)
                 page = q.range(offset, offset + _PAGE_SIZE - 1).execute().data or []
                 break
             except Exception as exc:
@@ -343,45 +360,78 @@ def _fetch_skus(client_holder: list) -> dict[str, dict]:
     }
 
 
-def _fetch_inventory(client_holder: list, lookback_days: int = 7) -> dict[tuple[str, str], dict]:
+def _fetch_inventory(
+    client_holder: list,
+    sku_ids: list[str] | set[str],
+    lookback_days: int = 7,
+) -> dict[tuple[str, str], dict]:
     """Return the most recent inventory snapshot per (sku_id, location_id).
 
-    Fetches snapshots from the last ``lookback_days`` days and deduplicates
-    in Python, keeping the row with the latest snapshot_date.
+    Fetches snapshots from the last ``lookback_days`` days, batched in
+    ``SKU_BATCH_SIZE`` chunks via ``.in_("sku_id", batch)`` to keep each
+    query inside Supabase's statement timeout (error 57014).  Without
+    SKU-batching, a full 6.7M-row OFFSET scan of inventory_snapshots
+    hangs indefinitely (O(n²) at depth).
 
     Args:
-        client:        Active Supabase client.
+        client_holder: Single-element list holding the active Supabase
+                       client (replaced in-place on transient errors).
+        sku_ids:       Active SKU IDs from _fetch_skus.  Snapshots for
+                       SKUs not in this set are skipped at the source.
         lookback_days: Window for recent snapshot fetch.
 
     Returns:
-        {(sku_id, location_id): {qty_on_hand, qty_on_order, snapshot_date}}
+        {(sku_id, location_id): {qty_on_hand, qty_on_order, reorder_point,
+                                 snapshot_date}}
     """
+    if not sku_ids:
+        return {}
+
     cutoff = (date.today() - timedelta(days=lookback_days)).isoformat()
-    rows = _paginate(
-        client_holder, "inventory_snapshots",
-        "sku_id,location_id,snapshot_date,qty_on_hand,qty_on_order,reorder_point",
-        gte_filters={"snapshot_date": cutoff},
-    )
+    sku_list = list(sku_ids)
+    n_batches = math.ceil(len(sku_list) / SKU_BATCH_SIZE)
+
     latest: dict[tuple[str, str], dict] = {}
     skipped_excluded = 0
-    for r in rows:
-        loc_id = r["location_id"]
-        if loc_id in EXCLUDED_LOCATIONS:
-            skipped_excluded += 1
-            continue
-        key = (r["sku_id"], loc_id)
-        existing = latest.get(key)
-        if existing is None or r["snapshot_date"] > existing["snapshot_date"]:
-            # reorder_point may legitimately be NULL for SKUs the buyers
-            # haven't manually set a Min Qty on — keep the None so the
-            # downstream reconciliation can skip those pairs entirely.
-            rp_raw = r.get("reorder_point")
-            latest[key] = {
-                "qty_on_hand":   float(r.get("qty_on_hand") or 0),
-                "qty_on_order":  float(r.get("qty_on_order") or 0),
-                "reorder_point": float(rp_raw) if rp_raw is not None else None,
-                "snapshot_date": r["snapshot_date"],
-            }
+    total_rows = 0
+
+    for i in range(n_batches):
+        sku_batch = sku_list[i * SKU_BATCH_SIZE:(i + 1) * SKU_BATCH_SIZE]
+        rows = _paginate(
+            client_holder, "inventory_snapshots",
+            "sku_id,location_id,snapshot_date,qty_on_hand,qty_on_order,reorder_point",
+            gte_filters={"snapshot_date": cutoff},
+            in_filters={"sku_id": sku_batch},
+            # Newest snapshots first — first-write-wins dedupe below; id
+            # is the stable tiebreaker for offset paging within the batch.
+            order_by=[("snapshot_date", True), ("id", False)],
+        )
+        for r in rows:
+            loc_id = r["location_id"]
+            if loc_id in EXCLUDED_LOCATIONS:
+                skipped_excluded += 1
+                continue
+            key = (r["sku_id"], loc_id)
+            existing = latest.get(key)
+            if existing is None or r["snapshot_date"] > existing["snapshot_date"]:
+                # reorder_point may legitimately be NULL for SKUs the
+                # buyers haven't manually set a Min Qty on — keep the
+                # None so downstream reconciliation can skip those pairs.
+                rp_raw = r.get("reorder_point")
+                latest[key] = {
+                    "qty_on_hand":   float(r.get("qty_on_hand") or 0),
+                    "qty_on_order":  float(r.get("qty_on_order") or 0),
+                    "reorder_point": float(rp_raw) if rp_raw is not None else None,
+                    "snapshot_date": r["snapshot_date"],
+                }
+        total_rows += len(rows)
+        log.info(
+            "  [REORDER] Inventory batch %d/%d — skus=%d rows=%d "
+            "(running: %d snapshots, %d unique (sku,loc) pairs)",
+            i + 1, n_batches, len(sku_batch), len(rows),
+            total_rows, len(latest),
+        )
+
     if skipped_excluded:
         log.info(
             "Excluded %d snapshot rows from %d virtual/retired locations: %s",
@@ -473,7 +523,8 @@ def _fetch_forecasts(
         )
         all_rows.extend(page)
         log.info(
-            "  forecast batch %d/%d  skus=%d  rows=%d  (running total %d)",
+            "  [REORDER] Forecast batch %d/%d — skus=%d rows=%d "
+            "(running total %d)",
             i + 1, n_batches, len(sku_batch), len(page), len(all_rows),
         )
 
@@ -854,8 +905,8 @@ def run_reorder(dry_run: bool = False) -> int:
         skus = _fetch_skus(client_holder)
         log.info("  Active SKUs: %d", len(skus))
 
-        log.info("Fetching inventory snapshots …")
-        inventory = _fetch_inventory(client_holder)
+        log.info("Fetching inventory snapshots (SKU-batched) …")
+        inventory = _fetch_inventory(client_holder, list(skus.keys()))
         log.info("  (SKU, location) inventory pairs: %d", len(inventory))
 
         log.info("Fetching supplier scores …")

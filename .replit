@@ -38,6 +38,10 @@ args = "Fixed Stages Runner"
 task = "workflow.run"
 args = "Historical Extract"
 
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "Reorder Run"
+
 [[workflows.workflow]]
 name = "Start application"
 author = "agent"
@@ -71,6 +75,14 @@ outputType = "console"
 [[workflows.workflow.tasks]]
 task = "shell.exec"
 args = "python run_historical_extract.py"
+
+[[workflows.workflow]]
+name = "Reorder Run"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "python -u main.py --stage reorder"
 
 [[ports]]
 localPort = 5000

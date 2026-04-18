@@ -34,12 +34,12 @@ MIN_SUPPORT    = 0.001
 MIN_CONFIDENCE = 0.3
 MIN_LIFT       = 1.5
 HIGH_CONF      = 0.70
-# Lookback reduced from 90 → 30 days. The 90-day window over ~8.4M rows blew
-# Supabase's statement_timeout (57014) even with keyset pagination + retries
-# because each page's date range still scanned a fat slice of the index.
-# 30 days is roughly ~600K rows, comfortably inside timeout limits, and is
-# still long enough for stable co-purchase signal on weekly-cadence SKUs.
-LOOKBACK_DAYS  = 30
+# Restored to 90 days after confirming the SKU-batched fetch (1000-SKU
+# batches with `.in_("sku_id", ...)` + per-batch offset paging) reliably
+# stays inside Supabase's statement_timeout on the ~8.4M-row table.
+# 90 days gives Apriori a much fuller signal — seasonal, weekly, and
+# slower-cadence pairs that were missed at 30.
+LOOKBACK_DAYS  = 90
 MAX_BASKET_SIZE = 50
 _PAGE_SIZE     = 1000
 _SKU_BATCH_SIZE = 1000   # mirrors forecast_rolling / dead_stock — keeps each

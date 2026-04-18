@@ -67,6 +67,15 @@ from utils.logging_config import get_logger, setup_logging
 log = get_logger(__name__)
 
 PROPHET_WEIGHT: float = 0.60
+
+# Top-N cap on A-class SKUs trained per nightly run.  Prophet's per-SKU
+# training cost (~1-3s) means full A-class coverage (>10K SKUs) blows past
+# the nightly window.  Empirically the top 500 by revenue proxy
+# (avg_weekly_units × unit_cost) cover the vast majority of dollar-volume
+# at risk; the remaining A-class SKUs fall through to lightgbm and the
+# rolling-avg network fallback in ml/forecast_rolling.py.  Set to 0 to
+# disable the cap (full A-class run) — primarily for backfills.
+PROPHET_TOP_N: int = 500
 XGBOOST_WEIGHT: float = 0.40
 MIN_HISTORY_DAYS: int = 90
 BATCH_SIZE: int = 50
@@ -173,11 +182,60 @@ def _fetch_chunked_by_date(
     return all_rows
 
 
-def _fetch_a_class_skus(client: Any) -> list[dict]:
-    rows = _fetch_all(client, "sku_master", "sku_id,abc_class,abc_xyz_class",
-                      filters={"abc_class": "A"})
+def _fetch_a_class_skus(client: Any, top_n: int = 0) -> list[dict]:
+    """Return active A-class SKUs, optionally capped to the top-N by revenue.
+
+    When ``top_n > 0``, SKUs are ranked by ``avg_weekly_units * unit_cost``
+    (revenue proxy) descending; when ``unit_cost`` is missing the rank
+    falls back to ``avg_weekly_units`` alone.  This caps the per-night
+    Prophet training cost while keeping coverage of the highest-dollar-
+    volume parts.  Set ``top_n=0`` to disable (full A-class run).
+    """
+    # Try to pull ranking columns; fall back gracefully if a column is
+    # missing in this environment (e.g. unit_cost not yet populated).
+    select_attempts = [
+        "sku_id,abc_class,abc_xyz_class,avg_weekly_units,unit_cost",
+        "sku_id,abc_class,abc_xyz_class,avg_weekly_units",
+        "sku_id,abc_class,abc_xyz_class",
+    ]
+    rows: list[dict] = []
+    for select in select_attempts:
+        try:
+            rows = _fetch_all(client, "sku_master", select,
+                              filters={"abc_class": "A"})
+            break
+        except Exception as exc:
+            log.warning(
+                "Prophet SKU fetch with select=%r failed (%s); trying next fallback.",
+                select, exc.__class__.__name__,
+            )
+            continue
+
     active = [r for r in rows if r.get("sku_id")]
     log.info("  A-class SKUs found in sku_master: %d", len(active))
+
+    if top_n and len(active) > top_n:
+        def _revenue_proxy(r: dict) -> float:
+            try:
+                wkly = float(r.get("avg_weekly_units") or 0.0)
+            except (TypeError, ValueError):
+                wkly = 0.0
+            try:
+                cost = float(r.get("unit_cost") or 0.0)
+            except (TypeError, ValueError):
+                cost = 0.0
+            # Use weekly × cost when both available; otherwise weekly
+            # alone keeps high-velocity SKUs at the top even if cost is
+            # null in source (see Product cube unit_cost gap, P1).
+            return wkly * cost if cost > 0 else wkly
+
+        active.sort(key=_revenue_proxy, reverse=True)
+        active = active[:top_n]
+        log.info(
+            "  Capped to top %d A-class SKUs by revenue proxy "
+            "(avg_weekly_units × unit_cost). Lowest-ranked included: %s",
+            top_n, active[-1].get("sku_id"),
+        )
     return active
 
 
@@ -660,8 +718,32 @@ def run_forecast(
     client = _get_fresh_client()
     client_holder = [client]
 
+    # Clean up stale prophet rows BEFORE the run so leftovers from
+    # earlier test/single-SKU runs don't leak into reorder.py's forecast
+    # selection.  We retain the most recent 7 days of run_date history
+    # for audit; anything older is replaced by tonight's run anyway.
+    if not dry_run and not single_sku:
+        cutoff_run_date = (date.today() - timedelta(days=7)).isoformat()
+        try:
+            client.table("forecast_results").delete() \
+                .eq("model_type", "prophet") \
+                .lt("run_date", cutoff_run_date).execute()
+            log.info(
+                "Pruned prophet forecast_results rows with run_date < %s.",
+                cutoff_run_date,
+            )
+        except Exception as exc:
+            log.warning(
+                "Could not prune stale prophet rows (%s); continuing anyway.",
+                exc.__class__.__name__,
+            )
+
     log.info("Fetching A-class SKUs …")
-    a_class_rows = _fetch_a_class_skus(client)
+    # Cap to PROPHET_TOP_N for full nightly runs; load all A-class for
+    # explicit single-SKU debugging so the requested SKU is always
+    # discoverable regardless of revenue rank.
+    top_n_for_run = 0 if single_sku else PROPHET_TOP_N
+    a_class_rows = _fetch_a_class_skus(client, top_n=top_n_for_run)
     if single_sku:
         a_class_rows = [r for r in a_class_rows if r["sku_id"] == single_sku]
         if not a_class_rows:

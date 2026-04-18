@@ -1,0 +1,60 @@
+Go with Option B — lower thresholds plus 
+network-level rolling fallback.
+
+PART 1 — Lower thresholds:
+- forecast_lgbm.py: MIN_TRAIN_DAYS 60 → 14
+- forecast_rolling.py: MIN_SALE_DAYS 14 → 7
+
+PART 2 — Network-level rolling fallback:
+For every SKU that still has no per-location 
+forecast after the regular rolling run:
+
+1. Aggregate sales across ALL locations for that SKU
+   (sum qty_sold by date, ignore location)
+2. Calculate rolling average on the aggregated demand
+3. Write forecast rows with location_id = 'ALL'
+   model_type = 'rolling_avg'
+   predicted_qty = network_avg × location_share
+   where location_share = that location's historical 
+   % of network sales for this SKU
+   (if no location history, use equal share: 1/n_locations)
+
+4. In engine/reorder.py when fetching forecasts:
+   For any (sku_id, location_id) with no direct 
+   forecast, look for location_id='ALL' as fallback
+   Scale predicted_qty by location_share
+   Mark forecast_model_used = 'rolling_avg_network'
+
+5. Add NETWORK_MIN_SALE_DAYS = 3 constant —
+   SKU needs at least 3 total sales across all 
+   locations to get a network forecast
+   Below 3 = dead stock candidate, skip forecasting
+
+PART 3 — On Prophet:
+Do NOT delete the 690 rows — they are valid 
+test data and confirm Prophet works correctly.
+Scope Prophet going forward to top 500 A-class 
+SKUs by revenue only (not all 28K A-class).
+Top 500 is manageable on laptop in 2-3 hours 
+and covers the SKUs where forecast accuracy 
+matters most.
+
+Add TOP_N_PROPHET_SKUS = 500 constant at top 
+of forecast_prophet.py.
+
+PART 4 — Dead tail routing:
+SKUs with zero sales in last 91 days AND 
+is_dead_stock = TRUE should be excluded from 
+reorder engine entirely.
+Add filter in reorder.py:
+Skip SKUs where is_dead_stock = TRUE 
+AND days_since_last_sale > 180
+
+This prevents the system from recommending 
+orders for parts that dead_stock.py has 
+already flagged as stale.
+
+Build all four parts.
+Push to GitHub when done.
+This is the highest impact architectural 
+fix remaining in the entire system.

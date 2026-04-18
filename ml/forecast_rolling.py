@@ -74,8 +74,18 @@ log = get_logger(__name__)
 LOOKBACK_WEEKS: int = 13
 LOOKBACK_DAYS:  int = LOOKBACK_WEEKS * 7   # 91
 
-# Minimum distinct sale dates needed to fit a meaningful average
-MIN_SALE_DAYS: int = 14
+# Minimum distinct sale dates needed to fit a meaningful PER-LOCATION
+# rolling average.  Lowered from 14 → 7 to dramatically expand B/C-class
+# coverage in the long-tail aftermarket catalog where most (sku, location)
+# pairs sell on fewer than 14 distinct calendar days per quarter.
+MIN_SALE_DAYS: int = 7
+
+# Minimum distinct sale dates required NETWORK-WIDE (summed across all
+# locations) for a SKU to receive a network-level rolling fallback when
+# every per-location pair has been skipped.  Below this threshold the SKU
+# is genuinely dead/inactive and is left without a forecast — the dead-
+# stock pipeline (ml/dead_stock.py) handles those.
+NETWORK_MIN_SALE_DAYS: int = 3
 
 # Number of future days to forecast
 FORECAST_HORIZON: int = 30
@@ -442,6 +452,98 @@ def _build_demand_series(
 
 
 # ---------------------------------------------------------------------------
+# Step 4b — Build network-aggregated demand series for one SKU
+# ---------------------------------------------------------------------------
+
+def _build_network_series(
+    rows: list[dict],
+    cutoff: date,
+    today: date,
+) -> tuple[np.ndarray, int, dict[str, float]]:
+    """Aggregate one SKU's transactions across ALL locations into a 91-day series.
+
+    Args:
+        rows:   All non-anomaly transactions for a single SKU (every location).
+        cutoff: First day of the lookback window (inclusive).
+        today:  Run date (exclusive — last lookback day is today-1).
+
+    Returns:
+        (network_series, network_sale_day_count, location_demand_totals)
+        where location_demand_totals maps location_id → total effective
+        demand observed at that location over the 91-day window.  Used to
+        compute each location's share of network sales.
+    """
+    series = np.zeros(LOOKBACK_DAYS, dtype=float)
+    sale_dates: set[int] = set()
+    loc_totals: dict[str, float] = defaultdict(float)
+
+    for r in rows:
+        raw_dt = str(r.get("transaction_date", ""))[:10]
+        if not raw_dt:
+            continue
+        try:
+            tx_date = date.fromisoformat(raw_dt)
+        except ValueError:
+            continue
+
+        day_idx = (tx_date - cutoff).days
+        if not (0 <= day_idx < LOOKBACK_DAYS):
+            continue
+
+        if r.get("is_stockout", False):
+            imputed = r.get("lost_sales_imputation")
+            demand = float(imputed) if imputed is not None else 0.0
+        else:
+            demand = float(r.get("qty_sold") or 0)
+
+        series[day_idx] += demand
+        if demand > 0:
+            sale_dates.add(day_idx)
+
+        loc = r.get("location_id", "")
+        if loc and demand > 0:
+            loc_totals[loc] += demand
+
+    return series, len(sale_dates), dict(loc_totals)
+
+
+def _compute_network_forecast(
+    sku_id: str,
+    series: np.ndarray,
+    start_date: date,
+    run_date: str,
+) -> list[dict]:
+    """Generate FORECAST_HORIZON network-level rolling forecast rows.
+
+    Emits a single row per forecast day with ``location_id = NETWORK_LOCATION``
+    (``'ALL'``).  ``predicted_qty`` is the network-wide mean daily demand;
+    the reorder engine multiplies by per-location share at fetch time.
+    """
+    mean_demand = float(np.mean(series))
+    std_demand  = float(np.std(series))   # population std
+
+    predicted = round(mean_demand, 4)
+    lower     = round(max(0.0, mean_demand - std_demand), 4)
+    upper     = round(mean_demand + std_demand, 4)
+
+    rows: list[dict] = []
+    for offset in range(FORECAST_HORIZON):
+        forecast_date = (start_date + timedelta(days=offset)).isoformat()
+        rows.append({
+            "sku_id":         sku_id,
+            "location_id":    NETWORK_LOCATION,
+            "forecast_date":  forecast_date,
+            "model_type":     MODEL_TYPE,
+            "predicted_qty":  predicted,
+            "lower_bound":    lower,
+            "upper_bound":    upper,
+            "confidence_pct": CONFIDENCE_PCT,
+            "run_date":       run_date,
+        })
+    return rows
+
+
+# ---------------------------------------------------------------------------
 # Step 5 — Compute forecast rows for one (SKU, location)
 # ---------------------------------------------------------------------------
 
@@ -615,6 +717,14 @@ def run_forecast(dry_run: bool = False) -> int:
     skipped_pairs      = 0
     skus_with_any_sales: set[str] = set()
     total_rows_written = 0
+    network_skus_written     = 0   # SKUs that received a network-level fallback
+    network_skus_below_floor = 0   # SKUs skipped (network sale-days < NETWORK_MIN_SALE_DAYS)
+    network_share_rows       = 0   # rows upserted into sku_location_share
+    # Per-run accumulator for share rows.  Deferred until AFTER the
+    # final forecast flush so reorder.py never sees shares whose
+    # corresponding network forecast row hasn't landed yet (run_date
+    # consistency).  See engine/reorder._select_forecasts.
+    pending_share_rows: list[dict] = []
     skus_done          = 0
 
     n_batches = math.ceil(total_skus / SKU_BATCH_SIZE)
@@ -688,6 +798,66 @@ def run_forecast(dry_run: bool = False) -> int:
             forecast_buffer.extend(fc_rows)
             processed_pairs += 1
 
+        # ── 3d-bis. Network-level fallback per SKU in batch ──────────────
+        # Aggregate transactions across all locations for each SKU and
+        # emit a single 'ALL' forecast row per horizon day, plus per-
+        # location share rows so reorder.py can scale the network mean
+        # down to a per-store prediction.  This guarantees that any SKU
+        # with at least NETWORK_MIN_SALE_DAYS of network-wide sales gets
+        # SOME forecast — even when no individual (sku, location) pair
+        # cleared the per-location MIN_SALE_DAYS bar.
+        share_buffer: list[dict] = []
+        sku_to_rows: dict[str, list[dict]] = defaultdict(list)
+        for r in tx_rows:
+            sku = r.get("sku_id", "")
+            if sku in sku_batch_set:
+                sku_to_rows[sku].append(r)
+
+        for sku_id in sku_batch:
+            rows_for_sku = sku_to_rows.get(sku_id) or []
+            if not rows_for_sku:
+                continue
+            net_series, net_sale_days, loc_totals = _build_network_series(
+                rows_for_sku, cutoff, today,
+            )
+            if net_sale_days < NETWORK_MIN_SALE_DAYS:
+                # Truly dead at the network level — leave for dead_stock.py.
+                network_skus_below_floor += 1
+                continue
+
+            # Emit network forecast rows (location_id = 'ALL').
+            forecast_buffer.extend(
+                _compute_network_forecast(
+                    sku_id, net_series, today, run_date_str,
+                )
+            )
+            network_skus_written += 1
+
+            # Per-location shares of the 91-day demand total.  Locations
+            # with zero observed demand are NOT stored — reorder.py
+            # treats absence as "no historical signal at this store" and
+            # falls back to an equal-share default.
+            total_demand = sum(loc_totals.values())
+            if total_demand > 0:
+                for loc, qty in loc_totals.items():
+                    share = qty / total_demand
+                    if share <= 0:
+                        continue
+                    share_buffer.append({
+                        "sku_id":      sku_id,
+                        "location_id": loc,
+                        "share":       round(share, 6),
+                        "run_date":    run_date_str,
+                    })
+
+        # Defer share writes until ALL forecast rows have been flushed
+        # at end-of-run (see pending_share_rows comment).  Writing
+        # shares per-batch creates a window where reorder.py can read
+        # new shares whose corresponding network forecast hasn't landed
+        # yet — pairing forecasts and shares from different run_dates.
+        if share_buffer:
+            pending_share_rows.extend(share_buffer)
+
         # ── 3e. Flush this batch's forecasts to forecast_results ─────────
         while len(forecast_buffer) >= BATCH_SIZE:
             chunk = forecast_buffer[:BATCH_SIZE]
@@ -723,6 +893,23 @@ def run_forecast(dry_run: bool = False) -> int:
                 total_rows_written, time.perf_counter() - t_start,
             )
 
+    # ── 3z. Flush deferred share rows ─────────────────────────────────────
+    # All forecast_results rows (per-loc + network) for this run are now
+    # durable.  Writing the share table here guarantees that any reorder
+    # run that subsequently reads sku_location_share will also find the
+    # matching network forecast rows — eliminating the cross-run-date
+    # mismatch the architect review flagged.
+    if pending_share_rows and not dry_run:
+        for offset in range(0, len(pending_share_rows), BATCH_SIZE):
+            chunk = pending_share_rows[offset: offset + BATCH_SIZE]
+            _upsert_with_retry(
+                client_holder, "sku_location_share", chunk,
+                "sku_id,location_id,run_date",
+            )
+            network_share_rows += len(chunk)
+    elif pending_share_rows:
+        network_share_rows = len(pending_share_rows)
+
     # ── 4. Summary ────────────────────────────────────────────────────────
     skus_no_sales = total_skus - len(skus_with_any_sales)
     elapsed = time.perf_counter() - t_start
@@ -733,6 +920,12 @@ def run_forecast(dry_run: bool = False) -> int:
     log.info("  (SKU, location) pairs processed:   %d", processed_pairs)
     log.info("  (SKU, location) pairs skipped:     %d  (< %d sale days)",
              skipped_pairs, MIN_SALE_DAYS)
+    log.info("  Network-fallback SKUs written:     %d  (≥ %d network sale days)",
+             network_skus_written, NETWORK_MIN_SALE_DAYS)
+    log.info("  Network-fallback SKUs skipped:     %d  (< %d network sale days, dead-tail)",
+             network_skus_below_floor, NETWORK_MIN_SALE_DAYS)
+    log.info("  Per-location share rows written:   %d  (sku_location_share)",
+             network_share_rows)
     log.info("  Forecast rows written:             %d", total_rows_written)
     log.info("  Forecast horizon:                  %d days", FORECAST_HORIZON)
     if dry_run:

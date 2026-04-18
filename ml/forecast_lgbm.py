@@ -153,7 +153,7 @@ def _upsert_with_retry(client_holder: list, table: str, rows: list, on_conflict:
 # ---------------------------------------------------------------------------
 
 # Minimum calendar days from first sale to yesterday required to train
-MIN_TRAIN_DAYS: int = 60
+MIN_TRAIN_DAYS: int = 14
 
 # Most-recent days reserved for hold-out validation (early stopping + RMSE)
 VAL_WINDOW: int = 14

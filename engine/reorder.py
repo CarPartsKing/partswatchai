@@ -191,6 +191,27 @@ _CLASS_MODEL_PREF: dict[str, list[str]] = {
 }
 _DEFAULT_MODEL_ORDER: list[str] = ["lightgbm", "rolling_avg"]
 
+# Pseudo location label used when ml/forecast_rolling.py emits a
+# network-aggregated forecast for a SKU that has insufficient per-
+# location history.  See db/migrations/024_sku_location_share.sql for
+# the companion shares table that scales the network mean down to
+# per-location predictions.
+NETWORK_LOCATION: str = "ALL"
+
+# Label written to reorder_recommendations.forecast_model_used when the
+# forecast came from a network-level fallback (location 'ALL' scaled by
+# sku_location_share).  Distinguishes audit trail from ordinary per-loc
+# rolling_avg forecasts.
+NETWORK_MODEL_LABEL: str = "rolling_avg_network"
+
+# Dead-tail filter — SKUs flagged is_dead_stock=TRUE by ml/dead_stock.py
+# AND with no sale anywhere in the network for at least this many days
+# are excluded from the reorder engine entirely.  Prevents the system
+# from recommending replenishment for parts the dead-stock pipeline has
+# already classified as stale.  Mirrors dead_stock.py's LIQUIDATE
+# threshold (180 days) so the two stages stay aligned.
+DEAD_TAIL_DAYS: int = 180
+
 
 # ---------------------------------------------------------------------------
 # Fetch helpers — all paginated, retry on transient errors
@@ -307,16 +328,18 @@ def _fetch_skus(client_holder: list) -> dict[str, dict]:
     # a time, so a single-pass branch on substring is unreliable when
     # both are missing).
     fallback_chain: list[tuple[str, str]] = [
-        ("sku_id,abc_class,xyz_class,primary_supplier_id,avg_weekly_units", ""),
-        ("sku_id,abc_class,xyz_class,avg_weekly_units",
+        ("sku_id,abc_class,xyz_class,primary_supplier_id,avg_weekly_units,"
+         "is_dead_stock,last_sale_date", ""),
+        ("sku_id,abc_class,xyz_class,avg_weekly_units,is_dead_stock,last_sale_date",
             "Column sku_master.primary_supplier_id not found — run migration 007 "
             "to enable primary supplier routing.  Falling back to purchase_orders-"
             "derived suppliers only."),
-        ("sku_id,abc_class,primary_supplier_id,avg_weekly_units",
+        ("sku_id,abc_class,primary_supplier_id,avg_weekly_units,"
+         "is_dead_stock,last_sale_date",
             "Column sku_master.xyz_class not found — apply migration 010 to enable "
             "XYZ-based safety stock multipliers.  Defaulting all SKUs to the "
             "unknown-class multiplier."),
-        ("sku_id,abc_class,avg_weekly_units",
+        ("sku_id,abc_class,avg_weekly_units,is_dead_stock,last_sale_date",
             "Both xyz_class and primary_supplier_id missing — apply migrations "
             "007 and 010 for full reorder functionality.  Using minimum projection."),
     ]
@@ -344,8 +367,43 @@ def _fetch_skus(client_holder: list) -> dict[str, dict]:
             "avg_weekly_units) — re-run migration 001."
         )
 
-    return {
-        r["sku_id"]: {
+    today = date.today()
+    dead_tail_cutoff = (today - timedelta(days=DEAD_TAIL_DAYS)).isoformat()
+    skus_built: dict[str, dict] = {}
+    dead_tail_skipped = 0
+
+    for r in rows:
+        sku_id = r.get("sku_id")
+        if not sku_id:
+            continue
+
+        # ---- Dead-tail exclusion -------------------------------------
+        # ml/dead_stock.py sets is_dead_stock=TRUE on SKUs whose latest
+        # transaction at any location is older than its LIQUIDATE
+        # threshold.  Two cases trigger exclusion:
+        #
+        #   a) is_dead_stock=TRUE AND last_sale_date strictly older than
+        #      DEAD_TAIL_DAYS days ago — the part is genuinely stale.
+        #   b) is_dead_stock=TRUE AND last_sale_date IS NULL — the part
+        #      has no recorded sale anywhere in history; treating NULL
+        #      as "newer than 180d" would incorrectly keep these SKUs
+        #      eligible for replenishment despite the dead-stock
+        #      pipeline already classifying them as stale.
+        #
+        # Comparison is strict (`<`, not `<=`): a SKU last sold exactly
+        # 180 days ago still falls inside the lookback window dead_stock
+        # itself uses, so it should NOT be filtered.
+        is_dead = bool(r.get("is_dead_stock"))
+        if is_dead:
+            last_sale_raw = r.get("last_sale_date")
+            if last_sale_raw is None:
+                dead_tail_skipped += 1
+                continue
+            if str(last_sale_raw)[:10] < dead_tail_cutoff:
+                dead_tail_skipped += 1
+                continue
+
+        skus_built[sku_id] = {
             "abc_class":           r.get("abc_class"),
             "xyz_class":           r.get("xyz_class"),         # None if column or value missing
             "primary_supplier_id": r.get("primary_supplier_id"),  # None if migration pending
@@ -355,9 +413,15 @@ def _fetch_skus(client_holder: list) -> dict[str, dict]:
                 else 0.0
             ),
         }
-        for r in rows
-        if r.get("sku_id")
-    }
+
+    if dead_tail_skipped:
+        log.info(
+            "Dead-tail filter: excluded %d SKU(s)  "
+            "(is_dead_stock=TRUE AND (last_sale_date < %s OR last_sale_date IS NULL), "
+            "strict %d-day cutoff).",
+            dead_tail_skipped, dead_tail_cutoff, DEAD_TAIL_DAYS,
+        )
+    return skus_built
 
 
 def _fetch_inventory(
@@ -598,6 +662,87 @@ def _fetch_fallback_suppliers(
 
 
 # ---------------------------------------------------------------------------
+# Network-share fetch — companion to the network-level rolling fallback
+# ---------------------------------------------------------------------------
+
+def _fetch_location_shares(
+    client_holder: list,
+    at_risk_skus: list[str],
+) -> dict[str, dict[str, float]]:
+    """Return per-SKU per-location demand shares for the latest run.
+
+    ``ml/forecast_rolling.py`` writes one network-aggregated forecast row
+    (location_id='ALL') per SKU that lacks per-location coverage, plus a
+    ``sku_location_share`` row per (sku, loc) describing that location's
+    fraction of network demand over the 91-day rolling window.  This
+    helper loads those shares so ``_select_forecasts`` can scale the
+    network mean down to a per-store prediction.
+
+    Args:
+        client_holder: Single-element holder for the active Supabase client.
+        at_risk_skus:  SKU IDs the at-risk pre-filter will request
+                       forecasts for.  Restricting the share fetch to this
+                       set keeps it small (≤ tens of thousands of rows).
+
+    Returns:
+        ``{sku_id: {location_id: share}}`` using only the latest run_date
+        per SKU.  Empty dict if the table is missing (e.g. migration 024
+        not yet applied) — callers fall back to equal shares in that case.
+    """
+    if not at_risk_skus:
+        return {}
+
+    from postgrest.exceptions import APIError  # local import — keep top clean
+
+    all_rows: list[dict] = []
+    n_batches = math.ceil(len(at_risk_skus) / SKU_BATCH_SIZE)
+    for i in range(n_batches):
+        sku_batch = at_risk_skus[i * SKU_BATCH_SIZE:(i + 1) * SKU_BATCH_SIZE]
+        try:
+            page = _paginate(
+                client_holder, "sku_location_share",
+                "sku_id,location_id,share,run_date",
+                in_filters={"sku_id": sku_batch},
+            )
+        except APIError as exc:
+            msg = str(exc).lower()
+            if "relation" in msg and "sku_location_share" in msg:
+                log.warning(
+                    "sku_location_share table not found — apply migration 024 "
+                    "to enable network-level rolling fallback scaling.  "
+                    "Falling back to equal-share defaults."
+                )
+                return {}
+            raise
+        all_rows.extend(page)
+
+    # Pass 1: latest run_date per SKU.
+    latest_run: dict[str, str] = {}
+    for r in all_rows:
+        sku = r.get("sku_id")
+        run = r.get("run_date", "")
+        if sku and run > latest_run.get(sku, ""):
+            latest_run[sku] = run
+
+    # Pass 2: keep only rows from the latest run for each SKU.
+    shares: dict[str, dict[str, float]] = defaultdict(dict)
+    for r in all_rows:
+        sku = r.get("sku_id")
+        if not sku or r.get("run_date") != latest_run.get(sku):
+            continue
+        loc = r.get("location_id")
+        share_val = r.get("share")
+        if loc is None or share_val is None:
+            continue
+        try:
+            shares[sku][loc] = float(share_val)
+        except (TypeError, ValueError):
+            continue
+
+    return dict(shares)
+
+
+# ---------------------------------------------------------------------------
 # At-risk pre-filter — identifies SKUs that could plausibly need reorder
 # ---------------------------------------------------------------------------
 
@@ -697,20 +842,37 @@ def _select_forecasts(
     forecast_map: dict[tuple[str, str, str], dict[str, float]],
     today: date,
     horizon_end: date,
+    location_shares: dict[str, dict[str, float]] | None = None,
 ) -> tuple[list[float], str | None]:
     """Pick the best available daily forecast series for a (SKU, location) pair.
 
-    Tries models in preference order for the SKU's ABC class.  For lightgbm,
-    also falls back from a location-specific key to the network-level
-    (location_id='ALL') key if no per-location forecast exists.
+    Tries models in preference order for the SKU's ABC class.  Two
+    fallback paths handle missing per-location coverage:
+
+    * **lightgbm**: falls back from per-location key to the network-level
+      (location_id='ALL') key, used as-is (lightgbm 'ALL' rows already
+      represent typical per-location demand).
+    * **rolling_avg**: falls back from per-location key to the network-
+      level ('ALL') key — but the network rolling forecast is the SUM of
+      per-location demand, so we scale by ``location_shares[sku][loc]``
+      to recover the per-store prediction.  When the share is unknown
+      (location never sold this SKU in the lookback window), we use the
+      equal-share default ``1 / number_of_known_locations_for_sku``.
+      The reported ``model_type_used`` becomes ``rolling_avg_network``
+      so downstream audit can distinguish scaled fallbacks from native
+      per-location rolling forecasts.
 
     Args:
-        sku_id:        SKU identifier.
-        location_id:   Location identifier.
-        abc_class:     'A', 'B', 'C', or None.
-        forecast_map:  {(sku_id, location_id, model_type): {date_str: qty}}.
-        today:         First day of the forecast horizon.
-        horizon_end:   Last day of the forecast horizon.
+        sku_id:           SKU identifier.
+        location_id:      Location identifier.
+        abc_class:        'A', 'B', 'C', or None.
+        forecast_map:     {(sku_id, location_id, model_type): {date_str: qty}}.
+        today:            First day of the forecast horizon.
+        horizon_end:      Last day of the forecast horizon.
+        location_shares:  Optional {sku_id: {location_id: share}} from
+                          ``_fetch_location_shares``.  When None (or empty
+                          for a SKU), rolling-avg network fallback uses
+                          equal-share defaults.
 
     Returns:
         (daily_qty_list, model_type_used) where daily_qty_list is a list of
@@ -723,26 +885,60 @@ def _select_forecasts(
         # Try exact location match first.
         key = (sku_id, location_id, model)
         date_qty = forecast_map.get(key)
-
-        # For lightgbm: also try the network-level 'ALL' key.
-        if date_qty is None and model == "lightgbm":
-            key_all = (sku_id, "ALL", model)
-            date_qty = forecast_map.get(key_all)
+        scale = 1.0
+        model_used = model
 
         if date_qty is None:
-            continue
+            # Fall back to the network-level ('ALL') row.  Both lightgbm
+            # and rolling_avg emit 'ALL' rows when per-location coverage
+            # is missing (see ml/forecast_lgbm.py and ml/forecast_rolling
+            # network pass) — but only rolling_avg's network rows need
+            # share-scaling, since they represent SUM-of-locations demand.
+            key_all = (sku_id, NETWORK_LOCATION, model)
+            date_qty = forecast_map.get(key_all)
+            if date_qty is None:
+                continue
+
+            if model == "rolling_avg":
+                sku_shares = (location_shares or {}).get(sku_id) or {}
+                if location_id in sku_shares:
+                    scale = sku_shares[location_id]
+                elif sku_shares:
+                    # The SKU HAS shares for some locations but NOT
+                    # this one — meaning this location had zero demand
+                    # over the 91-day lookback.  Assigning any positive
+                    # equal-share fraction here would inflate total
+                    # allocated demand above the network total (each
+                    # missing location getting 1/N would sum to >1.0
+                    # across 18+ inventory-only locations).  Treat as
+                    # zero forecast and let the next model in the
+                    # preference order be tried.
+                    continue
+                else:
+                    # No share data for this SKU at all (migration 024
+                    # not applied or share-write skipped this run).  As
+                    # a graceful fallback, split network demand evenly
+                    # across the 23-location network — uniform allocation
+                    # sums to ≤1.0 of network total regardless of which
+                    # subset of locations carries inventory.
+                    scale = 1.0 / 23.0
+                model_used = NETWORK_MODEL_LABEL
+
+            if scale <= 0:
+                continue
 
         # Build an ordered list of daily quantities over the horizon.
         daily: list[float] = []
         current = today
         while current <= horizon_end:
-            daily.append(date_qty.get(current.isoformat(), 0.0))
+            qty = date_qty.get(current.isoformat(), 0.0)
+            daily.append(qty * scale if scale != 1.0 else qty)
             current += timedelta(days=1)
 
         if not daily:
             continue
 
-        return daily, model
+        return daily, model_used
 
     return [], None
 
@@ -971,6 +1167,10 @@ def run_reorder(dry_run: bool = False) -> int:
         fallback_suppliers = _fetch_fallback_suppliers(client_holder, at_risk_list)
         log.info("  SKUs with PO-derived fallback supplier: %d", len(fallback_suppliers))
 
+        log.info("Fetching per-location demand shares for network-rolling fallback …")
+        location_shares = _fetch_location_shares(client_holder, at_risk_list)
+        log.info("  SKUs with location-share data: %d", len(location_shares))
+
     except Exception:
         log.exception("Fatal error during data fetch phase.")
         return 1
@@ -1006,6 +1206,7 @@ def run_reorder(dry_run: bool = False) -> int:
 
         daily_forecasts, model_used = _select_forecasts(
             sku_id, loc_id, abc_class, forecast_map, today, horizon_end,
+            location_shares=location_shares,
         )
         if not daily_forecasts:
             continue  # No forecast available — cannot generate a recommendation

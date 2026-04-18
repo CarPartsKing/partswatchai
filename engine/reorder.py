@@ -782,6 +782,20 @@ def _add_basket_triggered(
     for r in rules:
         rule_map[r["antecedent_sku"]].append(r)
 
+    rule_antecedents = set(rule_map.keys())
+    matched_antecedents = rule_antecedents & trigger_skus
+    log.info(
+        "BASKET-DEBUG: %d rules, %d unique antecedents, %d in today's recs (overlap=%s)",
+        len(rules), len(rule_antecedents), len(matched_antecedents),
+        sorted(matched_antecedents) or "—",
+    )
+    if not matched_antecedents:
+        log.info(
+            "BASKET-DEBUG: no antecedents are at-risk this run; rules cannot fire. "
+            "Antecedents not in recs: %s",
+            sorted(rule_antecedents - trigger_skus),
+        )
+
     added = 0
     for trigger_sku in trigger_skus:
         if trigger_sku not in rule_map:
@@ -789,14 +803,33 @@ def _add_basket_triggered(
         for rule in rule_map[trigger_sku]:
             cons_sku = rule["consequent_sku"]
 
+            cons_positions = [
+                (sk, lc, s) for (sk, lc), s in inventory_summary.items() if sk == cons_sku
+            ]
+            if not cons_positions:
+                log.info(
+                    "BASKET-DEBUG: trigger=%s -> cons=%s  conf=%.2f  SKIP: consequent absent from inventory_summary",
+                    trigger_sku, cons_sku, float(rule["confidence"]),
+                )
+                continue
+
             for (sku, loc), summary in inventory_summary.items():
                 if sku != cons_sku:
                     continue
                 if (sku, loc) in already_recommended:
+                    log.info(
+                        "BASKET-DEBUG: trigger=%s -> cons=%s @ %s  SKIP: already recommended",
+                        trigger_sku, cons_sku, loc,
+                    )
                     continue
 
                 days_supply = summary["days_of_supply_remaining"]
                 if days_supply >= BASKET_LOW_STOCK_DAYS:
+                    log.info(
+                        "BASKET-DEBUG: trigger=%s -> cons=%s @ %s  conf=%.2f  days_supply=%.1f  SKIP: above %.1fd threshold",
+                        trigger_sku, cons_sku, loc, float(rule["confidence"]),
+                        days_supply, BASKET_LOW_STOCK_DAYS,
+                    )
                     continue
 
                 avg_daily = summary["avg_daily_forecast"]

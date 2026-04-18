@@ -472,10 +472,15 @@ def run_inventory_extract(dry_run: bool = False) -> int:
 
     # ----------------------------------------------------------------------
     # Propagate the latest non-null per-unit cost up to sku_master.unit_cost
-    # so ml/dead_stock.py can read a single global value rather than scanning
-    # snapshots per SKU.  We keep the LAST observed non-null cost per SKU
-    # across all locations processed this run (locations are iterated in a
-    # stable order, so the last one wins deterministically).
+    # as a denormalized convenience.  This is best-effort: dead_stock now
+    # reads inventory_snapshots.unit_cost directly as the source of truth,
+    # so a failure here doesn't break costing.  We keep the LAST observed
+    # non-null cost per SKU across all locations processed this run
+    # (locations are iterated in a stable order, so it is deterministic).
+    # NOTE: this block runs at the very end of the extract — if extract
+    # crashes mid-loop, sku_master.unit_cost may be stale, but
+    # inventory_snapshots was already written per-batch above and remains
+    # the authoritative cost source.
     # ----------------------------------------------------------------------
     sku_cost: dict[str, float] = {}
     for r in cleaned:

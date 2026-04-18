@@ -225,6 +225,7 @@ def _paginate(
     filters:     dict | None = None,
     gte_filters: dict | None = None,
     eq_bool:     dict | None = None,
+    not_null_cols: list[str] | None = None,
     order_col:   str | None  = None,
     order_desc:  bool        = False,
 ) -> list[dict]:
@@ -232,6 +233,9 @@ def _paginate(
 
     ``client_holder`` is a single-element list; the reference is replaced
     in-place when a 57014 / dropped-connection error forces a reconnect.
+
+    ``not_null_cols`` filters out rows where any of the listed columns is
+    NULL (server-side, via ``.not_.is_(col, "null")``).
     """
     rows: list[dict] = []
     offset = 0
@@ -246,6 +250,8 @@ def _paginate(
                     q = q.gte(col, val)
                 for col, val in (eq_bool or {}).items():
                     q = q.eq(col, val)
+                for col in (not_null_cols or []):
+                    q = q.not_.is_(col, "null")
                 if order_col:
                     q = q.order(order_col, desc=order_desc)
                 page = q.range(offset, offset + PAGE_SIZE - 1).execute().data or []
@@ -297,43 +303,97 @@ def _fetch_unit_costs(client_holder: list) -> dict[str, float]:
     """sku_id → per-unit cost.
 
     Resolution order (first non-null wins):
-      1. ``sku_master.unit_cost`` — populated by the Product cube extract
-         (extract/autocube_product_pull.py); reflects current replacement
-         cost on a per-SKU basis.
-      2. Most recent ``purchase_orders.unit_cost`` for received POs —
-         fallback for SKUs that have never appeared in a Product cube
-         inventory snapshot (e.g. brand-new SKUs).
+      1. ``inventory_snapshots.unit_cost`` — the source of truth, written
+         by extract/autocube_product_pull.py from the Product cube's
+         [Measures].[Unit Cost] (with [Ext Cost On Hand] / qty fallback).
+         For each SKU we keep the MOST RECENT non-null cost across all
+         locations and snapshot dates.  This is preferred over
+         sku_master.unit_cost because (a) it is updated every extract
+         even if the post-extract sku_master propagation aborts, and
+         (b) it captures cost variance across locations naturally.
+      2. ``sku_master.unit_cost`` — denormalized convenience copy written
+         after a successful inventory extract.  Used only if (1) returns
+         nothing for a SKU.
+      3. Most recent ``purchase_orders.unit_cost`` for received POs —
+         fallback for SKUs with no on-hand inventory anywhere.
     Anything still missing falls through to ``DEFAULT_UNIT_COST`` at the
     scoring call site.
 
-    The ``sku_master.unit_cost`` column is added by migration 021; if the
-    migration has not been applied, the lookup degrades gracefully to
-    PO-only behaviour (matches the prior implementation).
+    All three lookups degrade gracefully if their column/table is missing
+    (e.g. migration 021 not yet applied).
     """
     costs: dict[str, float] = {}
 
-    # ---- 1. sku_master.unit_cost ---------------------------------------
+    def _is_missing_unit_cost_col(exc: Exception) -> bool:
+        msg = str(exc).lower()
+        return (
+            "unit_cost" in msg
+            and ("does not exist" in msg or "could not find" in msg
+                 or "schema cache" in msg)
+        )
+
+    # ---- 1. inventory_snapshots.unit_cost (source of truth) -----------
+    # Pull only the most recent snapshot_date — that's the current
+    # replacement cost.  Scanning all 2M+ historical snapshot rows just
+    # for cost lookup would be wasteful.  If the most recent snapshot
+    # is missing some SKUs (e.g. extract crashed mid-way), step (2) and
+    # (3) fill the gaps.
+    snap_rows: list[dict[str, Any]] = []
+    try:
+        client = client_holder[0]
+        latest = (
+            client.table("inventory_snapshots")
+            .select("snapshot_date")
+            .order("snapshot_date", desc=True)
+            .limit(1)
+            .execute()
+        )
+        latest_date = latest.data[0]["snapshot_date"] if latest.data else None
+        if latest_date:
+            log.info(
+                "  Pulling unit_cost from inventory_snapshots for "
+                "snapshot_date=%s …", latest_date,
+            )
+            snap_rows = _paginate(
+                client_holder, "inventory_snapshots",
+                "sku_id,unit_cost",
+                filters={"snapshot_date": latest_date},
+                not_null_cols=["unit_cost"],
+                # Deterministic order is required for offset-based
+                # pagination to avoid duplicate/skipped rows across pages.
+                order_col="sku_id",
+            )
+    except Exception as exc:
+        if _is_missing_unit_cost_col(exc):
+            log.warning(
+                "inventory_snapshots.unit_cost missing — apply migration "
+                "021 to use Product-cube costs.  Continuing with "
+                "sku_master + purchase_orders only."
+            )
+        else:
+            raise
+
+    for r in snap_rows:
+        sid = r.get("sku_id")
+        c   = r.get("unit_cost")
+        if not sid or c is None or sid in costs:
+            continue
+        try:
+            cf = float(c)
+        except (TypeError, ValueError):
+            continue
+        if cf > 0:
+            costs[sid] = cf
+
+    snap_hits = len(costs)
+
+    # ---- 2. sku_master.unit_cost (denormalized, fills gaps) ----------
     try:
         master_rows = _paginate(
             client_holder, "sku_master", "sku_id,unit_cost",
         )
     except Exception as exc:
-        # Treat ONLY a missing-unit_cost-column error as a soft failure
-        # (migration 021 not yet applied).  We require both "unit_cost"
-        # and a missing-column signal so unrelated PostgREST errors that
-        # happen to mention the word "column" still surface loudly.
-        msg = str(exc).lower()
-        is_missing_col = (
-            "unit_cost" in msg
-            and ("does not exist" in msg or "could not find" in msg
-                 or "schema cache" in msg)
-        )
-        if is_missing_col:
-            log.warning(
-                "sku_master.unit_cost missing — apply migration 021 to "
-                "use Product-cube costs in dead_stock.  Falling back to "
-                "purchase-order costs only."
-            )
+        if _is_missing_unit_cost_col(exc):
             master_rows = []
         else:
             raise
@@ -341,12 +401,18 @@ def _fetch_unit_costs(client_holder: list) -> dict[str, float]:
     for r in master_rows:
         sid = r.get("sku_id")
         c   = r.get("unit_cost")
-        if sid and c is not None and float(c) > 0:
-            costs[sid] = float(c)
+        if not sid or sid in costs or c is None:
+            continue
+        try:
+            cf = float(c)
+        except (TypeError, ValueError):
+            continue
+        if cf > 0:
+            costs[sid] = cf
 
-    master_hits = len(costs)
+    master_hits = len(costs) - snap_hits
 
-    # ---- 2. purchase_orders fallback for SKUs not covered above --------
+    # ---- 3. purchase_orders fallback ---------------------------------
     po_rows = _paginate(
         client_holder, "purchase_orders",
         "sku_id,unit_cost,actual_delivery_date",
@@ -355,16 +421,18 @@ def _fetch_unit_costs(client_holder: list) -> dict[str, float]:
     )
     for r in po_rows:
         sid = r.get("sku_id")
-        if sid and sid not in costs and r.get("unit_cost") is not None:
-            try:
-                costs[sid] = float(r["unit_cost"])
-            except (TypeError, ValueError):
-                continue
+        if not sid or sid in costs or r.get("unit_cost") is None:
+            continue
+        try:
+            costs[sid] = float(r["unit_cost"])
+        except (TypeError, ValueError):
+            continue
 
     log.info(
-        "  Unit cost sources: sku_master=%d  +  purchase_orders fallback=%d  "
-        "→ total=%d",
-        master_hits, len(costs) - master_hits, len(costs),
+        "  Unit cost sources: inventory_snapshots=%d  +  sku_master=%d  "
+        "+  purchase_orders=%d  →  total=%d SKUs",
+        snap_hits, master_hits, len(costs) - snap_hits - master_hits,
+        len(costs),
     )
     return costs
 

@@ -34,11 +34,19 @@ MIN_SUPPORT    = 0.001
 MIN_CONFIDENCE = 0.3
 MIN_LIFT       = 1.5
 HIGH_CONF      = 0.70
-LOOKBACK_DAYS  = 90
+# Lookback reduced from 90 → 30 days. The 90-day window over ~8.4M rows blew
+# Supabase's statement_timeout (57014) even with keyset pagination + retries
+# because each page's date range still scanned a fat slice of the index.
+# 30 days is roughly ~600K rows, comfortably inside timeout limits, and is
+# still long enough for stable co-purchase signal on weekly-cadence SKUs.
+LOOKBACK_DAYS  = 30
 MAX_BASKET_SIZE = 50
 _PAGE_SIZE     = 1000
+_SKU_BATCH_SIZE = 1000   # mirrors forecast_rolling / dead_stock — keeps each
+                         # `.in_("sku_id", batch)` query under timeout.
 _PROGRESS_EVERY = 50_000
 _MAX_RETRIES    = 5
+_RETRY_DELAY    = 5.0
 
 
 def _is_statement_timeout(exc: Exception) -> bool:
@@ -47,95 +55,103 @@ def _is_statement_timeout(exc: Exception) -> bool:
     return "57014" in s or "statement timeout" in s.lower() or "canceling statement" in s.lower()
 
 
-def _keyset_paginate(client_holder: list, select: str,
-                     date_lo: str, date_hi: str) -> list[dict]:
-    """Keyset pagination over sales_transactions in [date_lo, date_hi].
+def _fetch_all_sku_ids(client) -> list[str]:
+    """Return every sku_id from sku_master, fully paged.
 
-    Avoids OFFSET entirely (which is O(n²) at depth and unsafe under concurrent
-    writes). Uses the cursor `(transaction_date, id)` and walks forward with:
-
-        WHERE transaction_date BETWEEN date_lo AND date_hi
-          AND ( transaction_date > :last_date
-                OR (transaction_date = :last_date AND id > :last_id) )
-        ORDER BY transaction_date, id
-        LIMIT _PAGE_SIZE
-
-    The upper bound `date_hi` (captured once at run start) gives us a
-    bounded forward scan — rows inserted mid-run with a later date are
-    excluded so we never drift or revisit pages. Note: this is NOT a true
-    MVCC snapshot; rows inserted mid-run with a backdated `transaction_date`
-    earlier than the current cursor will be missed. Acceptable here because
-    sales ingest is append-only at near-current dates.
-
-    Each page is constant-cost given an index on (transaction_date, id) — or
-    even just (transaction_date), since each page covers a small date range.
-    On 57014 we reconnect via get_new_client() and retry with backoff.
+    Drives the SKU-batched transaction fetch below — we need the universe
+    of SKU IDs to slice `.in_("sku_id", batch)` over.
     """
-    rows: list[dict] = []
-    last_date: str | None = None
-    last_id: int | None = None
-    page = 0
-    t_start = time.monotonic()
-    next_log_threshold = _PROGRESS_EVERY
-
+    skus: list[str] = []
+    offset = 0
     while True:
-        attempt = 0
-        while True:
+        # Deterministic order is REQUIRED for stable offset paging — without
+        # it, Postgres is free to return rows in any order and concurrent
+        # writes / plan changes can cause pages to skip or duplicate rows.
+        resp = (
+            client.table("sku_master")
+            .select("sku_id")
+            .order("sku_id", desc=False)
+            .range(offset, offset + _PAGE_SIZE - 1)
+            .execute()
+        )
+        page = resp.data or []
+        if not page:
+            break
+        skus.extend(r["sku_id"] for r in page if r.get("sku_id"))
+        if len(page) < _PAGE_SIZE:
+            break
+        offset += _PAGE_SIZE
+    return skus
+
+
+def _fetch_transactions_for_skus(
+    client_holder: list,
+    date_lo: str,
+    date_hi: str,
+    sku_batch: list[str],
+) -> list[dict]:
+    """Fetch all transactions in [date_lo, date_hi] for a batch of SKUs.
+
+    Mirrors the SKU-batch pattern proven in `forecast_rolling._fetch_transactions_for_skus`
+    and `dead_stock` — restricting each query to ≤ _SKU_BATCH_SIZE SKUs keeps
+    the planner inside Supabase's statement_timeout (57014) on the 8.4M-row
+    sales_transactions table where the previous keyset-by-date approach
+    timed out at 90 days and still struggled at 30.
+
+    We page within each SKU batch with `.range(offset, offset+PAGE-1)` because
+    Supabase caps any single response at 1000 rows; a 1000-SKU × 30-day slice
+    can still return many thousands of rows for high-velocity SKUs.
+
+    On 57014 we reconnect with a fresh client and retry with backoff.
+    """
+    select = "invoice_number,transaction_date,location_id,sku_id"
+    rows: list[dict] = []
+    offset = 0
+    while True:
+        page: list[dict] | None = None
+        for attempt in range(1, _MAX_RETRIES + 1):
             try:
-                q = client_holder[0].table("sales_transactions").select(select)
-                q = q.gte("transaction_date", date_lo).lte("transaction_date", date_hi)
-                if last_date is not None and last_id is not None:
-                    # PostgREST OR-of-AND: txn_date>last_date OR (txn_date=last_date AND id>last_id)
-                    q = q.or_(
-                        f"transaction_date.gt.{last_date},"
-                        f"and(transaction_date.eq.{last_date},id.gt.{last_id})"
-                    )
-                q = q.order("transaction_date", desc=False).order("id", desc=False)
-                q = q.limit(_PAGE_SIZE)
-                resp = q.execute()
-                batch = resp.data or []
+                # `.order("id")` is REQUIRED — offset paging without an
+                # explicit deterministic order can skip or duplicate rows
+                # under concurrent writes or planner changes.
+                page = (
+                    client_holder[0].table("sales_transactions")
+                    .select(select)
+                    .in_("sku_id", sku_batch)
+                    .gte("transaction_date", date_lo)
+                    .lte("transaction_date", date_hi)
+                    .order("id", desc=False)
+                    .range(offset, offset + _PAGE_SIZE - 1)
+                    .execute()
+                    .data
+                    or []
+                )
                 break
             except Exception as exc:
-                attempt += 1
-                if attempt > _MAX_RETRIES:
-                    log.error("  Page %d failed after %d retries: %s",
-                              page, _MAX_RETRIES, exc)
-                    raise
-                if _is_statement_timeout(exc):
+                if _is_statement_timeout(exc) and attempt < _MAX_RETRIES:
                     backoff = min(2 ** attempt, 30)
-                    log.warning("  Page %d: 57014 timeout (attempt %d/%d) — "
-                                "reconnecting, retrying in %ds …",
-                                page, attempt, _MAX_RETRIES, backoff)
+                    log.warning(
+                        "  tx fetch 57014 retry %d/%d (offset=%d, %d SKUs) — "
+                        "reconnecting in %ds …",
+                        attempt, _MAX_RETRIES, offset, len(sku_batch), backoff,
+                    )
                     client_holder[0] = get_new_client()
                     time.sleep(backoff)
                     continue
-                if attempt >= 2:
-                    raise
-                log.warning("  Page %d: transient error '%s' — retrying once.",
-                            page, exc)
-                time.sleep(2)
-
-        if not batch:
+                if attempt < _MAX_RETRIES:
+                    log.warning(
+                        "  tx fetch transient '%s' (offset=%d, %d SKUs) — "
+                        "retrying in %.0fs …",
+                        type(exc).__name__, offset, len(sku_batch), _RETRY_DELAY,
+                    )
+                    time.sleep(_RETRY_DELAY)
+                    continue
+                raise
+        assert page is not None
+        rows.extend(page)
+        if len(page) < _PAGE_SIZE:
             break
-
-        rows.extend(batch)
-        page += 1
-
-        last = batch[-1]
-        last_date = last["transaction_date"]
-        last_id = last["id"]
-
-        if len(rows) >= next_log_threshold or len(batch) < _PAGE_SIZE:
-            elapsed = time.monotonic() - t_start
-            rate = len(rows) / elapsed if elapsed > 0 else 0
-            log.info("  Fetched %d rows (%d pages, %.0f rows/s, cursor=%s/%d, %.1fs)",
-                     len(rows), page, rate, last_date, last_id, elapsed)
-            while next_log_threshold <= len(rows):
-                next_log_threshold += _PROGRESS_EVERY
-
-        if len(batch) < _PAGE_SIZE:
-            break
-
+        offset += _PAGE_SIZE
     return rows
 
 
@@ -151,18 +167,54 @@ def _build_baskets(client, lookback_start: str, lookback_end: str) -> list[list[
     To scope the basket key to a single store-day (invoice numbers can repeat
     across locations and recycle over time) we key on
     (transaction_date, location_id, invoice_number).
+
+    Fetch strategy (architect/user-mandated):
+      1. Pull every sku_id from sku_master.
+      2. For each batch of _SKU_BATCH_SIZE SKUs, fetch transactions in the
+         date window.  Accumulate raw rows across all batches.
+      3. Group all rows by (date, location, invoice_number) at the end.
+
+    NOTE: We deliberately do NOT finalize baskets per SKU-batch — invoices
+    routinely contain SKUs that fall into different batches, and prematurely
+    grouping would split co-occurrences and destroy the very signal Apriori
+    is looking for.  Grouping happens once, after all rows are in memory.
     """
-    log.info("Fetching transactions in [%s, %s] (last %d days) …",
+    log.info("Fetching transactions in [%s, %s] (last %d days) "
+             "via SKU-batched approach …",
              lookback_start, lookback_end, LOOKBACK_DAYS)
 
     client_holder = [client]
-    rows = _keyset_paginate(
-        client_holder,
-        "id,invoice_number,transaction_date,location_id,sku_id",
-        date_lo=lookback_start,
-        date_hi=lookback_end,
-    )
-    log.info("  Fetched %d transaction rows total.", len(rows))
+
+    # ── Step 1: enumerate SKU universe ────────────────────────────────────
+    all_skus = _fetch_all_sku_ids(client)
+    log.info("  sku_master universe: %d SKUs", len(all_skus))
+    if not all_skus:
+        return []
+
+    # ── Step 2: batched transaction fetch ─────────────────────────────────
+    n_batches = (len(all_skus) + _SKU_BATCH_SIZE - 1) // _SKU_BATCH_SIZE
+    rows: list[dict] = []
+    t_start = time.monotonic()
+    next_log_threshold = _PROGRESS_EVERY
+    for b_idx in range(n_batches):
+        b_start = b_idx * _SKU_BATCH_SIZE
+        sku_batch = all_skus[b_start: b_start + _SKU_BATCH_SIZE]
+        batch_rows = _fetch_transactions_for_skus(
+            client_holder, lookback_start, lookback_end, sku_batch,
+        )
+        rows.extend(batch_rows)
+        if len(rows) >= next_log_threshold or b_idx == n_batches - 1:
+            elapsed = time.monotonic() - t_start
+            rate = len(rows) / elapsed if elapsed > 0 else 0
+            log.info("  batch %d/%d  skus=%d  rows_in_batch=%d  total=%d  "
+                     "(%.0f rows/s, %.1fs)",
+                     b_idx + 1, n_batches, len(sku_batch), len(batch_rows),
+                     len(rows), rate, elapsed)
+            while next_log_threshold <= len(rows):
+                next_log_threshold += _PROGRESS_EVERY
+
+    log.info("  Fetched %d transaction rows total across %d SKU batches.",
+             len(rows), n_batches)
     if not rows:
         return []
 

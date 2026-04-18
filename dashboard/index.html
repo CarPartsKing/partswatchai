@@ -218,6 +218,21 @@
   .supplier-metric .sm-label { font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.3px; }
   .supplier-metric .sm-value { font-size: 14px; font-weight: 600; }
 
+  /* Data-quality banner shown inside the supplier card while we're still
+     running on a sample PO dataset.  Removed once PartsWatch EDI lands and
+     real PO history populates supplier_scores.                              */
+  .data-quality-banner {
+    display: flex; align-items: flex-start; gap: 10px;
+    padding: 10px 12px; margin-bottom: 12px;
+    border-radius: var(--radius);
+    border: 1px solid rgba(227,179,65,0.35);
+    background: rgba(227,179,65,0.08);
+    color: var(--text); font-size: 12px; line-height: 1.45;
+  }
+  .data-quality-banner .dqb-icon { font-size: 14px; line-height: 1.2; color: #e3b341; }
+  .data-quality-banner .dqb-body { flex: 1; }
+  .data-quality-banner .dqb-title { font-weight: 600; margin-bottom: 2px; color: #e3b341; }
+
   .score-bar-bg { height: 6px; background: var(--border2); border-radius: 3px; flex: 1; }
   .score-bar-fill { height: 6px; border-radius: 3px; transition: width 0.5s ease; }
 
@@ -507,6 +522,16 @@
     <div class="card-header">
       <span class="card-title">Supplier Health &amp; Open POs</span>
       <span class="card-updated" id="supplier-updated"></span>
+    </div>
+    <!-- Persistent advisory: PO dataset is sample-only until PartsWatch EDI
+         is connected.  Hide this banner once real PO history flows in. -->
+    <div class="data-quality-banner" id="supplier-po-warning">
+      <span class="dqb-icon">&#9888;</span>
+      <div class="dqb-body">
+        <div class="dqb-title">Sample PO data</div>
+        Supplier scores based on limited PO sample data.
+        Full accuracy when PartsWatch PO history connects.
+      </div>
     </div>
     <div class="card-body" id="supplier-body"><div class="skeleton" style="height:120px"></div></div>
   </div>

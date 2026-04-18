@@ -59,6 +59,7 @@ from __future__ import annotations
 
 import argparse
 import math
+import re
 import sys
 import time
 from collections import defaultdict
@@ -1049,11 +1050,17 @@ def _add_basket_triggered(
                 else:
                     urgency = "normal"
 
+                # Round to whole units before persisting — buyers issue
+                # POs in integer quantities; surfacing 183.134 looks like a
+                # bug.  Floor at 1 because passing the MIN_ORDER_QTY check
+                # above guarantees we want to order *something*.
+                qty_to_order = max(1, int(round(qty_to_order)))
+
                 rec = {
                     "sku_id":                   sku,
                     "location_id":              loc,
                     "recommendation_date":      today.isoformat(),
-                    "qty_to_order":             round(qty_to_order, 4),
+                    "qty_to_order":             qty_to_order,
                     "supplier_id":              summary.get("supplier_id"),
                     "recommendation_type":      "basket_triggered",
                     "transfer_from_location":   None,
@@ -1083,6 +1090,130 @@ def _add_basket_triggered(
     else:
         log.info("No basket-triggered recommendations generated.")
     return added
+
+
+# ---------------------------------------------------------------------------
+# Suspicious SKU name detection
+# ---------------------------------------------------------------------------
+
+# Words that should never appear as a primary SKU description in an
+# automotive parts catalog.  These are real artifacts seen in the source
+# data — service codes ("DELIVERY"), event tags ("BIRTHDAY", "AUTORAMA"),
+# and stray non-automotive brand names ("ZAMBONI" — ice resurfacers).
+# Match is case-insensitive and against the whole token, not substrings,
+# so we don't flag legitimate parts like "DELIVERY VAN BUMPER".
+_SUSPICIOUS_SKU_WORDS = frozenset({
+    "DELIVERY", "BIRTHDAY", "AUTORAMA", "ZAMBONI",
+    "MISC", "MISCELLANEOUS", "TEST", "DUMMY", "PLACEHOLDER",
+    "SAMPLE", "DONATION", "GIFT", "RAFFLE", "PROMOTION",
+})
+
+# Match a single all-caps token (5-20 chars) — descriptions like
+# "DELIVERY" or "BIRTHDAY" come through as a lone word; real part names
+# almost always have multiple tokens or include digits/punctuation.
+_LONE_CAPS_WORD_RE = re.compile(r"^[A-Z]{5,20}$")
+
+
+def _detect_suspicious_skus(skus: dict) -> list[dict]:
+    """Scan loaded SKU master rows for likely data-entry artifacts.
+
+    Returns a list of data_quality_issues records ready for upsert.  The
+    description is fetched on-demand via a thin select since `_fetch_skus`
+    doesn't currently project it.
+    """
+    if not skus:
+        return []
+    issues: list[dict] = []
+    today_iso = date.today().isoformat()
+    for sku_id, row in skus.items():
+        desc = (row.get("description") or "").strip()
+        if not desc:
+            continue
+        token = desc.upper()
+        is_suspicious = False
+        reason = ""
+        if token in _SUSPICIOUS_SKU_WORDS:
+            is_suspicious = True
+            reason = f"description matches denylist token '{token}'"
+        elif _LONE_CAPS_WORD_RE.match(token) and " " not in desc:
+            is_suspicious = True
+            reason = f"single all-caps word '{token}' (likely service/event code, not a part)"
+        if is_suspicious:
+            issues.append({
+                "source_table": "sku_master",
+                "source_id":    sku_id,
+                "issue_type":   "suspicious_sku_name",
+                "issue_detail": reason + " — review for exclusion from reorder recs",
+                "field_name":   "description",
+                "field_value":  desc[:200],
+                "severity":     "warning",
+            })
+    return issues
+
+
+def _flag_suspicious_skus(client_holder: list, skus: dict, dry_run: bool) -> int:
+    """Detect and persist suspicious SKU names; return count written.
+
+    Pulls descriptions for candidate SKUs (a single batched select keyed
+    on sku_id IN (...)) so we don't bloat the main `_fetch_skus`
+    projection.  Uses the same upsert(ignore_duplicates) pattern as the
+    Min-Qty reconciliation writer so re-runs are idempotent.
+    """
+    if not skus:
+        return 0
+    # Fetch descriptions in one pass — sku_master has ~200K rows but we
+    # only need (sku_id, description) for the active set already loaded.
+    try:
+        desc_rows = _paginate(
+            client_holder, "sku_master",
+            "sku_id,description",
+            filters={"is_active": True},
+        )
+    except Exception:
+        log.warning("Could not fetch sku_master descriptions for suspicious-name scan; skipping.")
+        return 0
+    enriched = {}
+    for r in desc_rows:
+        sid = r.get("sku_id")
+        if sid in skus:
+            enriched[sid] = {**skus[sid], "description": r.get("description")}
+    issues = _detect_suspicious_skus(enriched)
+    if not issues:
+        log.info("Suspicious SKU-name scan: 0 flagged.")
+        return 0
+    log.info("Suspicious SKU-name scan: %d flagged.", len(issues))
+    if dry_run:
+        for it in issues[:5]:
+            log.info("  [DRY] %s — %s", it["source_id"], it["issue_detail"])
+        return 0
+    written = 0
+    for offset in range(0, len(issues), WRITE_BATCH_SIZE):
+        batch = issues[offset:offset + WRITE_BATCH_SIZE]
+        for attempt in range(1, _MAX_RETRIES + 1):
+            try:
+                resp = (
+                    client_holder[0].table("data_quality_issues")
+                    .upsert(
+                        batch,
+                        on_conflict="source_table,source_id,issue_type",
+                        ignore_duplicates=True,
+                    )
+                    .execute()
+                )
+                written += len(resp.data or [])
+                break
+            except Exception as exc:
+                if _is_retryable_error(exc) and attempt < _MAX_RETRIES:
+                    time.sleep(_RETRY_DELAY)
+                    client_holder[0] = _get_fresh_client()
+                    continue
+                log.exception(
+                    "Failed to write suspicious-SKU batch at offset %d (size=%d).",
+                    offset, len(batch),
+                )
+                break
+    log.info("  Suspicious SKU issues recorded: %d", written)
+    return written
 
 
 # ---------------------------------------------------------------------------
@@ -1133,6 +1264,14 @@ def run_reorder(dry_run: bool = False) -> int:
         log.info("Fetching active SKUs from sku_master …")
         skus = _fetch_skus(client_holder)
         log.info("  Active SKUs: %d", len(skus))
+
+        # Flag obvious data-entry artifacts (DELIVERY, ZAMBONI, etc.) to
+        # data_quality_issues so buyers can review/exclude them.  Failure
+        # here must not break the reorder run — it's an audit pass.
+        try:
+            _flag_suspicious_skus(client_holder, skus, dry_run)
+        except Exception:
+            log.exception("Suspicious-SKU scan failed (non-fatal); continuing with reorder.")
 
         log.info("Fetching inventory snapshots (SKU-batched) …")
         inventory = _fetch_inventory(client_holder, list(skus.keys()))
@@ -1350,11 +1489,15 @@ def run_reorder(dry_run: bool = False) -> int:
             else DAYS_OF_SUPPLY_CAP
         )
 
+        # Round to whole units — buyers cut POs/transfers in integers, and
+        # the MIN_ORDER_QTY gate above already proved we want to order.
+        qty_to_order = max(1, int(round(qty_to_order)))
+
         rec = {
             "sku_id":                   sku_id,
             "location_id":              loc_id,
             "recommendation_date":      today.isoformat(),
-            "qty_to_order":             round(qty_to_order, 4),
+            "qty_to_order":             qty_to_order,
             "supplier_id":              rec_supplier_id,
             "recommendation_type":      rec_type,
             "transfer_from_location":   transfer_from_loc,

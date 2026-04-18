@@ -82,6 +82,13 @@ LOCATION_NAMES: dict[str, str] = {
 
 RETIRED_LOCATIONS = {"LOC-014", "LOC-019", "LOC-022", "LOC-023", "LOC-030", "LOC-031"}
 
+# Locations that exist in source data but should never appear on the
+# operations dashboard.  Includes retired physical locations *and* virtual
+# locations (LOC-021 INTERNET) — INTERNET is e-commerce throughput, not a
+# brick-and-mortar branch, so it would distort location-performance and
+# transfer-routing panels if shown.
+EXCLUDED_DISPLAY_LOCATIONS = RETIRED_LOCATIONS | {"LOC-021"}
+
 
 def _loc_display(loc_id: str) -> str:
     name = LOCATION_NAMES.get(loc_id)
@@ -424,7 +431,18 @@ def _build_inventory_health(client: Any, today: date) -> dict:
     ).eq("snapshot_date", latest_date)
 
     snapshot_count = _count(base())
-    stockout_count = _count(base().eq("is_stockout", True))
+    # Headline KPI must match the per-location rollup below, which excludes
+    # retired branches + virtual INTERNET (LOC-021).  Counting unfiltered
+    # would inflate the dashboard total above what any branch sees.
+    excluded_list = list(EXCLUDED_DISPLAY_LOCATIONS)
+    try:
+        stockout_count = int(
+            base().eq("is_stockout", True)
+                  .not_.in_("location_id", excluded_list)
+                  .execute().count or 0
+        )
+    except Exception:
+        stockout_count = _count(base().eq("is_stockout", True))
 
     # Pull just the stockout rows (small subset) for examples + per-location
     # aggregation.  We cap at 5000 to stay under Supabase's 8s timeout even
@@ -449,6 +467,11 @@ def _build_inventory_health(client: Any, today: date) -> dict:
     stockouts: list[dict] = []
     for r in stockout_rows:
         loc = r.get("location_id") or ""
+        # Skip excluded (retired + virtual INTERNET) locations from the
+        # network-wide stockout rollup so the panel only shows branches
+        # where stockouts are actionable.
+        if loc in EXCLUDED_DISPLAY_LOCATIONS:
+            continue
         by_location[loc]["stockouts"] += 1
         if len(stockouts) < 10:
             stockouts.append(r)
@@ -530,43 +553,76 @@ def _build_inventory_health(client: Any, today: date) -> dict:
 
 
 def _build_transfer_activity(client: Any, today: date) -> dict:
-    """Recent inter-location transfer activity (last 30 days).
+    """Transfer opportunities from the latest reorder run.
 
-    Surfaces top transfer routes (from→to) and top moving SKUs so the
-    buying team can see whether the network is rebalancing itself
-    organically before issuing transfer recommendations.
+    Reads the engine's transfer-type recommendations
+    (`reorder_recommendations.recommendation_type = 'transfer'`) for the
+    most recent recommendation_date, aggregates them into top routes and
+    top moving SKUs, and surfaces a network-rebalance summary.
+
+    Excludes any route that touches an EXCLUDED_DISPLAY_LOCATIONS member
+    (retired branches + virtual INTERNET) so logistics doesn't see ghost
+    moves.
     """
-    cutoff = (today - timedelta(days=30)).isoformat()
+    # Find the latest run that actually has TRANSFER recs (filter on
+    # recommendation_type, not just date) — if the most recent reorder
+    # cycle was PO-only we still want to surface the prior day's
+    # transfer opportunities rather than show an empty panel.
+    try:
+        latest = (
+            client.table("reorder_recommendations")
+            .select("recommendation_date")
+            .eq("recommendation_type", "transfer")
+            .order("recommendation_date", desc=True)
+            .limit(1)
+            .execute()
+            .data or []
+        )
+    except Exception:
+        latest = []
+    if not latest:
+        return {"total_transfers": 0, "total_qty": 0.0,
+                "top_routes": [], "top_skus": [],
+                "recommendation_date": today.isoformat()}
+    rec_date = latest[0]["recommendation_date"]
+
     try:
         rows = _paginate(
-            client, "location_transfers",
-            "sku_id,from_location,to_location,transfer_date,"
-            "qty_transferred,transfer_cost",
-            gte_filters={"transfer_date": cutoff},
+            client, "reorder_recommendations",
+            "sku_id,location_id,transfer_from_location,qty_to_order,urgency",
+            filters={
+                "recommendation_date": rec_date,
+                "recommendation_type": "transfer",
+            },
         )
     except Exception:
         return {"total_transfers": 0, "total_qty": 0.0,
-                "top_routes": [], "top_skus": []}
+                "top_routes": [], "top_skus": [],
+                "recommendation_date": rec_date}
 
     by_route: dict[tuple[str, str], dict[str, float]] = defaultdict(
-        lambda: {"qty": 0.0, "count": 0, "cost": 0.0}
+        lambda: {"qty": 0.0, "count": 0, "critical": 0}
     )
     by_sku: dict[str, float] = defaultdict(float)
     total_qty = 0.0
-    total_cost = 0.0
+    valid_rows = 0
 
     for r in rows:
-        f = r.get("from_location") or ""
-        t = r.get("to_location") or ""
+        f = r.get("transfer_from_location") or ""
+        t = r.get("location_id") or ""
+        if not f or not t:
+            continue
+        if f in EXCLUDED_DISPLAY_LOCATIONS or t in EXCLUDED_DISPLAY_LOCATIONS:
+            continue
         sku = r.get("sku_id") or ""
-        qty = float(r.get("qty_transferred") or 0)
-        cost = float(r.get("transfer_cost") or 0) if r.get("transfer_cost") else 0.0
+        qty = float(r.get("qty_to_order") or 0)
         by_route[(f, t)]["qty"] += qty
         by_route[(f, t)]["count"] += 1
-        by_route[(f, t)]["cost"] += cost
+        if (r.get("urgency") or "").lower() == "critical":
+            by_route[(f, t)]["critical"] += 1
         by_sku[sku] += qty
         total_qty += qty
-        total_cost += cost
+        valid_rows += 1
 
     top_routes = sorted(
         by_route.items(), key=lambda kv: kv[1]["qty"], reverse=True,
@@ -574,10 +630,11 @@ def _build_transfer_activity(client: Any, today: date) -> dict:
     top_skus = sorted(by_sku.items(), key=lambda kv: kv[1], reverse=True)[:5]
 
     return {
-        "total_transfers": len(rows),
+        "recommendation_date": rec_date,
+        "total_transfers": valid_rows,
         "total_qty":       round(total_qty, 1),
-        "total_cost":      round(total_cost, 2),
-        "window_days":     30,
+        "total_cost":      0.0,            # cost not modeled in recs yet
+        "window_days":     1,               # single-day rec snapshot
         "top_routes": [
             {
                 "from_location":     f,
@@ -586,7 +643,8 @@ def _build_transfer_activity(client: Any, today: date) -> dict:
                 "to_display":        _loc_display(t),
                 "qty":               round(stats["qty"], 1),
                 "transfer_count":    int(stats["count"]),
-                "cost":              round(stats["cost"], 2),
+                "critical_count":    int(stats["critical"]),
+                "cost":              0.0,
             }
             for (f, t), stats in top_routes
         ],
@@ -752,8 +810,12 @@ def _build_location_performance(client: Any, today: date) -> dict:
     for r in loc_rows:
         if r.get("is_active") is False:
             continue
-        tier = int(r.get("location_tier") or 2)
         loc_id = r.get("location_id", "?")
+        # Skip retired and virtual (INTERNET) locations from the operations
+        # performance view — they distort tier rollups for branch managers.
+        if loc_id in EXCLUDED_DISPLAY_LOCATIONS:
+            continue
+        tier = int(r.get("location_tier") or 2)
         loc_name = r.get("location_name") or LOCATION_NAMES.get(loc_id) or loc_id
         tiers[tier].append({
             "location_id": loc_id,

@@ -860,6 +860,21 @@ let countdownSecs = REFRESH_INTERVAL_MS / 1000;
 
 function fmtTemp(v) { return v != null ? Math.round(v) + '\u00B0F' : '\u2014'; }
 function fmtNum(v, d) { if (v == null) return '\u2014'; return d != null ? Number(v).toFixed(d) : Number(v).toLocaleString(); }
+// Days-of-supply has three operationally meaningful edge cases that
+// raw numbers obscure:
+//   * negative  -> the SKU is already stocked out (back-computed gap)
+//   * exactly 0 -> stocked out *today*, not "0d supply"
+//   * > 365     -> dead/slow-moving; precise number is meaningless
+// Surface those as words so buyers don't have to interpret a "-256.5d".
+function fmtSupply(v) {
+  if (v == null) return '\u2014';
+  var n = Number(v);
+  if (!isFinite(n)) return '\u2014';
+  if (n < 0)  return 'Stockout';
+  if (n === 0) return '0 days';
+  if (n > 365) return '365+ days';
+  return Number(n).toFixed(1) + 'd supply';
+}
 function fmtMoney(v) { if (v == null) return '\u2014'; return '$' + Number(v).toLocaleString(undefined, {minimumFractionDigits:0, maximumFractionDigits:0}); }
 function fmtDate(iso) {
   if (!iso) return '\u2014';
@@ -1064,13 +1079,13 @@ function _renderReorderTable() {
            : badge('low','NORMAL');
     var rtype = (r.recommendation_type || 'po').toUpperCase();
     var tb = rtype === 'TRANSFER' ? badge('transfer','TRANSFER') : badge('po','PO');
-    var days = r.days_of_supply_remaining != null ? fmtNum(r.days_of_supply_remaining,1) + 'd' : '\u2014';
+    var days = fmtSupply(r.days_of_supply_remaining);
     var fromLoc = r.transfer_from_display ? '\u2190 ' + escHtml(r.transfer_from_display) : (r.transfer_from_location ? '\u2190 ' + escHtml(r.transfer_from_location) : '');
     var locLabel = r.location_display || r.location_id;
     var model = r.forecast_model_used ? '<span style="color:var(--muted);font-size:11px">' + escHtml(r.forecast_model_used) + '</span>' : '\u2014';
     return '<tr><td>' + ub + '</td><td><span class="sku-id">' + escHtml(r.sku_id) + '</span></td>' +
       '<td><span class="loc-id">' + escHtml(locLabel) + '</span> <span style="color:var(--muted);font-size:11px">' + fromLoc + '</span></td>' +
-      '<td style="font-weight:600">' + fmtNum(r.qty_to_order) + ' units</td><td>' + days + ' supply</td><td>' + tb + '</td><td>' + model + '</td></tr>';
+      '<td style="font-weight:600">' + fmtNum(r.qty_to_order) + ' units</td><td>' + days + '</td><td>' + tb + '</td><td>' + model + '</td></tr>';
   }).join('');
   document.getElementById('reorder-body').innerHTML =
     '<table class="data-table"><thead><tr><th>Urgency</th><th>SKU</th><th>Location</th><th>Qty</th><th>Supply</th><th>Type</th><th>Model</th></tr></thead><tbody>' + rows + '</tbody></table>';

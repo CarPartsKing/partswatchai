@@ -185,7 +185,7 @@ _RETRYABLE_TOKENS: tuple[str, ...] = (
 # Preferred forecast model by ABC class.
 # A-class will use whatever is available (Prophet added later).
 _CLASS_MODEL_PREF: dict[str, list[str]] = {
-    "A": ["lightgbm", "rolling_avg"],
+    "A": ["prophet", "lightgbm", "rolling_avg"],
     "B": ["lightgbm", "rolling_avg"],
     "C": ["rolling_avg", "lightgbm"],
 }
@@ -518,7 +518,7 @@ def _fetch_forecasts(
             lte_filters={"forecast_date": horizon_end.isoformat()},
             in_filters={
                 "sku_id":     sku_batch,
-                "model_type": ["lightgbm", "rolling_avg"],
+                "model_type": ["prophet", "lightgbm", "rolling_avg"],
             },
         )
         all_rows.extend(page)
@@ -957,7 +957,7 @@ def run_reorder(dry_run: bool = False) -> int:
         at_risk_list = sorted(at_risk_set)
 
         log.info(
-            "Fetching forecasts (lightgbm + rolling_avg, next %dd) for %d at-risk SKUs …",
+            "Fetching forecasts (prophet + lightgbm + rolling_avg, next %dd) for %d at-risk SKUs …",
             FORECAST_HORIZON_DAYS, len(at_risk_list),
         )
         forecast_map = _fetch_forecasts(

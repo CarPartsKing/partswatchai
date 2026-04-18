@@ -1,0 +1,67 @@
+Critical finding — 96% of A-class SKUs have 
+no forecast rows. Only 4.4% of A-class SKUs 
+are covered by forecasts.
+
+This means the reorder engine is generating 
+recommendations based on a tiny fraction of 
+your most important inventory.
+
+Investigate forecast_rolling.py and 
+forecast_lgbm.py to find why A-class SKUs 
+are being skipped.
+
+Check these specific things:
+
+1. Run this diagnostic query:
+SELECT abc_class, COUNT(*) as sku_count,
+COUNT(DISTINCT f.sku_id) as with_forecasts,
+COUNT(DISTINCT f.sku_id) * 100.0 / COUNT(*) as pct_covered
+FROM sku_master sm
+LEFT JOIN forecast_results f ON sm.sku_id = f.sku_id
+WHERE sm.is_active = TRUE
+GROUP BY abc_class
+
+This shows coverage by class.
+
+2. For a specific A-class SKU with no forecasts 
+like 16CA — trace exactly why it gets skipped:
+- Does it appear in sku_master as A-class? 
+- Does it have sales history in sales_transactions?
+- How many sale days does it have in last 91 days?
+- What is the minimum history threshold in 
+  forecast_rolling.py?
+- Is it being filtered out by is_anomaly or 
+  is_residual_demand?
+
+3. Check if the issue is the minimum sale days 
+threshold — if 16CA sells every single day it 
+may have too many sale days and is being 
+filtered by the >50 item basket filter 
+(wrong file but same idea) OR the rolling 
+forecast is only running on C-class and 
+LightGBM only on B-class — neither covers A-class.
+
+KEY INSIGHT: A-class SKUs should be covered by 
+Prophet (runs on laptop) OR fall back to 
+LightGBM or rolling average. 
+
+Check: does forecast_lgbm.py query B-class only?
+Does forecast_rolling.py query C-class only?
+If yes — A-class SKUs only get forecasts when 
+Prophet runs on the laptop.
+That's the gap.
+
+Fix: update forecast_rolling.py to also cover 
+A-class SKUs as fallback when no Prophet forecast 
+exists for them.
+
+Add to forecast_rolling.py:
+Cover ALL SKUs where abc_class IN ('A', 'C') 
+AND no prophet forecast exists in forecast_results
+for that SKU + location in the last 7 days.
+
+This ensures A-class SKUs always have at least 
+a rolling average forecast even when Prophet 
+hasn't run yet.
+
+Push fix to GitHub when done.

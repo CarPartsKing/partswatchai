@@ -86,6 +86,13 @@ CONFIDENCE_PCT: float = 0.6827
 # Model label written to forecast_results.model_type
 MODEL_TYPE: str = "rolling_avg"
 
+# A-class SKUs are primarily forecast by Prophet on the buyer's laptop.
+# Rolling average runs as a safety-net for any A-class SKU whose most recent
+# Prophet run is older than this — guarantees the reorder engine always has
+# at least a baseline forecast for high-importance items.  B-class is excluded
+# (covered by ml/forecast_lgbm.py).
+PROPHET_FRESHNESS_DAYS: int = 7
+
 # Location written when there is no per-location breakdown (other model tiers)
 NETWORK_LOCATION: str = "ALL"
 
@@ -204,19 +211,78 @@ def _fetch_all(client: Any, table: str, select: str = "*",
 
 
 # ---------------------------------------------------------------------------
-# Step 1 — Fetch C-class SKUs (dynamic count — never hardcoded)
+# Step 1 — Fetch target SKUs (A-class fallback + all C-class)
 # ---------------------------------------------------------------------------
 
-def _fetch_c_class_skus(client: Any) -> list[str]:
-    """Return all sku_ids currently classified as C-class in sku_master.
+def _fetch_recent_prophet_skus(client: Any, cutoff: str) -> set[str]:
+    """Return the distinct sku_ids that have a Prophet forecast row whose
+    ``run_date >= cutoff``.  Used to skip A-class SKUs that already have a
+    fresh Prophet forecast — rolling only fills the gap for stale ones.
+    """
+    seen: set[str] = set()
+    offset = 0
+    while True:
+        page = (
+            client.table("forecast_results")
+            .select("sku_id")
+            .eq("model_type", "prophet")
+            .gte("run_date", cutoff)
+            .range(offset, offset + _PAGE_SIZE - 1)
+            .execute()
+            .data
+            or []
+        )
+        seen.update(r["sku_id"] for r in page if r.get("sku_id"))
+        if len(page) < _PAGE_SIZE:
+            break
+        offset += _PAGE_SIZE
+    return seen
+
+
+def _fetch_target_skus(client: Any) -> list[str]:
+    """Return all sku_ids that need a rolling-average forecast this run.
+
+    Coverage rules:
+      • **C-class** — all active SKUs (rolling is the primary model).
+      • **A-class** — only SKUs whose most recent Prophet forecast is older
+        than ``PROPHET_FRESHNESS_DAYS``.  Prophet runs on the buyer's laptop
+        and historically covers <5% of the active catalog, leaving 96% of
+        A-class without any forecast and therefore invisible to the reorder
+        engine.  Rolling fills that gap.
+      • **B-class** — intentionally excluded (handled by ml/forecast_lgbm.py).
 
     The count is queried live so it adjusts automatically as SKUs are added,
     discontinued, or reclassified over time.
     """
-    rows = _fetch_all(client, "sku_master", "sku_id", filters={"abc_class": "C"})
-    skus = [r["sku_id"] for r in rows if r.get("sku_id")]
-    log.info("  C-class SKUs found in sku_master: %d", len(skus))
-    return skus
+    c_rows = _fetch_all(client, "sku_master", "sku_id", filters={"abc_class": "C"})
+    c_skus = {r["sku_id"] for r in c_rows if r.get("sku_id")}
+    log.info("  C-class SKUs found in sku_master: %d", len(c_skus))
+
+    a_rows = _fetch_all(client, "sku_master", "sku_id", filters={"abc_class": "A"})
+    a_skus = {r["sku_id"] for r in a_rows if r.get("sku_id")}
+    log.info("  A-class SKUs found in sku_master: %d", len(a_skus))
+
+    cutoff = (date.today() - timedelta(days=PROPHET_FRESHNESS_DAYS)).isoformat()
+    prophet_recent = _fetch_recent_prophet_skus(client, cutoff)
+    a_with_prophet = a_skus & prophet_recent
+    a_needs_fallback = a_skus - prophet_recent
+    log.info(
+        "  A-class with fresh Prophet forecast (run_date >= %s): %d  "
+        "→ skipping; rolling fallback covers remaining %d.",
+        cutoff, len(a_with_prophet), len(a_needs_fallback),
+    )
+
+    target = c_skus | a_needs_fallback
+    log.info(
+        "  Total SKUs scheduled for rolling forecast: %d  "
+        "(C-class %d + A-class fallback %d)",
+        len(target), len(c_skus), len(a_needs_fallback),
+    )
+    return list(target)
+
+
+# Backward-compatible alias retained for any external caller / tests.
+_fetch_c_class_skus = _fetch_target_skus
 
 
 # ---------------------------------------------------------------------------
@@ -520,16 +586,18 @@ def run_forecast(dry_run: bool = False) -> int:
              SKU_BATCH_SIZE, PROGRESS_EVERY)
     log.info("-" * 60)
 
-    # ── 1. Fetch C-class SKUs (live count — never hardcoded) ──────────────
-    log.info("Fetching C-class SKUs from sku_master …")
-    c_class_skus = _fetch_c_class_skus(client_holder[0])
+    # ── 1. Fetch target SKUs (C-class + A-class fallback) ────────────────
+    log.info("Fetching target SKUs from sku_master (C-class + A-class fallback) …")
+    target_skus = _fetch_target_skus(client_holder[0])
 
-    if not c_class_skus:
-        log.warning("No C-class SKUs found — nothing to forecast.")
+    if not target_skus:
+        log.warning("No target SKUs found — nothing to forecast.")
         return 0
 
     # Sort once so progress output is deterministic across runs.
-    c_class_skus = sorted(c_class_skus)
+    target_skus = sorted(target_skus)
+    # Local alias preserved so the rest of the function reads identically.
+    c_class_skus = target_skus
     total_skus = len(c_class_skus)
 
     # ── 2. Fetch location tiers + demand quality (small reference tables) ─
@@ -551,7 +619,7 @@ def run_forecast(dry_run: bool = False) -> int:
 
     n_batches = math.ceil(total_skus / SKU_BATCH_SIZE)
     log.info(
-        "[ROLLING] Processing %d C-class SKUs in %d batches of %d …",
+        "[ROLLING] Processing %d target SKUs (C-class + A-class fallback) in %d batches of %d …",
         total_skus, n_batches, SKU_BATCH_SIZE,
     )
 
@@ -649,7 +717,7 @@ def run_forecast(dry_run: bool = False) -> int:
         # Progress milestone every PROGRESS_EVERY SKUs
         if (skus_done % PROGRESS_EVERY) < SKU_BATCH_SIZE or skus_done == total_skus:
             log.info(
-                "[ROLLING] Processed %d / %d C-class SKUs  "
+                "[ROLLING] Processed %d / %d target SKUs  "
                 "(pairs=%d skipped=%d rows=%d elapsed=%.0fs)",
                 skus_done, total_skus, processed_pairs, skipped_pairs,
                 total_rows_written, time.perf_counter() - t_start,
@@ -660,8 +728,8 @@ def run_forecast(dry_run: bool = False) -> int:
     elapsed = time.perf_counter() - t_start
     log.info("=" * 60)
     log.info("Rolling average forecast complete  (%.2fs)", elapsed)
-    log.info("  C-class SKUs queried:              %d", total_skus)
-    log.info("  C-class SKUs with no sales:        %d", skus_no_sales)
+    log.info("  Target SKUs queried (A-fallback + C): %d", total_skus)
+    log.info("  Target SKUs with no sales:           %d", skus_no_sales)
     log.info("  (SKU, location) pairs processed:   %d", processed_pairs)
     log.info("  (SKU, location) pairs skipped:     %d  (< %d sale days)",
              skipped_pairs, MIN_SALE_DAYS)

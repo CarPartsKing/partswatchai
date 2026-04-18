@@ -355,14 +355,25 @@ def _write_quality_issues(
                 "checked_at": now,
             })
 
-    for i in range(0, len(records), BATCH_SIZE):
-        batch = records[i : i + BATCH_SIZE]
+    # Dedup within the batch by the unique key (source_table, source_id,
+    # issue_type) before upsert.  Postgres raises 21000 ('cannot affect row
+    # a second time') when a single ON CONFLICT statement targets the same
+    # conflict key twice — which happens here whenever a tx_id appears in
+    # more than one flagged day row for the same SKU/issue_type.  Last
+    # write wins, mirroring the autocube_product_pull dedup pattern.
+    seen: dict[tuple[str, str, str], dict] = {}
+    for r in records:
+        seen[(r["source_table"], r["source_id"], r["issue_type"])] = r
+    deduped = list(seen.values())
+
+    for i in range(0, len(deduped), BATCH_SIZE):
+        batch = deduped[i : i + BATCH_SIZE]
         client.table("data_quality_issues").upsert(
             batch,
             on_conflict="source_table,source_id,issue_type",
         ).execute()
 
-    return len(records)
+    return len(deduped)
 
 
 # ---------------------------------------------------------------------------

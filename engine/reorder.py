@@ -1465,9 +1465,17 @@ def run_reorder(dry_run: bool = False) -> int:
             batch = quality_issues[offset:offset + WRITE_BATCH_SIZE]
             for attempt in range(1, _MAX_RETRIES + 1):
                 try:
+                    # Use upsert with ignore_duplicates so retries (and the
+                    # rare same-day rerun) don't fail with 23505 against the
+                    # (source_table, source_id, issue_type) unique key.  The
+                    # audit row is informational; the first-write wins.
                     resp = (
                         client_holder[0].table("data_quality_issues")
-                        .insert(batch)
+                        .upsert(
+                            batch,
+                            on_conflict="source_table,source_id,issue_type",
+                            ignore_duplicates=True,
+                        )
                         .execute()
                     )
                     quality_written += len(resp.data or [])

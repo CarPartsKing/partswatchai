@@ -55,3 +55,9 @@ COMMENT ON TABLE sku_location_share IS
     'Per-location demand share of a SKU''s network total over the rolling '
     'forecast lookback.  Used by engine/reorder.py to scale network-level '
     'forecasts (location_id=''ALL'') down to per-location predictions.';
+
+-- Project rule: every new-table migration disables RLS so the service-role
+-- client (and ad-hoc SQL writes) are never blocked by an empty policy set.
+-- Without this the service-role upserts silently succeed-with-zero-rows or
+-- 42501 when policies exist but block the role.
+ALTER TABLE sku_location_share DISABLE ROW LEVEL SECURITY;

@@ -163,6 +163,10 @@ def _build_weather(client: Any, today: date) -> dict:
         "freeze_days_count": len(freeze_days),
         "coldest_temp": float(coldest["temp_min_f"]) if coldest else None,
         "coldest_date": coldest["log_date"] if coldest else None,
+        # Static "what spikes during a freeze" list — buyers want to see
+        # which categories to push to the front of the buy when the freeze
+        # banner fires.  Front-end only renders this when freeze_warning.
+        "freeze_categories": _FREEZE_CATEGORIES if len(freeze_days) > 0 else [],
     }
 
 
@@ -996,6 +1000,292 @@ def _build_supplier_detail(client: Any, today: date) -> list[dict]:
     return result
 
 
+def _build_basket_rules(client: Any, today: date) -> list[dict]:
+    """Top co-purchase rules by lift from the most recent rule_date.
+
+    Counter staff use these as live "if a customer buys X, suggest Y"
+    prompts.  We only show the latest rule_date so stale rules from a
+    previous nightly run don't clutter the panel.
+    """
+    try:
+        latest = (
+            client.table("basket_rules")
+            .select("rule_date")
+            .order("rule_date", desc=True)
+            .limit(1)
+            .execute()
+            .data or []
+        )
+    except Exception:
+        return []
+    if not latest:
+        return []
+    rule_date = latest[0]["rule_date"]
+    try:
+        rows = (
+            client.table("basket_rules")
+            .select("antecedent_sku,consequent_sku,support,confidence,lift,transaction_count")
+            .eq("rule_date", rule_date)
+            .order("lift", desc=True)
+            .limit(10)
+            .execute()
+            .data or []
+        )
+    except Exception:
+        rows = []
+    return [
+        {
+            "antecedent_sku":    r.get("antecedent_sku"),
+            "consequent_sku":    r.get("consequent_sku"),
+            "support":           float(r.get("support") or 0),
+            "confidence":        float(r.get("confidence") or 0),
+            "lift":              float(r.get("lift") or 0),
+            "transaction_count": int(r.get("transaction_count") or 0),
+            "rule_date":         rule_date,
+        }
+        for r in rows
+    ]
+
+
+def _build_abc_xyz_matrix(client: Any, today: date) -> dict:
+    """Counts of SKUs in each ABC × XYZ cell, plus highlighted AZ list.
+
+    AZ is the highest-risk class (top revenue, erratic demand) and gets a
+    deeper safety stock — so we surface a small sample for buyer review.
+    """
+    cells = ["AX","AY","AZ","BX","BY","BZ","CX","CY","CZ"]
+    counts: dict[str, int] = {c: 0 for c in cells}
+    for c in cells:
+        try:
+            r = (
+                client.table("sku_master")
+                .select("sku_id", count="exact", head=True)
+                .eq("abc_xyz_class", c)
+                .execute()
+            )
+            counts[c] = int(r.count or 0)
+        except Exception:
+            counts[c] = 0
+
+    # Pull a small sample of AZ SKUs (highest-risk) so the panel can show
+    # what's hiding in that cell without paginating tens of thousands of rows.
+    az_sample: list[dict] = []
+    try:
+        az_sample = (
+            client.table("sku_master")
+            .select("sku_id,description,part_category,avg_weekly_units,brand")
+            .eq("abc_xyz_class", "AZ")
+            .order("avg_weekly_units", desc=True)
+            .limit(10)
+            .execute()
+            .data or []
+        )
+    except Exception:
+        az_sample = []
+
+    return {
+        "counts": counts,
+        "total":  sum(counts.values()),
+        "az_sample": [
+            {
+                "sku_id":           r.get("sku_id"),
+                "description":      r.get("description") or "",
+                "part_category":    r.get("part_category") or "",
+                "brand":            r.get("brand") or "",
+                "avg_weekly_units": round(float(r.get("avg_weekly_units") or 0), 1),
+            }
+            for r in az_sample
+        ],
+    }
+
+
+def _build_morning_brief(client: Any, today: date) -> dict:
+    """Single-line headline counts for the morning-brief banner.
+
+    Reuses the same data the individual panels query but pre-aggregated
+    so the header can render in one render pass without waiting for
+    every panel to hydrate.
+    """
+    today_iso = today.isoformat()
+    try:
+        crit = (
+            client.table("alerts")
+            .select("alert_key", count="exact", head=True)
+            .eq("alert_date", today_iso)
+            .eq("severity", "critical")
+            .eq("is_acknowledged", False)
+            .execute()
+        )
+        critical_alerts = int(crit.count or 0)
+    except Exception:
+        critical_alerts = 0
+
+    # Latest reorder run, then count critical/warning unapproved.
+    urgent_reorders = 0
+    transfer_ops = 0
+    try:
+        latest = (
+            client.table("reorder_recommendations")
+            .select("recommendation_date")
+            .order("recommendation_date", desc=True)
+            .limit(1)
+            .execute()
+            .data or []
+        )
+        if latest:
+            rec_date = latest[0]["recommendation_date"]
+            ur = (
+                client.table("reorder_recommendations")
+                .select("recommendation_id", count="exact", head=True)
+                .eq("recommendation_date", rec_date)
+                .eq("is_approved", False)
+                .in_("urgency", ["critical", "warning", "high"])
+                .execute()
+            )
+            urgent_reorders = int(ur.count or 0)
+            tr = (
+                client.table("reorder_recommendations")
+                .select("recommendation_id", count="exact", head=True)
+                .eq("recommendation_date", rec_date)
+                .eq("recommendation_type", "transfer")
+                .execute()
+            )
+            transfer_ops = int(tr.count or 0)
+    except Exception:
+        pass
+
+    return {
+        "critical_alerts": critical_alerts,
+        "urgent_reorders": urgent_reorders,
+        "transfer_ops":    transfer_ops,
+    }
+
+
+# Categories at risk during a freeze event.  Static map — these are the
+# four categories an automotive aftermarket buyer monitors when overnight
+# lows drop below 32°F.
+_FREEZE_CATEGORIES = ["Batteries", "Antifreeze / Coolant", "Starting Fluid", "Wiper Fluid"]
+
+
+def _build_critical_actions(client: Any, today: date) -> list[dict]:
+    """Aggregated 'do this now' list across alerts, POs, and supplier risk.
+
+    Items:
+      - Critical stockouts on active-demand SKUs (today's critical alerts
+        with alert_type LIKE 'stockout%')
+      - Overdue purchase orders (status='open', expected_delivery < today)
+      - RED-flagged suppliers with at least one open PO
+
+    Returns one combined list, severity-sorted, capped at 30 entries so
+    the panel stays scannable.
+    """
+    today_iso = today.isoformat()
+    actions: list[dict] = []
+
+    # --- 1. Today's critical alerts (any type — buyer triages) ---
+    try:
+        alerts = _paginate(
+            client, "alerts",
+            "alert_type,severity,sku_id,location_id,supplier_id,message,alert_key",
+            filters={"alert_date": today_iso, "severity": "critical"},
+            eq_bool={"is_acknowledged": False},
+        )
+    except Exception:
+        alerts = []
+    for a in alerts[:20]:
+        loc = a.get("location_id") or ""
+        actions.append({
+            "kind":        "alert",
+            "severity":    "critical",
+            "title":       (a.get("alert_type") or "alert").replace("_", " ").title(),
+            "description": (a.get("message") or "")[:200],
+            "sku_id":      a.get("sku_id"),
+            "location_id": loc,
+            "location_display": _loc_display(loc) if loc else "",
+            "supplier_id": a.get("supplier_id"),
+            "alert_key":   a.get("alert_key"),
+            "action":      "Acknowledge",
+        })
+
+    # --- 2. Overdue open POs ---
+    try:
+        po_rows = _paginate(
+            client, "purchase_orders",
+            "po_number,sku_id,supplier_id,qty_ordered,unit_cost,"
+            "expected_delivery_date,status",
+            filters={"status": "open"},
+        )
+    except Exception:
+        po_rows = []
+    overdue = [
+        p for p in po_rows
+        if p.get("expected_delivery_date")
+        and str(p["expected_delivery_date"])[:10] < today_iso
+    ]
+    overdue.sort(key=lambda p: str(p.get("expected_delivery_date") or ""))
+    for p in overdue[:15]:
+        try:
+            value = float(p.get("qty_ordered") or 0) * float(p.get("unit_cost") or 0)
+        except Exception:
+            value = 0.0
+        actions.append({
+            "kind":        "overdue_po",
+            "severity":    "critical",
+            "title":       "Overdue PO",
+            "description": (
+                f"PO {p.get('po_number','')} for {p.get('sku_id','')} from "
+                f"{p.get('supplier_id','')} — expected "
+                f"{p.get('expected_delivery_date','')}, qty {p.get('qty_ordered',0)} "
+                f"(${value:,.0f})"
+            ),
+            "sku_id":      p.get("sku_id"),
+            "supplier_id": p.get("supplier_id"),
+            "po_number":   p.get("po_number"),
+            "value":       round(value, 2),
+            "action":      "Chase supplier",
+        })
+
+    # --- 3. RED suppliers with any open PO ---
+    open_po_by_sup: dict[str, int] = defaultdict(int)
+    for p in po_rows:
+        sid = p.get("supplier_id") or ""
+        if sid:
+            open_po_by_sup[sid] += 1
+    try:
+        score_rows = _paginate(
+            client, "supplier_scores",
+            "supplier_id,score_date,risk_flag,composite_score,supplier_name",
+        )
+    except Exception:
+        score_rows = []
+    latest_score: dict[str, dict] = {}
+    for r in score_rows:
+        sid = r.get("supplier_id") or ""
+        if not sid:
+            continue
+        if sid not in latest_score or (r.get("score_date") or "") > latest_score[sid].get("score_date", ""):
+            latest_score[sid] = r
+    for sid, s in latest_score.items():
+        if (s.get("risk_flag") or "").lower() == "red" and open_po_by_sup.get(sid, 0) > 0:
+            actions.append({
+                "kind":        "red_supplier",
+                "severity":    "warning",
+                "title":       "Red-flagged supplier with open POs",
+                "description": (
+                    f"{s.get('supplier_name') or sid} has "
+                    f"{open_po_by_sup[sid]} open PO(s) — composite score "
+                    f"{float(s.get('composite_score') or 0):.1f}"
+                ),
+                "supplier_id": sid,
+                "action":      "Review supplier",
+            })
+
+    # Cap final list and pin critical first.
+    sev_rank = {"critical": 0, "warning": 1, "info": 2}
+    actions.sort(key=lambda a: sev_rank.get(a.get("severity", "info"), 9))
+    return actions[:30]
+
+
 def _build_pipeline_status(client: Any, today: date) -> list[dict]:
     """Last-run summary for the four core nightly stages.
 
@@ -1100,7 +1390,9 @@ def dashboard_data():
     sections = [
         ("network_kpis",         _build_network_kpis),
         ("weather",              _build_weather),
+        ("morning_brief",        _build_morning_brief),
         ("alerts",               _build_alerts),
+        ("critical_actions",     _build_critical_actions),
         ("reorder",              _build_reorder),
         ("dead_stock",           _build_dead_stock),
         ("supplier_health",      _build_supplier_health),
@@ -1111,6 +1403,8 @@ def dashboard_data():
         ("location_performance", _build_location_performance),
         ("top_skus",             _build_top_skus),
         ("anomaly_summary",      _build_anomaly_summary),
+        ("basket_rules",         _build_basket_rules),
+        ("abc_xyz_matrix",       _build_abc_xyz_matrix),
         ("pipeline_status",      _build_pipeline_status),
     ]
 
@@ -1136,7 +1430,7 @@ def dashboard_data():
         log.info("[section] %s DONE in %dms", name, ms)
         return name, data, ms
 
-    with ThreadPoolExecutor(max_workers=min(8, len(sections))) as ex:
+    with ThreadPoolExecutor(max_workers=min(10, len(sections))) as ex:
         futures = [ex.submit(_run_section, name, fn) for name, fn in sections]
         for fut in as_completed(futures):
             name, data, ms = fut.result()
@@ -1238,6 +1532,165 @@ def dead_stock_export():
     )
 
 
+# ---------------------------------------------------------------------------
+# Generic CSV helpers — shared by every export endpoint.
+# ---------------------------------------------------------------------------
+
+def _csv_safe(v: Any) -> str:
+    """Neutralize CSV-injection (CWE-1236) attempts.
+
+    Cells whose first character is `=`, `+`, `-`, `@`, TAB, or CR can
+    trigger formula execution when the file is opened in Excel/Sheets.
+    Prefix any such value with a single quote so the spreadsheet treats
+    it as literal text.  SKU/supplier IDs in this dataset can legitimately
+    start with `-` so we neutralize, not reject.
+    """
+    if v is None:
+        return ""
+    s = str(v)
+    if s and s[0] in ("=", "+", "-", "@", "\t", "\r"):
+        return "'" + s
+    return s
+
+
+def _csv_response(headers: list[str], rows: list[list[Any]], filename: str):
+    import csv as _csv
+    import io as _io
+    from flask import Response as _Response
+    buf = _io.StringIO()
+    w = _csv.writer(buf)
+    w.writerow(headers)
+    for r in rows:
+        w.writerow([_csv_safe(c) for c in r])
+    return _Response(
+        buf.getvalue(),
+        mimetype="text/csv",
+        headers={"Content-Disposition": f"attachment; filename={filename}"},
+    )
+
+
+@app.route("/api/reorder/export.csv")
+def reorder_export():
+    """CSV of every pending reorder rec for the latest run.
+
+    Used by the Reorder panel's "Export to CSV" button so the buying
+    team can drop the day's queue into spreadsheet workflows.
+    """
+    try:
+        client = get_client()
+    except Exception as exc:
+        log.exception("Supabase connection failed for reorder export.")
+        return jsonify({"error": str(exc)}), 503
+    try:
+        latest = (
+            client.table("reorder_recommendations")
+            .select("recommendation_date")
+            .order("recommendation_date", desc=True)
+            .limit(1)
+            .execute()
+            .data or []
+        )
+    except Exception:
+        latest = []
+    if not latest:
+        return jsonify({"error": "no reorder recommendations available yet"}), 404
+    rec_date = latest[0]["recommendation_date"]
+
+    rows = _paginate(
+        client, "reorder_recommendations",
+        "sku_id,location_id,recommendation_type,urgency,qty_to_order,"
+        "supplier_id,days_of_supply_remaining,forecast_model_used,"
+        "transfer_from_location,is_approved,recommendation_date",
+        filters={"recommendation_date": rec_date, "is_approved": False},
+    )
+    urgency_rank = {"critical": 0, "warning": 1, "high": 1, "normal": 2, "medium": 2, "low": 3}
+    rows.sort(key=lambda r: (
+        urgency_rank.get((r.get("urgency") or "low").lower(), 9),
+        -float(r.get("qty_to_order") or 0),
+    ))
+
+    headers = [
+        "recommendation_date", "urgency", "type", "sku_id", "location_id",
+        "location_name", "transfer_from", "qty_to_order",
+        "days_of_supply_remaining", "supplier_id", "forecast_model_used",
+    ]
+    out = []
+    for r in rows:
+        out.append([
+            r.get("recommendation_date"),
+            r.get("urgency"),
+            r.get("recommendation_type"),
+            r.get("sku_id"),
+            r.get("location_id"),
+            _loc_display(r.get("location_id", "")),
+            _loc_display(r.get("transfer_from_location", "")) if r.get("transfer_from_location") else "",
+            r.get("qty_to_order"),
+            r.get("days_of_supply_remaining"),
+            r.get("supplier_id"),
+            r.get("forecast_model_used"),
+        ])
+    log.info("Reorder CSV export: %d pending rows for %s", len(out), rec_date)
+    return _csv_response(headers, out, f"reorder_recommendations_{rec_date}.csv")
+
+
+@app.route("/api/transfers/export.csv")
+def transfers_export():
+    """CSV of every transfer-type recommendation for the latest run.
+
+    Used by the Transfer Opportunities panel's export button so logistics
+    can dispatch inter-location moves from a single spreadsheet.
+    """
+    try:
+        client = get_client()
+    except Exception as exc:
+        log.exception("Supabase connection failed for transfers export.")
+        return jsonify({"error": str(exc)}), 503
+    try:
+        latest = (
+            client.table("reorder_recommendations")
+            .select("recommendation_date")
+            .order("recommendation_date", desc=True)
+            .limit(1)
+            .execute()
+            .data or []
+        )
+    except Exception:
+        latest = []
+    if not latest:
+        return jsonify({"error": "no reorder recommendations available yet"}), 404
+    rec_date = latest[0]["recommendation_date"]
+
+    rows = _paginate(
+        client, "reorder_recommendations",
+        "sku_id,location_id,recommendation_type,urgency,qty_to_order,"
+        "transfer_from_location,days_of_supply_remaining",
+        filters={"recommendation_date": rec_date, "recommendation_type": "transfer"},
+    )
+    rows.sort(key=lambda r: -float(r.get("qty_to_order") or 0))
+
+    headers = [
+        "recommendation_date", "urgency", "sku_id",
+        "from_location_id", "from_location_name",
+        "to_location_id", "to_location_name",
+        "qty_to_transfer", "days_of_supply_remaining",
+    ]
+    out = []
+    for r in rows:
+        out.append([
+            rec_date,
+            r.get("urgency"),
+            r.get("sku_id"),
+            r.get("transfer_from_location"),
+            _loc_display(r.get("transfer_from_location", "")) if r.get("transfer_from_location") else "",
+            r.get("location_id"),
+            _loc_display(r.get("location_id", "")),
+            r.get("qty_to_order"),
+            r.get("days_of_supply_remaining"),
+        ])
+    log.info("Transfers CSV export: %d transfer rows for %s", len(out), rec_date)
+    return _csv_response(headers, out, f"transfer_recommendations_{rec_date}.csv")
+
+
 @app.route("/api/chat", methods=["POST"])
 def chat():
     """Handle a chat message, maintaining per-session conversation history.
@@ -1293,7 +1746,27 @@ def health():
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
+    import socket as _socket
+
     debug = "--dev" in sys.argv
-    log.info("Starting PartsWatch AI dashboard on port %d  debug=%s", port, debug)
-    app.run(host="0.0.0.0", port=port, debug=debug, threaded=True)
+    requested = int(os.environ.get("PORT", 5000))
+    # Try requested port, then two fallbacks.  Replit's preview proxy will
+    # still find the app on 5001/5002, and we log the chosen port loudly so
+    # the workflow log shows it.
+    candidates = [requested, requested + 1, requested + 2]
+    chosen: int | None = None
+    for p in candidates:
+        with _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM) as s:
+            s.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
+            try:
+                s.bind(("0.0.0.0", p))
+            except OSError:
+                log.warning("Port %d already in use, trying next.", p)
+                continue
+        chosen = p
+        break
+    if chosen is None:
+        log.error("All candidate ports busy: %s", candidates)
+        sys.exit(1)
+    log.info("Starting PartsWatch AI dashboard on port %d  debug=%s", chosen, debug)
+    app.run(host="0.0.0.0", port=chosen, debug=debug, threaded=True)

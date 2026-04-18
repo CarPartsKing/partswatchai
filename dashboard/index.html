@@ -416,15 +416,131 @@
   .anomaly-high { color: var(--critical); }
   .anomaly-neg  { color: var(--warning); }
 
+  /* ---------- Morning brief banner (Panel 1) ---------- */
+  .morning-brief {
+    background: var(--surface); border: 1px solid var(--border);
+    border-left: 3px solid var(--blue);
+    border-radius: var(--radius-lg); padding: 14px 18px; margin-bottom: 16px;
+  }
+  .morning-brief .greeting { font-size: 14px; color: var(--text); font-weight: 600; }
+  .morning-brief .brief-stats {
+    display: flex; gap: 24px; flex-wrap: wrap; margin-top: 8px;
+    font-size: 13px; color: var(--muted);
+  }
+  .morning-brief .brief-stat strong { color: var(--text); font-weight: 700; font-size: 16px; }
+  .morning-brief .brief-stat.crit strong { color: var(--critical); }
+  .morning-brief .brief-stat.warn strong { color: var(--warning); }
+  .morning-brief .brief-stat.info strong { color: var(--blue); }
+
+  /* ---------- Freeze categories chips ---------- */
+  .freeze-cats {
+    display: flex; gap: 6px; flex-wrap: wrap; margin-top: 10px; width: 100%;
+    border-top: 1px dashed rgba(248,81,73,0.3); padding-top: 10px;
+  }
+  .freeze-cats .label { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.4px; margin-right: 4px; }
+  .freeze-cat-chip {
+    background: var(--critical-bg); color: var(--critical);
+    border: 1px solid rgba(248,81,73,0.3);
+    border-radius: 12px; padding: 3px 10px; font-size: 11px; font-weight: 600;
+  }
+
+  /* ---------- Collapse / expand toggle ---------- */
+  .card-toggle {
+    background: none; border: 1px solid var(--border); color: var(--muted);
+    border-radius: 4px; padding: 2px 8px; font-size: 11px; cursor: pointer;
+    margin-left: 8px; transition: color 0.15s, border-color 0.15s;
+    font-family: inherit;
+  }
+  .card-toggle:hover { color: var(--text); border-color: var(--muted); }
+  .card.collapsed .collapsible { display: none; }
+  .card-header-actions { display: flex; align-items: center; gap: 8px; }
+
+  /* ---------- Dead Stock visual urgency ---------- */
+  .card.dead-stock-card { border-left: 3px solid var(--critical); }
+
+  /* ---------- Critical Action Items panel ---------- */
+  .crit-action-list { display: flex; flex-direction: column; gap: 6px; padding: 4px 0; }
+  .crit-action-item {
+    display: grid; grid-template-columns: 88px 1fr auto;
+    gap: 12px; align-items: center;
+    padding: 10px 14px; border-bottom: 1px solid var(--border2);
+  }
+  .crit-action-item:last-child { border-bottom: none; }
+  .crit-action-item .desc { font-size: 12px; color: var(--text); line-height: 1.45; }
+  .crit-action-item .meta { font-size: 11px; color: var(--muted); margin-top: 2px; }
+  .crit-action-item .ack-btn {
+    background: var(--surface2); border: 1px solid var(--border); color: var(--muted);
+    padding: 4px 10px; border-radius: 4px; font-size: 11px; cursor: pointer;
+    transition: color 0.15s, border-color 0.15s;
+  }
+  .crit-action-item .ack-btn:hover { color: var(--text); border-color: var(--blue); }
+
+  /* ---------- Basket rules ---------- */
+  .basket-rule {
+    padding: 10px 14px; border-bottom: 1px solid var(--border2); font-size: 12px;
+  }
+  .basket-rule:last-child { border-bottom: none; }
+  .basket-rule .arrow { color: var(--muted); margin: 0 8px; }
+  .basket-rule .stats { color: var(--muted); font-size: 11px; margin-top: 3px; }
+  .basket-rule .stats strong { color: var(--text); font-weight: 600; }
+
+  /* ---------- ABC × XYZ matrix ---------- */
+  .abc-xyz-matrix {
+    display: grid; grid-template-columns: 60px repeat(3, 1fr);
+    gap: 6px; margin-top: 10px;
+  }
+  .abc-xyz-cell {
+    background: var(--surface2); border: 1px solid var(--border2);
+    border-radius: 6px; padding: 10px; text-align: center;
+  }
+  .abc-xyz-cell.az { border-color: var(--critical); background: var(--critical-bg); }
+  .abc-xyz-cell .cell-name { font-size: 11px; color: var(--muted); font-weight: 600; }
+  .abc-xyz-cell .cell-count { font-size: 18px; font-weight: 700; color: var(--text); margin-top: 2px; }
+  .abc-xyz-cell .cell-hint { font-size: 10px; color: var(--muted); margin-top: 2px; }
+  .abc-xyz-axis-y, .abc-xyz-axis-x {
+    font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.4px;
+    display: flex; align-items: center; justify-content: center; padding: 4px;
+  }
+
+  /* ---------- Reorder filter buttons ---------- */
+  .filter-bar {
+    display: flex; gap: 6px; flex-wrap: wrap;
+    padding: 10px 14px; background: var(--surface2);
+    border-bottom: 1px solid var(--border2);
+  }
+  .filter-btn {
+    background: var(--surface); border: 1px solid var(--border);
+    color: var(--muted); padding: 4px 12px; border-radius: 4px;
+    font-size: 11px; cursor: pointer; font-family: inherit;
+    transition: color 0.15s, border-color 0.15s;
+  }
+  .filter-btn:hover { color: var(--text); }
+  .filter-btn.active { background: var(--info-bg); color: var(--info); border-color: var(--info); }
+
+  .panel-export-btn {
+    background: var(--surface2); color: var(--text); border: 1px solid var(--border);
+    border-radius: 4px; padding: 6px 12px; font-size: 11px; font-weight: 600;
+    cursor: pointer; letter-spacing: 0.3px;
+    transition: background 0.15s, border-color 0.15s;
+  }
+  .panel-export-btn:hover { background: var(--border2); border-color: var(--blue); }
+
   @media (max-width: 768px) {
     .header { flex-direction: column; align-items: flex-start; gap: 10px; padding: 12px 16px; }
-    .header-right { width: 100%; justify-content: space-between; }
-    .main { padding: 12px 16px 40px; }
-    .alert-summary-row, .kpi-row { grid-template-columns: 1fr 1fr; }
+    .header-right { width: 100%; justify-content: space-between; flex-wrap: wrap; }
+    .main { padding: 12px 12px 40px; }
+    .kpi-row { grid-template-columns: 1fr 1fr; gap: 8px; }
+    .alert-summary-row { grid-template-columns: 1fr 1fr 1fr; gap: 8px; }
     .grid-2, .grid-3 { grid-template-columns: 1fr; }
     .weather-banner { padding: 14px 16px; }
     .data-table { font-size: 12px; }
     .data-table th, .data-table td { padding: 8px; }
+    .crit-action-item { grid-template-columns: 1fr; gap: 4px; }
+    .crit-action-item .ack-btn { width: fit-content; }
+    .abc-xyz-matrix { grid-template-columns: 50px repeat(3, 1fr); }
+    .abc-xyz-cell { padding: 6px; }
+    .abc-xyz-cell .cell-count { font-size: 14px; }
+    .morning-brief .brief-stats { gap: 14px; }
     body { padding-right: 0; }
     .chat-panel { display: none; }
     .chat-toggle-tab { display: none !important; }
@@ -432,6 +548,10 @@
   @media (max-width: 1024px) {
     .grid-3 { grid-template-columns: 1fr 1fr; }
     .kpi-row { grid-template-columns: repeat(3, 1fr); }
+  }
+  @media (max-width: 480px) {
+    .kpi-row { grid-template-columns: 1fr; }
+    .alert-summary-row { grid-template-columns: 1fr; }
   }
 </style>
 </head>
@@ -457,6 +577,14 @@
 
   <div id="error-area"></div>
 
+  <!-- ============== PANEL 1 — Morning Brief Header ============== -->
+  <div class="morning-brief" id="morning-brief">
+    <div class="greeting">Good morning &mdash; here's what needs your attention today.</div>
+    <div class="brief-stats" id="brief-stats">
+      <div class="brief-stat"><strong>&mdash;</strong> loading network signals&hellip;</div>
+    </div>
+  </div>
+
   <div class="kpi-row" id="kpi-row">
     <div class="kpi-card"><div class="kpi-label">Total SKUs</div><div class="kpi-value skeleton" style="height:32px">&nbsp;</div></div>
     <div class="kpi-card"><div class="kpi-label">Locations</div><div class="kpi-value skeleton" style="height:32px">&nbsp;</div></div>
@@ -465,6 +593,7 @@
     <div class="kpi-card"><div class="kpi-label">Anomalies Flagged</div><div class="kpi-value skeleton" style="height:32px">&nbsp;</div></div>
   </div>
 
+  <!-- ============== PANEL 2 — Weather & Freeze ============== -->
   <div id="weather-section" class="section">
     <div class="skeleton" style="height:80px;border-radius:12px"></div>
   </div>
@@ -475,123 +604,207 @@
     <div class="alert-card info"><div class="alert-count skeleton" style="width:40px;height:36px">&nbsp;</div><div><div class="alert-label">Info</div></div></div>
   </div>
 
+  <!-- ============== PANEL 3 — Critical Action Items (NEW) ============== -->
+  <div class="section card" id="critical-actions-section">
+    <div class="card-header">
+      <span class="card-title">Critical Action Items</span>
+      <div class="card-header-actions">
+        <span class="card-updated" id="critical-actions-updated"></span>
+        <button class="card-toggle" data-target="critical-actions-section" onclick="toggleCard(this)">&minus;</button>
+      </div>
+    </div>
+    <div class="collapsible card-body" style="padding:0" id="critical-actions-body">
+      <div class="skeleton" style="height:80px;margin:16px;border-radius:6px"></div>
+    </div>
+  </div>
+
   <div class="section card" id="alerts-section">
     <div class="card-header">
       <span class="card-title">Critical &amp; Warning Alerts</span>
-      <span class="card-updated" id="alerts-updated"></span>
+      <div class="card-header-actions">
+        <span class="card-updated" id="alerts-updated"></span>
+        <button class="card-toggle" data-target="alerts-section" onclick="toggleCard(this)">&minus;</button>
+      </div>
     </div>
-    <div class="card-body" id="alerts-body"><div class="skeleton" style="height:60px"></div></div>
+    <div class="collapsible card-body" id="alerts-body"><div class="skeleton" style="height:60px"></div></div>
   </div>
 
-  <div class="grid-2">
-    <div class="card" id="abc-section">
-      <div class="card-header">
-        <span class="card-title">ABC Classification</span>
-        <span class="card-updated" id="abc-updated"></span>
-      </div>
-      <div class="card-body" id="abc-body"><div class="skeleton" style="height:100px"></div></div>
-    </div>
-
-    <div class="card" id="topsku-section">
-      <div class="card-header">
-        <span class="card-title">Top A-Class SKUs</span>
-        <span class="card-updated" id="topsku-updated"></span>
-      </div>
-      <div class="card-body" style="padding:0" id="topsku-body"><div class="skeleton" style="height:100px;margin:16px;border-radius:6px"></div></div>
-    </div>
-  </div>
-
+  <!-- ============== PANEL 4 — Reorder Recommendations ============== -->
   <div class="section card" id="reorder-section">
     <div class="card-header">
       <span class="card-title">Reorder Recommendations</span>
-      <span class="card-updated" id="reorder-updated"></span>
+      <div class="card-header-actions">
+        <span class="card-updated" id="reorder-updated"></span>
+        <button class="panel-export-btn" onclick="exportReorder()">Export to CSV</button>
+        <button class="card-toggle" data-target="reorder-section" onclick="toggleCard(this)">&minus;</button>
+      </div>
     </div>
-    <div id="reorder-kpis"></div>
-    <div class="card-body" style="padding:0" id="reorder-body"><div class="skeleton" style="height:100px;margin:16px;border-radius:6px"></div></div>
+    <div class="collapsible">
+      <div id="reorder-kpis"></div>
+      <div class="filter-bar" id="reorder-filter-bar" style="display:none">
+        <button class="filter-btn active" data-filter="all"      onclick="setReorderFilter(this)">All</button>
+        <button class="filter-btn"        data-filter="critical" onclick="setReorderFilter(this)">Critical</button>
+        <button class="filter-btn"        data-filter="warning"  onclick="setReorderFilter(this)">Warning</button>
+        <button class="filter-btn"        data-filter="transfer" onclick="setReorderFilter(this)">Transfers</button>
+        <button class="filter-btn"        data-filter="po"       onclick="setReorderFilter(this)">Purchase Orders</button>
+      </div>
+      <div class="card-body" style="padding:0" id="reorder-body"><div class="skeleton" style="height:100px;margin:16px;border-radius:6px"></div></div>
+    </div>
   </div>
 
-  <div class="section card" id="dead-stock-section">
+  <!-- ============== PANEL 5 — Dead Stock Intelligence (HEADLINE) ============== -->
+  <div class="section card dead-stock-card" id="dead-stock-section">
     <div class="card-header">
-      <span class="card-title">Dead Stock &mdash; Capital at Risk</span>
-      <span class="card-updated" id="dead-stock-updated"></span>
+      <span class="card-title">Dead Stock Intelligence &mdash; Capital at Risk</span>
+      <div class="card-header-actions">
+        <span class="card-updated" id="dead-stock-updated"></span>
+        <button class="card-toggle" data-target="dead-stock-section" onclick="toggleCard(this)">&minus;</button>
+      </div>
     </div>
-    <div id="dead-stock-kpis"></div>
-    <div class="card-body" style="padding:0" id="dead-stock-body"><div class="skeleton" style="height:120px;margin:16px;border-radius:6px"></div></div>
-    <div style="padding:12px 14px;border-top:1px solid var(--border);background:var(--surface2);text-align:right">
-      <button id="dead-stock-export-btn"
-              onclick="exportLiquidation()"
-              style="background:var(--critical);color:#fff;border:0;border-radius:4px;padding:8px 14px;font-size:12px;font-weight:600;cursor:pointer;letter-spacing:0.3px">
-        Export Full Liquidation List
-      </button>
+    <div class="collapsible">
+      <div id="dead-stock-kpis"></div>
+      <div class="card-body" style="padding:0" id="dead-stock-body"><div class="skeleton" style="height:120px;margin:16px;border-radius:6px"></div></div>
+      <div style="padding:12px 14px;border-top:1px solid var(--border);background:var(--surface2);text-align:right">
+        <button id="dead-stock-export-btn"
+                onclick="exportLiquidation()"
+                style="background:var(--critical);color:#fff;border:0;border-radius:4px;padding:8px 14px;font-size:12px;font-weight:600;cursor:pointer;letter-spacing:0.3px">
+          Export Full Liquidation List
+        </button>
+      </div>
     </div>
   </div>
 
+  <!-- ============== PANEL 6 — Transfer Opportunities ============== -->
   <div class="section card" id="transfers-section">
     <div class="card-header">
-      <span class="card-title">Inter-Location Transfers (Last 30 Days)</span>
-      <span class="card-updated" id="transfers-updated"></span>
+      <span class="card-title">Transfer Opportunities (Last 30 Days)</span>
+      <div class="card-header-actions">
+        <span class="card-updated" id="transfers-updated"></span>
+        <button class="panel-export-btn" onclick="exportTransfers()">Export Transfer List</button>
+        <button class="card-toggle" data-target="transfers-section" onclick="toggleCard(this)">&minus;</button>
+      </div>
     </div>
-    <div class="card-body" id="transfers-body"><div class="skeleton" style="height:80px"></div></div>
+    <div class="collapsible card-body" id="transfers-body"><div class="skeleton" style="height:80px"></div></div>
   </div>
 
+  <!-- ============== PANEL 7 — Supplier Health ============== -->
   <div class="section card" id="supplier-detail-section">
     <div class="card-header">
       <span class="card-title">Supplier Health &amp; Open POs</span>
-      <span class="card-updated" id="supplier-updated"></span>
-    </div>
-    <!-- Persistent advisory: PO dataset is sample-only until PartsWatch EDI
-         is connected.  Hide this banner once real PO history flows in. -->
-    <div class="data-quality-banner" id="supplier-po-warning">
-      <span class="dqb-icon">&#9888;</span>
-      <div class="dqb-body">
-        <div class="dqb-title">Sample PO data</div>
-        Supplier scores based on limited PO sample data.
-        Full accuracy when PartsWatch PO history connects.
+      <div class="card-header-actions">
+        <span class="card-updated" id="supplier-updated"></span>
+        <button class="card-toggle" data-target="supplier-detail-section" onclick="toggleCard(this)">&minus;</button>
       </div>
     </div>
-    <div class="card-body" id="supplier-body"><div class="skeleton" style="height:120px"></div></div>
+    <div class="collapsible">
+      <!-- Persistent advisory: PO dataset is sample-only until PartsWatch EDI
+           is connected.  Hide this banner once real PO history flows in. -->
+      <div class="data-quality-banner" id="supplier-po-warning">
+        <span class="dqb-icon">&#9888;</span>
+        <div class="dqb-body">
+          <div class="dqb-title">Sample PO data</div>
+          Supplier scores based on limited PO sample data.
+          Full accuracy when PartsWatch PO history connects.
+        </div>
+      </div>
+      <div class="card-body" id="supplier-body"><div class="skeleton" style="height:120px"></div></div>
+    </div>
   </div>
 
-  <div class="grid-2">
-    <div class="card" id="inventory-section">
-      <div class="card-header">
-        <span class="card-title">Inventory Health</span>
+  <!-- ============== PANEL 8 — Inventory Health ============== -->
+  <div class="section card" id="inventory-section">
+    <div class="card-header">
+      <span class="card-title">Inventory Health</span>
+      <div class="card-header-actions">
         <span class="card-updated" id="inventory-updated"></span>
+        <button class="card-toggle" data-target="inventory-section" onclick="toggleCard(this)">&minus;</button>
       </div>
-      <div class="card-body" id="inventory-body"><div class="skeleton" style="height:100px"></div></div>
     </div>
+    <div class="collapsible card-body" id="inventory-body"><div class="skeleton" style="height:100px"></div></div>
+  </div>
 
-    <div class="card" id="accuracy-section">
-      <div class="card-header">
-        <span class="card-title">Forecast Accuracy</span>
-        <span class="card-updated" id="accuracy-updated"></span>
+  <!-- ============== PANEL 9 — Basket Intelligence (NEW) ============== -->
+  <div class="section card" id="basket-section">
+    <div class="card-header">
+      <span class="card-title">Basket Intelligence &mdash; Top Co-Purchase Rules</span>
+      <div class="card-header-actions">
+        <span class="card-updated" id="basket-updated"></span>
+        <button class="card-toggle" data-target="basket-section" onclick="toggleCard(this)">&minus;</button>
       </div>
-      <div class="card-body" id="accuracy-body"><div class="skeleton" style="height:100px"></div></div>
     </div>
+    <div class="collapsible card-body" style="padding:0" id="basket-body">
+      <div class="skeleton" style="height:80px;margin:16px;border-radius:6px"></div>
+    </div>
+  </div>
+
+  <!-- ============== PANEL 10 — Location Performance ============== -->
+  <div class="section card" id="location-section">
+    <div class="card-header">
+      <span class="card-title">Location Performance</span>
+      <div class="card-header-actions">
+        <span class="card-updated" id="location-updated"></span>
+        <button class="card-toggle" data-target="location-section" onclick="toggleCard(this)">&minus;</button>
+      </div>
+    </div>
+    <div class="collapsible card-body" id="location-body"><div class="skeleton" style="height:120px"></div></div>
+  </div>
+
+  <!-- ============== PANEL 11 — ABC × XYZ Classification ============== -->
+  <div class="section card" id="abc-xyz-section">
+    <div class="card-header">
+      <span class="card-title">ABC &times; XYZ Classification Matrix</span>
+      <div class="card-header-actions">
+        <span class="card-updated" id="abc-xyz-updated"></span>
+        <button class="card-toggle" data-target="abc-xyz-section" onclick="toggleCard(this)">&minus;</button>
+      </div>
+    </div>
+    <div class="collapsible card-body" id="abc-xyz-body"><div class="skeleton" style="height:140px"></div></div>
+  </div>
+
+  <div class="section card" id="topsku-section">
+    <div class="card-header">
+      <span class="card-title">Top A-Class SKUs</span>
+      <div class="card-header-actions">
+        <span class="card-updated" id="topsku-updated"></span>
+        <button class="card-toggle" data-target="topsku-section" onclick="toggleCard(this)">&minus;</button>
+      </div>
+    </div>
+    <div class="collapsible card-body" style="padding:0" id="topsku-body"><div class="skeleton" style="height:100px;margin:16px;border-radius:6px"></div></div>
+  </div>
+
+  <!-- ============== PANEL 12 — Forecast Accuracy ============== -->
+  <div class="section card" id="accuracy-section">
+    <div class="card-header">
+      <span class="card-title">Forecast Accuracy</span>
+      <div class="card-header-actions">
+        <span class="card-updated" id="accuracy-updated"></span>
+        <button class="card-toggle" data-target="accuracy-section" onclick="toggleCard(this)">&minus;</button>
+      </div>
+    </div>
+    <div class="collapsible card-body" id="accuracy-body"><div class="skeleton" style="height:100px"></div></div>
   </div>
 
   <div class="section card" id="anomaly-section">
     <div class="card-header">
       <span class="card-title">Anomaly Detection</span>
-      <span class="card-updated" id="anomaly-updated"></span>
+      <div class="card-header-actions">
+        <span class="card-updated" id="anomaly-updated"></span>
+        <button class="card-toggle" data-target="anomaly-section" onclick="toggleCard(this)">&minus;</button>
+      </div>
     </div>
-    <div class="card-body" id="anomaly-body"><div class="skeleton" style="height:120px"></div></div>
+    <div class="collapsible card-body" id="anomaly-body"><div class="skeleton" style="height:120px"></div></div>
   </div>
 
-  <div class="section card" id="location-section">
-    <div class="card-header">
-      <span class="card-title">Location Performance</span>
-      <span class="card-updated" id="location-updated"></span>
-    </div>
-    <div class="card-body" id="location-body"><div class="skeleton" style="height:120px"></div></div>
-  </div>
-
+  <!-- ============== PANEL 13 — Pipeline Status ============== -->
   <div class="section card" id="pipeline-section">
     <div class="card-header">
       <span class="card-title">Pipeline Status</span>
-      <span class="card-updated" id="pipeline-updated"></span>
+      <div class="card-header-actions">
+        <span class="card-updated" id="pipeline-updated"></span>
+        <button class="card-toggle" data-target="pipeline-section" onclick="toggleCard(this)">&minus;</button>
+      </div>
     </div>
-    <div class="card-body" id="pipeline-body"><div class="skeleton" style="height:60px"></div></div>
+    <div class="collapsible card-body" id="pipeline-body"><div class="skeleton" style="height:60px"></div></div>
   </div>
 
 </main>
@@ -699,6 +912,173 @@ function renderKPIs(data) {
     '<div class="kpi-card"><div class="kpi-label">Anomalies Flagged</div><div class="kpi-value" style="color:var(--warning)">' + fmtNum(data.anomaly_count) + '</div><div class="kpi-sub">Across all transactions</div></div>';
 }
 
+// ---------- Collapse / expand ----------
+function toggleCard(btn) {
+  var card = document.getElementById(btn.getAttribute('data-target'));
+  if (!card) return;
+  var collapsed = card.classList.toggle('collapsed');
+  btn.innerHTML = collapsed ? '+' : '\u2212';
+  btn.title = collapsed ? 'Expand' : 'Collapse';
+}
+
+// ---------- Panel 1: Morning Brief ----------
+function renderMorningBrief(brief) {
+  if (!brief) return;
+  var c = brief.critical_alerts || 0;
+  var r = brief.urgent_reorders || 0;
+  var t = brief.transfer_ops    || 0;
+  document.getElementById('brief-stats').innerHTML =
+    '<div class="brief-stat crit"><strong>' + fmtNum(c) + '</strong> critical alerts</div>' +
+    '<div class="brief-stat warn"><strong>' + fmtNum(r) + '</strong> urgent reorders</div>' +
+    '<div class="brief-stat info"><strong>' + fmtNum(t) + '</strong> transfer opportunities</div>';
+}
+
+// ---------- Panel 3: Critical Action Items ----------
+function renderCriticalActions(items) {
+  document.getElementById('critical-actions-updated').textContent = 'Updated ' + nowStr();
+  var body = document.getElementById('critical-actions-body');
+  if (!items || !items.length) {
+    body.innerHTML = '<div class="empty-state"><div class="icon">&#10003;</div>Nothing critical right now &mdash; nice work.</div>';
+    return;
+  }
+  var rows = items.map(function(a) {
+    var sev = a.severity === 'critical' ? badge('critical', 'CRITICAL') : badge('warning', 'WARNING');
+    var sku = a.sku_id ? '<span class="sku-id">' + escHtml(a.sku_id) + '</span>' : '';
+    var loc = a.location_display ? '<span class="loc-id">' + escHtml(a.location_display) + '</span>' : '';
+    var sup = a.supplier_id ? '<span class="loc-id">' + escHtml(a.supplier_id) + '</span>' : '';
+    var ctx = [sku, loc, sup].filter(Boolean).join(' &middot; ');
+    var actionLabel = a.action || 'Acknowledge';
+    return '<div class="crit-action-item">' +
+      '<div>' + sev + '</div>' +
+      '<div><div class="desc"><strong>' + escHtml(a.title || '') + '</strong> &mdash; ' + escHtml(a.description || '') + '</div>' +
+      (ctx ? '<div class="meta">' + ctx + '</div>' : '') +
+      '</div>' +
+      '<button class="ack-btn" onclick="this.disabled=true;this.textContent=\'Acknowledged\'">' + escHtml(actionLabel) + '</button>' +
+      '</div>';
+  }).join('');
+  body.innerHTML = '<div class="crit-action-list">' + rows + '</div>';
+}
+
+// ---------- Panel 9: Basket Intelligence ----------
+function renderBasketRules(items) {
+  document.getElementById('basket-updated').textContent = 'Updated ' + nowStr();
+  var body = document.getElementById('basket-body');
+  if (!items || !items.length) {
+    body.innerHTML = '<div class="empty-state"><div class="icon">&#128722;</div>No basket rules computed yet. Run the basket pipeline to populate.</div>';
+    return;
+  }
+  var html = items.map(function(r) {
+    var conf = (r.confidence * 100).toFixed(0);
+    var lift = r.lift.toFixed(1);
+    var supp = (r.support * 100).toFixed(2);
+    return '<div class="basket-rule">' +
+      'When customers buy <span class="sku-id">' + escHtml(r.antecedent_sku) + '</span>' +
+      '<span class="arrow">&rarr;</span>' +
+      'they also buy <span class="sku-id">' + escHtml(r.consequent_sku) + '</span>' +
+      '<div class="stats"><strong>' + conf + '%</strong> confidence &middot; ' +
+      '<strong>' + lift + '&times;</strong> lift &middot; ' +
+      'support ' + supp + '% &middot; ' +
+      fmtNum(r.transaction_count) + ' baskets</div>' +
+      '</div>';
+  }).join('');
+  body.innerHTML = html;
+}
+
+// ---------- Panel 11: ABC × XYZ matrix ----------
+function renderAbcXyz(data) {
+  document.getElementById('abc-xyz-updated').textContent = 'Updated ' + nowStr();
+  var body = document.getElementById('abc-xyz-body');
+  if (!data || !data.counts) {
+    body.innerHTML = '<div class="no-data">XYZ classification has not run yet.</div>';
+    return;
+  }
+  var c = data.counts;
+  var hint = {
+    AX: 'Stock confidently',  AY: 'Watch seasonality', AZ: 'Deep safety stock',
+    BX: 'Auto-replenish',     BY: 'Standard buffer',   BZ: 'Watch for spikes',
+    CX: 'Min-stock',          CY: 'Reactive buy',      CZ: 'On-demand only'
+  };
+  function cell(code) {
+    var klass = 'abc-xyz-cell' + (code === 'AZ' ? ' az' : '');
+    return '<div class="' + klass + '">' +
+      '<div class="cell-name">' + code + '</div>' +
+      '<div class="cell-count">' + fmtNum(c[code] || 0) + '</div>' +
+      '<div class="cell-hint">' + hint[code] + '</div></div>';
+  }
+  var matrix =
+    '<div class="abc-xyz-matrix">' +
+      '<div class="abc-xyz-axis-y"></div>' +
+      '<div class="abc-xyz-axis-x">X &mdash; consistent</div>' +
+      '<div class="abc-xyz-axis-x">Y &mdash; variable</div>' +
+      '<div class="abc-xyz-axis-x">Z &mdash; erratic</div>' +
+      '<div class="abc-xyz-axis-y">A</div>' + cell('AX') + cell('AY') + cell('AZ') +
+      '<div class="abc-xyz-axis-y">B</div>' + cell('BX') + cell('BY') + cell('BZ') +
+      '<div class="abc-xyz-axis-y">C</div>' + cell('CX') + cell('CY') + cell('CZ') +
+    '</div>';
+  var azNote = (c.AZ || 0) > 0
+    ? '<div style="margin-top:12px;padding:10px;background:var(--critical-bg);border:1px solid rgba(248,81,73,0.3);border-radius:6px;font-size:12px;color:var(--text)">' +
+      '<strong>AZ &mdash; ' + fmtNum(c.AZ) + ' SKUs</strong> are top revenue with erratic demand. ' +
+      'These need the deepest safety stock and a manual review cadence.</div>'
+    : '';
+  var azSample = '';
+  if (data.az_sample && data.az_sample.length) {
+    azSample = '<div style="margin-top:10px;font-size:11px;color:var(--muted)">' +
+      '<div style="text-transform:uppercase;letter-spacing:0.4px;margin-bottom:6px">AZ sample (top by avg weekly units)</div>' +
+      data.az_sample.map(function(s) {
+        return '<div style="padding:2px 0"><span class="sku-id">' + escHtml(s.sku_id) + '</span> ' +
+          escHtml((s.description || s.part_category || '').substring(0,50)) + ' &middot; ' +
+          fmtNum(s.avg_weekly_units, 1) + '/wk</div>';
+      }).join('') + '</div>';
+  }
+  body.innerHTML = matrix + azNote + azSample +
+    '<div style="margin-top:8px;font-size:11px;color:var(--muted)">Total classified: <strong style="color:var(--text)">' + fmtNum(data.total) + '</strong></div>';
+}
+
+// ---------- Reorder filter state + exports ----------
+var _reorderItemsCache = [];
+var _reorderFilter = 'all';
+
+function setReorderFilter(btn) {
+  _reorderFilter = btn.getAttribute('data-filter');
+  document.querySelectorAll('#reorder-filter-bar .filter-btn').forEach(function(b) { b.classList.remove('active'); });
+  btn.classList.add('active');
+  _renderReorderTable();
+}
+
+function _renderReorderTable() {
+  var items = _reorderItemsCache;
+  var f = _reorderFilter;
+  var filtered = items.filter(function(r) {
+    if (f === 'all') return true;
+    if (f === 'transfer' || f === 'po') return (r.recommendation_type || '').toLowerCase() === f;
+    return (r.urgency || '').toLowerCase() === f;
+  });
+  if (!filtered.length) {
+    document.getElementById('reorder-body').innerHTML = '<div class="card-body"><div class="empty-state"><div class="icon">&#10003;</div>No items match this filter.</div></div>';
+    return;
+  }
+  var rows = filtered.map(function(r) {
+    var u = (r.urgency || '').toLowerCase();
+    var ub = u === 'critical' ? badge('critical','CRITICAL')
+           : (u === 'warning' || u === 'high') ? badge('high','WARNING')
+           : badge('low','NORMAL');
+    var rtype = (r.recommendation_type || 'po').toUpperCase();
+    var tb = rtype === 'TRANSFER' ? badge('transfer','TRANSFER') : badge('po','PO');
+    var days = r.days_of_supply_remaining != null ? fmtNum(r.days_of_supply_remaining,1) + 'd' : '\u2014';
+    var fromLoc = r.transfer_from_display ? '\u2190 ' + escHtml(r.transfer_from_display) : (r.transfer_from_location ? '\u2190 ' + escHtml(r.transfer_from_location) : '');
+    var locLabel = r.location_display || r.location_id;
+    var model = r.forecast_model_used ? '<span style="color:var(--muted);font-size:11px">' + escHtml(r.forecast_model_used) + '</span>' : '\u2014';
+    return '<tr><td>' + ub + '</td><td><span class="sku-id">' + escHtml(r.sku_id) + '</span></td>' +
+      '<td><span class="loc-id">' + escHtml(locLabel) + '</span> <span style="color:var(--muted);font-size:11px">' + fromLoc + '</span></td>' +
+      '<td style="font-weight:600">' + fmtNum(r.qty_to_order) + ' units</td><td>' + days + ' supply</td><td>' + tb + '</td><td>' + model + '</td></tr>';
+  }).join('');
+  document.getElementById('reorder-body').innerHTML =
+    '<table class="data-table"><thead><tr><th>Urgency</th><th>SKU</th><th>Location</th><th>Qty</th><th>Supply</th><th>Type</th><th>Model</th></tr></thead><tbody>' + rows + '</tbody></table>';
+}
+
+function exportReorder() { window.location.href = '/api/reorder/export.csv'; }
+function exportTransfers() { window.location.href = '/api/transfers/export.csv'; }
+
 function renderWeather(data) {
   var t = data.today || {};
   var forecast = data.forecast || [];
@@ -716,6 +1096,14 @@ function renderWeather(data) {
     ? '<div class="freeze-alert-text">FREEZE ALERT: ' + data.freeze_days_count + ' day(s) below 32\u00B0F &mdash; lowest ' + fmtTemp(data.coldest_temp) + ' on ' + (data.coldest_date||'') + '</div>'
     : '';
 
+  // When a freeze is active, surface the categories buyers should push.
+  var cats = (freeze && data.freeze_categories) ? data.freeze_categories : [];
+  var freezeCatsHtml = cats.length
+    ? '<div class="freeze-cats"><span class="label">Push these categories:</span>' +
+      cats.map(function(c) { return '<span class="freeze-cat-chip">' + escHtml(c) + '</span>'; }).join('') +
+      '</div>'
+    : '';
+
   var forecastHtml = forecast.map(function(f) {
     var isFr = f.temp_min_f != null && f.temp_min_f < 32;
     var d = f.log_date ? f.log_date.slice(5).replace('-','/') : '?';
@@ -728,6 +1116,7 @@ function renderWeather(data) {
     '<div class="weather-main"><div class="temp">' + hi + ' <span style="font-size:16px;color:var(--muted)">/ ' + lo + '</span></div>' +
     '<div class="temp-range">NE Ohio &mdash; Today' + (extras.length ? ' &middot; ' + extras.join(' &middot; ') : '') + '</div></div>' +
     freezeHtml +
+    freezeCatsHtml +
     (forecastHtml ? '<div class="forecast-strip" style="width:100%">' + forecastHtml + '</div>' : '') +
     '</div>';
 }
@@ -762,8 +1151,13 @@ function renderAlerts(items) {
 }
 
 function renderABC(data) {
-  document.getElementById('abc-updated').textContent = 'Updated ' + nowStr();
-  if (!data) return;
+  // Legacy ABC bar — superseded by ABC×XYZ matrix panel.  Kept for
+  // backwards-compat in case the section gets re-added; bail safely
+  // when its DOM nodes aren't present.
+  var u = document.getElementById('abc-updated');
+  var b = document.getElementById('abc-body');
+  if (!u || !b || !data) return;
+  u.textContent = 'Updated ' + nowStr();
   var abc = data.abc_counts || {};
   var total = data.total_skus || 1;
   var aPct = ((abc.A || 0) / total * 100).toFixed(1);
@@ -847,7 +1241,10 @@ function renderReorder(payload) {
     }
   }
 
-  // ---- Top-20 action table ----
+  // ---- Cache + render table via filterable helper ----
+  _reorderItemsCache = items;
+  var fbar = document.getElementById('reorder-filter-bar');
+  if (fbar) fbar.style.display = items.length ? 'flex' : 'none';
   if (!items.length) {
     var emptyMsg = payload && payload.recommendation_date
       ? 'No pending reorder recommendations for ' + escHtml(payload.recommendation_date) + '.'
@@ -855,22 +1252,7 @@ function renderReorder(payload) {
     document.getElementById('reorder-body').innerHTML = '<div class="card-body"><div class="empty-state"><div class="icon">&#10003;</div>' + emptyMsg + '</div></div>';
     return;
   }
-  var rows = items.map(function(r) {
-    var u = (r.urgency || '').toLowerCase();
-    var ub = u === 'critical' ? badge('critical','CRITICAL')
-           : (u === 'warning' || u === 'high') ? badge('high','WARNING')
-           : badge('low','NORMAL');
-    var rtype = (r.recommendation_type || 'po').toUpperCase();
-    var tb = rtype === 'TRANSFER' ? badge('transfer','TRANSFER') : badge('po','PO');
-    var days = r.days_of_supply_remaining != null ? fmtNum(r.days_of_supply_remaining,1) + 'd' : '\u2014';
-    var fromLoc = r.transfer_from_display ? '\u2190 ' + escHtml(r.transfer_from_display) : (r.transfer_from_location ? '\u2190 ' + escHtml(r.transfer_from_location) : '');
-    var locLabel = r.location_display || r.location_id;
-    return '<tr><td>' + ub + '</td><td><span class="sku-id">' + escHtml(r.sku_id) + '</span></td>' +
-      '<td><span class="loc-id">' + escHtml(locLabel) + '</span> <span style="color:var(--muted);font-size:11px">' + fromLoc + '</span></td>' +
-      '<td style="font-weight:600">' + fmtNum(r.qty_to_order) + ' units</td><td>' + days + ' supply</td><td>' + tb + '</td></tr>';
-  }).join('');
-  document.getElementById('reorder-body').innerHTML =
-    '<table class="data-table"><thead><tr><th>Urgency</th><th>SKU</th><th>Location</th><th>Qty</th><th>Supply</th><th>Type</th></tr></thead><tbody>' + rows + '</tbody></table>';
+  _renderReorderTable();
 }
 
 function renderDeadStock(payload) {
@@ -1207,20 +1589,23 @@ async function loadData() {
     var data = await resp.json();
     if (data.error) throw new Error(data.error);
 
+    if (data.morning_brief)        renderMorningBrief(data.morning_brief);
     if (data.network_kpis)         renderKPIs(data.network_kpis);
-    if (data.network_kpis)         renderABC(data.network_kpis);
     if (data.weather)              renderWeather(data.weather);
     if (data.alerts)               renderAlertSummary(data.alerts.summary || {});
     if (data.alerts)               renderAlerts(data.alerts.items || []);
+    if (data.critical_actions != null) renderCriticalActions(data.critical_actions);
     if (data.reorder != null)      renderReorder(data.reorder);
     if (data.dead_stock != null)   renderDeadStock(data.dead_stock);
     if (data.transfers != null)    renderTransfers(data.transfers);
     if (data.supplier_detail)      renderSupplierDetail(data.supplier_detail);
     if (data.inventory_health)     renderInventoryHealth(data.inventory_health);
-    if (data.forecast_accuracy != null) renderForecastAccuracy(data.forecast_accuracy);
-    if (data.top_skus)             renderTopSKUs(data.top_skus);
-    if (data.anomaly_summary)      renderAnomalySummary(data.anomaly_summary);
+    if (data.basket_rules != null) renderBasketRules(data.basket_rules);
     if (data.location_performance) renderLocations(data.location_performance);
+    if (data.abc_xyz_matrix)       renderAbcXyz(data.abc_xyz_matrix);
+    if (data.top_skus)             renderTopSKUs(data.top_skus);
+    if (data.forecast_accuracy != null) renderForecastAccuracy(data.forecast_accuracy);
+    if (data.anomaly_summary)      renderAnomalySummary(data.anomaly_summary);
     if (data.pipeline_status)      renderPipelineStatus(data.pipeline_status);
 
     document.getElementById('last-updated').textContent =

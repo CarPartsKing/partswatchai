@@ -18,14 +18,16 @@
     "is_warranty":       "[Sales Detail].[Warranty Flag].[Warranty Flag]",
     "is_backorder":      "[Sales Detail].[Backorder Flag].[Backorder Flag]",
     "is_core_return":    "[Sales Detail].[Core Flag].[Core Flag]",
-    "is_price_override": "[Sales Detail].[Price Override Flag].[Price Override Flag]"
+    "is_price_override": "[Sales Detail].[Price Override Flag].[Price Override Flag]",
+    "customer_id":       "[Customer].[Cust No].[Cust No]",
+    "customer_type":     "[Customer].[Cust Type].[Cust Type]",
+    "customer_status":   "[Customer].[Status].[Status]",
+    "customer_salesman": "[Customer].[Salesman].[Salesman]"
   },
   "supplemental_dimensions": {
     "product_line":     "[Product].[Prod Line].[Prod Line]",
     "product_vendor":   "[Product].[Vendor 1].[Vendor 1]",
     "product_status":   "[Product].[Status].[Status]",
-    "customer_number":  "[Customer].[Cust No].[Cust No]",
-    "customer_type":    "[Customer].[Customer Type].[Customer Type]",
     "tran_code":        "[Tran Code].[Tran Code].[Tran Code]"
   },
   "inventory_measures": {

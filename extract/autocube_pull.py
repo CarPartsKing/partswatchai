@@ -197,7 +197,21 @@ _FLAG_AXES = (
     # row volume but is mandatory for basket/co-purchase analysis (without it
     # multiple invoices on the same date+sku+location collapse into a single
     # synthetic "transaction" and Apriori finds zero multi-item baskets).
-    "    [Sales Detail].[Invoice Nbr].[Invoice Nbr].MEMBERS"
+    "    [Sales Detail].[Invoice Nbr].[Invoice Nbr].MEMBERS,\n"
+    # Customer dimensions added 2026-04-19 to enable customer churn scoring
+    # (ml/churn.py) and rep-level routing of churn alerts.  Each invoice has
+    # exactly ONE customer, and Cust Type / Status / Salesman are functionally
+    # determined by Cust No, so NON EMPTY collapses these axes back to roughly
+    # the same row cardinality as without them (verified against the
+    # AutoCube_DTR_23160 catalog 2026-04-19).
+    #   Cust No   — canonical Autologue customer account number (PK for churn)
+    #   Cust Type — wholesale / retail / fleet / etc. (segmentation)
+    #   Status    — active / inactive / on-hold (churn.py skips already-gone)
+    #   Salesman  — outside-rep ownership (alert routing)
+    "    [Customer].[Cust No].[Cust No].MEMBERS,\n"
+    "    [Customer].[Cust Type].[Cust Type].MEMBERS,\n"
+    "    [Customer].[Status].[Status].MEMBERS,\n"
+    "    [Customer].[Salesman].[Salesman].MEMBERS"
 )
 
 MDX_FULL_SALES = (
@@ -987,6 +1001,13 @@ _DB_COLUMNS = frozenset({
     # it is silently dropped before upsert and basket analysis collapses
     # back to single-item baskets.
     "invoice_number",
+    # Customer dimensions added by migration 025 (2026-04-19).  MUST be in
+    # the allow-list or churn scoring (ml/churn.py) cannot group transactions
+    # by customer.  customer_id is the canonical Autologue Cust No;
+    # customer_type / customer_status / customer_salesman are slowly-changing
+    # attributes denormalized onto each transaction so churn.py can segment
+    # and route alerts without an extra join.
+    "customer_id", "customer_type", "customer_status", "customer_salesman",
 })
 
 _GENERATED_COLS = frozenset({
@@ -1168,6 +1189,17 @@ def _deduplicate_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     _BOOL_OR_FIELDS = (
         "is_warranty", "is_backorder", "is_core_return", "is_price_override",
     )
+    # Customer fields (migration 025) are functionally determined by
+    # invoice_number — every line of the same invoice MUST belong to the
+    # same customer with the same Cust Type / Status / Salesman.  We track
+    # conflicts here as a data-integrity tripwire: if the cube ever returns
+    # rows that share a transaction_id but disagree on a customer field,
+    # the first-row-wins behavior would silently pick one and we'd never
+    # know.  Counts are logged at WARNING/CRITICAL after the loop.
+    _CUSTOMER_FIELDS = (
+        "customer_id", "customer_type", "customer_status", "customer_salesman",
+    )
+    customer_conflicts: dict[str, int] = {f: 0 for f in _CUSTOMER_FIELDS}
     groups: dict[str, dict[str, Any]] = {}
     for row in rows:
         tid = row.get("transaction_id", "")
@@ -1180,8 +1212,32 @@ def _deduplicate_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
             for f in _BOOL_OR_FIELDS:
                 if row.get(f):
                     existing[f] = True
+            # Customer-field invariant check.  Only count a conflict when
+            # both sides are non-NULL and differ — a NULL on either side is
+            # treated as "no information" rather than a true disagreement.
+            for f in _CUSTOMER_FIELDS:
+                new_val = row.get(f)
+                old_val = existing.get(f)
+                if new_val is not None and old_val is not None and new_val != old_val:
+                    customer_conflicts[f] += 1
+                elif old_val is None and new_val is not None:
+                    # Backfill if the first row had NULL but a later row carries a value.
+                    existing[f] = new_val
         else:
             groups[tid] = dict(row)
+
+    total_conflicts = sum(customer_conflicts.values())
+    if total_conflicts:
+        # Conflicts indicate a violation of the invoice→customer 1:1 invariant
+        # the customer-dimension extract relies on.  Log loudly so it surfaces
+        # in the nightly run summary; first-row-wins still produces a row, but
+        # downstream churn scoring may be assigning transactions to the wrong
+        # customer/segment/rep.
+        log.warning(
+            "DEDUP: customer-field conflicts on duplicate transaction_ids: %s "
+            "(total=%d). Investigate cube grain — invoice→customer should be 1:1.",
+            customer_conflicts, total_conflicts,
+        )
     return list(groups.values())
 
 

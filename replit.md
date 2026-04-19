@@ -9,6 +9,9 @@ Acts as shared foundation code (config, DB connection, logging utilities) and sy
 - ~200,000 active SKUs across A/B/C tiers
 - PartsWatch (Autologue) management system + RockAuto fulfillment partnership
 
+## Project Rules
+- **RLS off on every new table**: every migration that runs `CREATE TABLE` MUST end with `ALTER TABLE <name> DISABLE ROW LEVEL SECURITY;`. Without this the service-role client either silently succeeds-with-zero-rows or returns 42501 once a policy is added. ALTER-only migrations (adding columns to existing tables) inherit the parent table's RLS state and don't need the toggle.
+
 ## Roadmap
 
 ### Phase 1 — Complete (core pipeline + dashboard)

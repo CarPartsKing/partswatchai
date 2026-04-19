@@ -108,6 +108,7 @@ def _paginate(
     lte_filters: dict | None = None,
     eq_bool:     dict | None = None,
     in_filters:  dict | None = None,
+    not_null_cols: list[str] | None = None,
     order_col:   str | None = None,
     order_desc:  bool = False,
     limit:       int | None = None,
@@ -127,6 +128,8 @@ def _paginate(
             q = q.eq(col, val)
         for col, vals in (in_filters or {}).items():
             q = q.in_(col, vals)
+        for col in (not_null_cols or []):
+            q = q.not_.is_(col, "null")
         if order_col:
             q = q.order(order_col, desc=order_desc)
         page = q.range(offset, offset + page_size - 1).execute().data or []
@@ -1449,10 +1452,14 @@ def _build_understocking(client: Any, today: date) -> dict:
     selection.  All locations are returned in one payload so the dropdown
     can switch between them client-side without refetching.
     """
+    # Filter on run_completed_at IS NOT NULL so we never read a
+    # mid-write partial report.  See engine/understocking.py for the
+    # producer-side publication pattern.
     try:
         latest = (
             client.table("understocking_report")
             .select("report_date")
+            .not_.is_("run_completed_at", "null")
             .order("report_date", desc=True)
             .limit(1)
             .execute()
@@ -1472,6 +1479,7 @@ def _build_understocking(client: Any, today: date) -> dict:
         "unit_cost,inventory_value_at_risk,transfer_recommended_count,"
         "priority_score",
         filters={"report_date": report_date},
+        not_null_cols=["run_completed_at"],
     )
 
     by_loc: dict[str, dict] = {}
@@ -1863,10 +1871,13 @@ def understocking_export():
 
     location_filter = (request.args.get("location_id") or "").strip()
 
+    # Filter on run_completed_at IS NOT NULL — see understocking
+    # builder for rationale (avoid mid-write partial reads).
     try:
         latest = (
             client.table("understocking_report")
             .select("report_date")
+            .not_.is_("run_completed_at", "null")
             .order("report_date", desc=True)
             .limit(1)
             .execute()
@@ -1889,6 +1900,7 @@ def understocking_export():
         "unit_cost,inventory_value_at_risk,transfer_recommended_count,"
         "priority_score",
         filters=filters,
+        not_null_cols=["run_completed_at"],
     )
     rows.sort(key=lambda r: float(r.get("priority_score") or 0), reverse=True)
 

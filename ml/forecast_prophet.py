@@ -37,11 +37,14 @@ USAGE
 from __future__ import annotations
 
 import argparse
+import contextlib
 import logging
 import math
 import os
 import pickle
+import signal
 import sys
+import threading
 import time
 from collections import defaultdict
 from datetime import date, timedelta
@@ -84,6 +87,21 @@ FORECAST_HORIZON_DAYS: int = 30
 MODEL_CACHE_DIR: str = "models"
 CONFIDENCE_PCT: float = 0.95
 MODEL_TYPE: str = "prophet"
+
+# Hard wall-clock cap on Prophet training per (SKU, location) pair.
+# Stan's L-BFGS optimizer can occasionally pathologically diverge on
+# noisy/short series and run for *hours* on a single SKU (last run had
+# one SKU consume 6,641s).  We'd rather emit a rolling-average fallback
+# forecast and keep the pipeline moving than stall the entire weekly
+# job.  Implemented via SIGALRM (POSIX, main thread only) — see
+# `_prophet_timeout` below for the fallback path on Windows / non-main
+# threads.
+SKU_TIMEOUT_SECONDS: int = 300
+
+# Window used to compute the rolling-average fallback when Prophet
+# training is killed by the timeout.  28 days = 4 full weeks, smoothing
+# day-of-week effects without leaning on stale history.
+_FALLBACK_AVG_WINDOW_DAYS: int = 28
 
 _PAGE_SIZE: int = 1_000
 _BATCH_WRITE: int = 500
@@ -341,6 +359,83 @@ def _compute_fallback_weather(weather_rows: list[dict]) -> dict:
     }
 
 
+class _ProphetTimeout(Exception):
+    """Raised when Prophet training exceeds SKU_TIMEOUT_SECONDS."""
+
+
+@contextlib.contextmanager
+def _prophet_timeout(seconds: int):
+    """Wall-clock guard around Prophet training.
+
+    Uses POSIX SIGALRM when available (single-process pipeline) — the
+    signal interrupts CPython between bytecode instructions and Stan's
+    inner loop yields often enough for this to fire reliably in
+    practice.  On Windows or when invoked off the main thread (e.g.
+    under a thread-pooled test harness) we fall back to a no-op so the
+    code stays portable; the operational risk is the original
+    "SKU stuck for hours" scenario, which only manifests in the nightly
+    Linux job that this guard targets.
+    """
+    use_alarm = (
+        hasattr(signal, "SIGALRM")
+        and threading.current_thread() is threading.main_thread()
+        and seconds > 0
+    )
+    if not use_alarm:
+        yield
+        return
+
+    def _handler(signum, frame):  # noqa: ARG001
+        raise _ProphetTimeout(f"prophet training exceeded {seconds}s")
+
+    prev_handler = signal.signal(signal.SIGALRM, _handler)
+    signal.alarm(seconds)
+    try:
+        yield
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, prev_handler)
+
+
+def _rolling_avg_fallback_rows(
+    sku_id: str,
+    location_id: str,
+    demand_by_date: dict,
+    today: date,
+    run_date_str: str,
+) -> list[dict]:
+    """Build a flat 30-day forecast from the last N days of actual demand.
+
+    Used when Prophet training is killed by the per-SKU timeout — gives
+    the downstream reorder engine a sane (if conservative) signal so the
+    SKU isn't silently dropped from coverage.  Bounds default to ±30%
+    since we have no model uncertainty estimate.
+    """
+    if not demand_by_date:
+        avg = 0.0
+    else:
+        cutoff = (today - timedelta(days=_FALLBACK_AVG_WINDOW_DAYS)).isoformat()
+        recent = [v for d, v in demand_by_date.items() if d >= cutoff]
+        pool = recent if recent else list(demand_by_date.values())
+        avg = sum(pool) / max(len(pool), 1)
+    avg = max(0.0, float(avg))
+    rows = []
+    for i in range(FORECAST_HORIZON_DAYS):
+        d = today + timedelta(days=i)
+        rows.append({
+            "sku_id":         sku_id,
+            "location_id":    location_id,
+            "forecast_date":  d.isoformat(),
+            "model_type":     MODEL_TYPE,
+            "predicted_qty":  round(avg, 4),
+            "lower_bound":    round(max(0.0, avg * 0.7), 4),
+            "upper_bound":    round(avg * 1.3, 4),
+            "confidence_pct": CONFIDENCE_PCT,
+            "run_date":       run_date_str,
+        })
+    return rows
+
+
 def _model_path(model_dir: str, model_type: str, sku_id: str, location_id: str) -> Path:
     p = Path(model_dir) / model_type
     p.mkdir(parents=True, exist_ok=True)
@@ -569,9 +664,28 @@ def _train_and_forecast_pair(
                 demand_by_date, weather_by_date, fallback_weather,
                 min_date_str, max_date_str,
             )
-            prophet_model = _train_prophet(df_prophet)
+            with _prophet_timeout(SKU_TIMEOUT_SECONDS):
+                prophet_model = _train_prophet(df_prophet)
             _save_model(prophet_path, prophet_model)
             stats["trained"] = True
+        except _ProphetTimeout:
+            # Per-SKU wall-clock guard fired — emit a rolling-average
+            # forecast so the SKU still gets coverage downstream and
+            # move on.  Never crash the pipeline for a single bad fit.
+            log.warning(
+                "[PROPHET] SKU %s/%s timed out after %ds — skipping, "
+                "writing rolling_avg fallback forecast.",
+                sku_id, location_id, SKU_TIMEOUT_SECONDS,
+            )
+            stats["skipped_reason"] = "prophet_timeout"
+            stats["timed_out"] = True
+            stats["train_seconds"] = time.perf_counter() - t_train
+            return (
+                _rolling_avg_fallback_rows(
+                    sku_id, location_id, demand_by_date, today, run_date_str,
+                ),
+                stats,
+            )
         except Exception as exc:
             log.error("  Prophet training failed for %s/%s: %s", sku_id, location_id, exc)
             stats["skipped_reason"] = f"prophet_train_error: {exc}"
@@ -790,6 +904,9 @@ def run_forecast(
     fc_buffer: list[dict] = []
     fastest_time = float("inf")
     slowest_time = 0.0
+    slowest_pair: tuple[str, str] | None = None
+    timeout_count = 0
+    timed_out_pairs: list[tuple[str, str]] = []
     mape_values: list[float] = []
     single_sku_fc_rows: list[dict] = []
 
@@ -862,8 +979,13 @@ def run_forecast(
             total_fc_rows += len(fc_rows)
             if stats.get("trained"):
                 trained += 1
+            if stats.get("timed_out"):
+                timeout_count += 1
+                timed_out_pairs.append((sku_id, loc_id))
             fastest_time = min(fastest_time, pair_time)
-            slowest_time = max(slowest_time, pair_time)
+            if pair_time > slowest_time:
+                slowest_time = pair_time
+                slowest_pair = (sku_id, loc_id)
 
             mean_pred = sum(r["predicted_qty"] for r in fc_rows) / len(fc_rows)
             log.info(
@@ -905,7 +1027,22 @@ def run_forecast(
     log.info("  Forecast rows written:              %d", total_fc_rows)
     if fastest_time < float("inf"):
         log.info("  Fastest SKU:                       %.1f seconds", fastest_time)
-        log.info("  Slowest SKU:                       %.1f seconds", slowest_time)
+        if slowest_pair:
+            log.info(
+                "  Slowest SKU:                       %.1f seconds  (%s / %s)",
+                slowest_time, slowest_pair[0], slowest_pair[1],
+            )
+        else:
+            log.info("  Slowest SKU:                       %.1f seconds", slowest_time)
+    if timeout_count:
+        log.warning(
+            "  SKUs timed out (>%ds, fallback used): %d",
+            SKU_TIMEOUT_SECONDS, timeout_count,
+        )
+        for s, l in timed_out_pairs[:10]:
+            log.warning("    [TIMEOUT] %s / %s", s, l)
+        if len(timed_out_pairs) > 10:
+            log.warning("    ... and %d more", len(timed_out_pairs) - 10)
     log.info("  Total runtime:                     %dh %dm", hours, minutes)
     if dry_run:
         log.info("  (DRY RUN — no writes were made)")

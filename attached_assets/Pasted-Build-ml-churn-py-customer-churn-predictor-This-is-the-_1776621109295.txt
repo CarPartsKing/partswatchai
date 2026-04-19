@@ -1,0 +1,117 @@
+Build ml/churn.py — customer churn predictor.
+
+This is the highest ROI ML file not yet built.
+
+Job: detect when shop accounts are declining 
+before they churn to a competitor.
+
+Build ml/churn.py to:
+
+1. Pull all customer purchase history from 
+   sales_transactions grouped by customer_id 
+   and month. Skip customer_ids that are NULL.
+
+2. For each customer calculate these 
+   behavioral signals over last 6 months:
+
+   order_frequency_trend:
+   Orders per month last 3 months vs 
+   prior 3 months.
+   Negative = declining frequency.
+
+   revenue_trend:
+   Monthly revenue last 3 months vs 
+   prior 3 months. Expressed as % change.
+
+   sku_diversity_trend:
+   Unique SKUs ordered per month.
+   Declining diversity = moving specialty 
+   orders elsewhere, keeping only commodity.
+
+   avg_order_value_trend:
+   Average order size trend.
+   Declining = smaller, more selective orders.
+
+   days_since_last_order:
+   Simple recency signal.
+
+   lifetime_value:
+   Total revenue from this account ever.
+
+   months_active:
+   How many months have they ordered in 
+   the last 12 months.
+
+3. Score each customer 0-100:
+   100 = highly loyal and growing
+   0 = definitely churning
+
+   Scoring weights:
+   order_frequency_trend: 30%
+   revenue_trend: 30%
+   sku_diversity_trend: 20%
+   days_since_last_order: 20%
+
+   Churn risk classification:
+   HIGH RISK: score below 30
+   MEDIUM RISK: score 30-60
+   LOW RISK: score 60-80
+   HEALTHY: score above 80
+
+4. Write results to customer_scores table 
+   via migration 025:
+   customer_id VARCHAR(50)
+   score_date DATE
+   churn_score NUMERIC(5,2)
+   churn_risk VARCHAR(20)
+   order_frequency_trend NUMERIC(8,4)
+   revenue_trend NUMERIC(8,4)
+   sku_diversity_trend NUMERIC(8,4)
+   avg_order_value_trend NUMERIC(8,4)
+   days_since_last_order INTEGER
+   lifetime_value NUMERIC(14,2)
+   months_active INTEGER
+   flag_for_sales_review BOOLEAN
+   UNIQUE(customer_id, score_date)
+
+5. Flag HIGH RISK accounts where 
+   lifetime_value over $10,000:
+   flag_for_sales_review = TRUE
+   Write CUSTOMER_CHURN_RISK alert to alerts table
+
+6. Add to context_builder.py:
+   Top 5 at-risk high-value accounts:
+   "Account X — $85K lifetime value — 
+   order frequency down 60% last 3 months"
+
+7. Add new dashboard panel after location 
+   performance:
+   "At-Risk Accounts"
+   Show: total HIGH RISK count, total LTV at risk
+   Top 10 flagged accounts with:
+   - Customer ID
+   - Lifetime value
+   - Churn score
+   - What's declining (frequency/revenue/diversity)
+   - Days since last order
+
+8. Log summary:
+   Total customers scored: X
+   HIGH RISK: X (total LTV at risk: $X)
+   MEDIUM RISK: X
+   HEALTHY: X
+   Flagged for sales review: X
+   Highest LTV at-risk account: $X
+
+Process in batches — never load all 
+transactions at once.
+Minimum 3 months of history to score.
+Below threshold = insufficient data, skip.
+
+Add to weekly pipeline in main.py.
+New capability = new file.
+churn.py only scores customer churn.
+Nothing else.
+Migration 025 for customer_scores table.
+Follow all coding standards.
+Push to GitHub when done.

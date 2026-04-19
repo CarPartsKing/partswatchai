@@ -78,10 +78,11 @@ NIGHTLY_STAGES: list[Stage] = [
 ]
 
 WEEKLY_STAGES: list[Stage] = [
-    Stage("dead_stock",      "ml.dead_stock",  "run_dead_stock", "dry_run"),
-    Stage("basket_analysis", "ml.basket",      "run_basket",     "dry_run"),
-    Stage("churn",           "ml.churn",       "run_churn",      "dry_run"),
-    Stage("accuracy_report", "ml.accuracy",    "run",            "dry_run"),
+    Stage("dead_stock",      "ml.dead_stock",         "run_dead_stock",      "dry_run"),
+    Stage("basket_analysis", "ml.basket",             "run_basket",          "dry_run"),
+    Stage("churn",           "ml.churn",              "run_churn",           "dry_run"),
+    Stage("understocking",   "engine.understocking",  "run_understocking",   "dry_run"),
+    Stage("accuracy_report", "ml.accuracy",           "run",                 "dry_run"),
 ]
 
 # On-demand extract stages — not part of the nightly default loop, but

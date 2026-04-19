@@ -1434,6 +1434,96 @@ def index():
     return send_from_directory(str(Path(__file__).parent), "index.html")
 
 
+def _build_understocking(client: Any, today: date) -> dict:
+    """Chronic Understocking Report — by location.
+
+    Returns the most-recent understocking_report grouped by location:
+      {
+        report_date: 'YYYY-MM-DD',
+        locations:  [{location_id, location_name, total_value_at_risk,
+                      sku_count, rows: [...]}],
+        default_location_id: <location with highest total_value_at_risk>
+      }
+
+    The frontend uses default_location_id to pick the dropdown's initial
+    selection.  All locations are returned in one payload so the dropdown
+    can switch between them client-side without refetching.
+    """
+    try:
+        latest = (
+            client.table("understocking_report")
+            .select("report_date")
+            .order("report_date", desc=True)
+            .limit(1)
+            .execute()
+            .data or []
+        )
+    except Exception:
+        latest = []
+    if not latest:
+        return {"report_date": None, "locations": [], "default_location_id": None}
+    report_date = latest[0]["report_date"]
+
+    rows = _paginate(
+        client, "understocking_report",
+        "location_id,location_name,sku_id,sku_description,"
+        "stockout_days_pct,days_observed,days_below_reorder,"
+        "avg_daily_demand,current_min_qty,suggested_min_qty,min_qty_gap,"
+        "unit_cost,inventory_value_at_risk,transfer_recommended_count,"
+        "priority_score",
+        filters={"report_date": report_date},
+    )
+
+    by_loc: dict[str, dict] = {}
+    for r in rows:
+        loc = r.get("location_id") or ""
+        if not loc or loc in EXCLUDED_DISPLAY_LOCATIONS or loc == "LOC-025":
+            continue
+        bucket = by_loc.setdefault(loc, {
+            "location_id":         loc,
+            "location_name":       r.get("location_name")
+                                   or LOCATION_NAMES.get(loc) or loc,
+            "total_value_at_risk": 0.0,
+            "sku_count":           0,
+            "rows":                [],
+        })
+        v = float(r.get("inventory_value_at_risk") or 0)
+        bucket["total_value_at_risk"] += v
+        bucket["sku_count"] += 1
+        bucket["rows"].append({
+            "sku_id":                     r.get("sku_id"),
+            "sku_description":            r.get("sku_description") or "",
+            "stockout_days_pct":          float(r.get("stockout_days_pct") or 0),
+            "days_observed":              int(r.get("days_observed") or 0),
+            "days_below_reorder":         int(r.get("days_below_reorder") or 0),
+            "avg_daily_demand":           float(r.get("avg_daily_demand") or 0),
+            "current_min_qty":            float(r.get("current_min_qty") or 0),
+            "suggested_min_qty":          float(r.get("suggested_min_qty") or 0),
+            "min_qty_gap":                float(r.get("min_qty_gap") or 0),
+            "unit_cost":                  float(r.get("unit_cost") or 0),
+            "inventory_value_at_risk":    v,
+            "transfer_recommended_count": int(r.get("transfer_recommended_count") or 0),
+            "priority_score":             float(r.get("priority_score") or 0),
+        })
+
+    # Sort each location's rows by priority_score desc; round totals.
+    for b in by_loc.values():
+        b["rows"].sort(key=lambda r: r["priority_score"], reverse=True)
+        b["total_value_at_risk"] = round(b["total_value_at_risk"], 2)
+
+    locations = sorted(by_loc.values(), key=lambda b: b["location_name"])
+    default_loc = (
+        max(by_loc.values(), key=lambda b: b["total_value_at_risk"])["location_id"]
+        if by_loc else None
+    )
+
+    return {
+        "report_date":         report_date,
+        "locations":           locations,
+        "default_location_id": default_loc,
+    }
+
+
 @app.route("/api/dashboard")
 def dashboard_data():
     """Return all dashboard sections as a single JSON payload."""
@@ -1467,6 +1557,7 @@ def dashboard_data():
         ("anomaly_summary",      _build_anomaly_summary),
         ("basket_rules",         _build_basket_rules),
         ("abc_xyz_matrix",       _build_abc_xyz_matrix),
+        ("understocking",        _build_understocking),
         ("pipeline_status",      _build_pipeline_status),
     ]
 
@@ -1751,6 +1842,89 @@ def transfers_export():
         ])
     log.info("Transfers CSV export: %d transfer rows for %s", len(out), rec_date)
     return _csv_response(headers, out, f"transfer_recommendations_{rec_date}.csv")
+
+
+@app.route("/api/understocking/export.csv")
+def understocking_export():
+    """Stream a CSV of every chronic-understocking row from the latest report.
+
+    Optional query string: `?location_id=LOC-005` filters to one location.
+    Used by the dashboard's "Download Restocking Plan" button.
+    """
+    import csv
+    import io
+    from flask import Response
+
+    try:
+        client = get_client()
+    except Exception as exc:
+        log.exception("Supabase connection failed for understocking export.")
+        return jsonify({"error": str(exc)}), 503
+
+    location_filter = (request.args.get("location_id") or "").strip()
+
+    try:
+        latest = (
+            client.table("understocking_report")
+            .select("report_date")
+            .order("report_date", desc=True)
+            .limit(1)
+            .execute()
+            .data or []
+        )
+    except Exception:
+        latest = []
+    if not latest:
+        return jsonify({"error": "no understocking report available yet"}), 404
+    report_date = latest[0]["report_date"]
+
+    filters: dict[str, Any] = {"report_date": report_date}
+    if location_filter:
+        filters["location_id"] = location_filter
+    rows = _paginate(
+        client, "understocking_report",
+        "report_date,location_id,location_name,sku_id,sku_description,"
+        "days_observed,days_below_reorder,stockout_days_pct,"
+        "avg_daily_demand,current_min_qty,suggested_min_qty,min_qty_gap,"
+        "unit_cost,inventory_value_at_risk,transfer_recommended_count,"
+        "priority_score",
+        filters=filters,
+    )
+    rows.sort(key=lambda r: float(r.get("priority_score") or 0), reverse=True)
+
+    headers = [
+        "report_date", "location_id", "location_name",
+        "sku_id", "sku_description",
+        "days_observed", "days_below_reorder", "stockout_days_pct",
+        "avg_daily_demand", "current_min_qty", "suggested_min_qty",
+        "min_qty_gap", "unit_cost", "inventory_value_at_risk",
+        "transfer_recommended_count", "priority_score",
+    ]
+
+    def _safe(v):
+        if v is None:
+            return ""
+        s = str(v)
+        if s and s[0] in ("=", "+", "-", "@", "\t", "\r"):
+            return "'" + s
+        return s
+
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(headers)
+    for r in rows:
+        w.writerow([_safe(r.get(h)) for h in headers])
+
+    suffix = f"_{location_filter}" if location_filter else ""
+    fname = f"understocking_report_{report_date}{suffix}.csv"
+    log.info("Understocking CSV export: %d rows for %s%s",
+             len(rows), report_date,
+             f" loc={location_filter}" if location_filter else "")
+    return Response(
+        buf.getvalue(),
+        mimetype="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{fname}"'},
+    )
 
 
 @app.route("/api/chat", methods=["POST"])

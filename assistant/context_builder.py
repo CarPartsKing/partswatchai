@@ -719,6 +719,74 @@ def _section_customer_churn(client: Any, today: date) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _section_understocking(client: Any, today: date) -> str:
+    """Top chronic-understocking SKUs per location, latest report.
+
+    Lets the assistant answer questions like:
+      "What should PARMA be stocking more of?"
+      "Which locations have the worst chronic shortages?"
+    Without re-running the analysis.
+    """
+    try:
+        latest = (
+            client.table("understocking_report")
+            .select("report_date")
+            .order("report_date", desc=True)
+            .limit(1)
+            .execute()
+            .data or []
+        )
+    except Exception:
+        latest = []
+    if not latest:
+        return "[CHRONIC UNDERSTOCKING]\nNo understocking report available yet.\n"
+    report_date = latest[0]["report_date"]
+
+    rows = _paginate(
+        client, "understocking_report",
+        "location_id,location_name,sku_id,sku_description,"
+        "stockout_days_pct,suggested_min_qty,current_min_qty,"
+        "inventory_value_at_risk,priority_score,transfer_recommended_count",
+        filters={"report_date": report_date},
+    )
+    if not rows:
+        return f"[CHRONIC UNDERSTOCKING — {report_date}]\nNo chronic shortages.\n"
+
+    by_loc: dict[str, dict] = {}
+    for r in rows:
+        loc = r.get("location_id") or ""
+        b = by_loc.setdefault(loc, {
+            "name":  r.get("location_name") or loc,
+            "value": 0.0,
+            "rows":  [],
+        })
+        b["value"] += float(r.get("inventory_value_at_risk") or 0)
+        b["rows"].append(r)
+
+    total_value = sum(b["value"] for b in by_loc.values())
+    total_skus  = len(rows)
+    worst = sorted(by_loc.items(), key=lambda kv: kv[1]["value"], reverse=True)
+
+    lines = [f"[CHRONIC UNDERSTOCKING — {report_date}]"]
+    lines.append(
+        f"  {total_skus:,} SKU positions chronically below reorder across "
+        f"{len(by_loc)} locations.  ${total_value:,.0f} total demand-at-risk."
+    )
+    # Top 5 locations by value-at-risk
+    lines.append("  Worst locations (by value-at-risk):")
+    for loc, b in worst[:5]:
+        top_sku_row = max(b["rows"],
+                          key=lambda r: float(r.get("priority_score") or 0))
+        lines.append(
+            f"    {b['name']:<22} ${b['value']:>10,.0f}  "
+            f"({len(b['rows'])} SKUs)  top: {top_sku_row.get('sku_id')} "
+            f"({float(top_sku_row.get('stockout_days_pct') or 0)*100:.0f}% short, "
+            f"min {float(top_sku_row.get('current_min_qty') or 0):.0f}"
+            f"→{float(top_sku_row.get('suggested_min_qty') or 0):.0f})"
+        )
+    return "\n".join(lines) + "\n"
+
+
 def _section_basket_rules(client: Any, today: date) -> str:
     try:
         rows = _paginate(
@@ -784,6 +852,7 @@ def build_context(client: Any) -> str:
         ("Location performance", _section_location_performance),
         ("Dead stock",           _section_dead_stock),
         ("Customer churn",       _section_customer_churn),
+        ("Understocking",        _section_understocking),
         ("Basket rules",         _section_basket_rules),
     ]
 

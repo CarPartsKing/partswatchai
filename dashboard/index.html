@@ -674,6 +674,39 @@
     </div>
   </div>
 
+  <!-- ============== PANEL 5b — Chronic Understocking by Location ============== -->
+  <div class="section card" id="understocking-section">
+    <div class="card-header">
+      <span class="card-title">Chronic Understocking by Location &mdash; What to Stock More Of</span>
+      <div class="card-header-actions">
+        <span class="card-updated" id="understocking-updated"></span>
+        <button class="card-toggle" data-target="understocking-section" onclick="toggleCard(this)">&minus;</button>
+      </div>
+    </div>
+    <div class="collapsible">
+      <div id="understocking-controls"
+           style="padding:12px 14px;border-bottom:1px solid var(--border);background:var(--surface2);display:flex;flex-wrap:wrap;gap:12px;align-items:center;justify-content:space-between">
+        <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+          <label for="understocking-loc-select"
+                 style="font-size:12px;color:var(--muted);text-transform:uppercase;letter-spacing:0.4px;font-weight:600">Location</label>
+          <select id="understocking-loc-select" onchange="renderUnderstockingForSelected()"
+                  style="background:var(--surface);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:6px 10px;font-size:13px;min-width:220px"></select>
+          <span id="understocking-loc-summary"
+                style="font-size:12px;color:var(--muted)"></span>
+        </div>
+        <button id="understocking-export-btn" onclick="exportUnderstocking()"
+                style="background:var(--accent,#2563eb);color:#fff;border:0;border-radius:4px;padding:8px 14px;font-size:12px;font-weight:600;cursor:pointer;letter-spacing:0.3px">
+          Download Restocking Plan
+        </button>
+      </div>
+      <div id="understocking-header"
+           style="padding:12px 14px;border-bottom:1px solid var(--border);font-size:13px;color:var(--text)"></div>
+      <div class="card-body" style="padding:0" id="understocking-body">
+        <div class="skeleton" style="height:120px;margin:16px;border-radius:6px"></div>
+      </div>
+    </div>
+  </div>
+
   <!-- ============== PANEL 6 — Transfer Opportunities ============== -->
   <div class="section card" id="transfers-section">
     <div class="card-header">
@@ -1331,6 +1364,122 @@ function exportLiquidation() {
   setTimeout(function() { btn.disabled = false; btn.textContent = orig; }, 2500);
 }
 
+// ---------- Chronic Understocking by Location ----------
+let _understockingData = null;
+
+function renderUnderstocking(payload) {
+  document.getElementById('understocking-updated').textContent = 'Updated ' + nowStr();
+  _understockingData = payload || null;
+
+  var sel  = document.getElementById('understocking-loc-select');
+  var body = document.getElementById('understocking-body');
+  var hdr  = document.getElementById('understocking-header');
+  var summary = document.getElementById('understocking-loc-summary');
+
+  var locs = (payload && payload.locations) || [];
+  if (!locs.length) {
+    sel.innerHTML = '<option value="">(no data)</option>';
+    sel.disabled  = true;
+    summary.textContent = '';
+    hdr.textContent = '';
+    var msg = (payload && payload.report_date)
+      ? 'No chronic understocking detected as of ' + escHtml(payload.report_date) + '.'
+      : 'Chronic Understocking Report has not been generated yet — run weekly pipeline.';
+    body.innerHTML = '<div class="card-body"><div class="empty-state"><div class="icon">&#10003;</div>' + msg + '</div></div>';
+    return;
+  }
+
+  sel.disabled = false;
+  // Sort options alphabetically by location_name (the payload already does this).
+  sel.innerHTML = locs.map(function(b) {
+    return '<option value="' + escHtml(b.location_id) + '">' +
+           escHtml(b.location_name) + ' (' + escHtml(b.location_id) + ')' +
+           ' — ' + b.sku_count + ' SKUs, ' + fmtMoney(b.total_value_at_risk) +
+           '</option>';
+  }).join('');
+
+  // Default = location with highest total_value_at_risk.
+  var def = payload.default_location_id;
+  if (def && locs.some(function(b){ return b.location_id === def; })) {
+    sel.value = def;
+  }
+
+  renderUnderstockingForSelected();
+}
+
+function renderUnderstockingForSelected() {
+  if (!_understockingData) return;
+  var sel  = document.getElementById('understocking-loc-select');
+  var body = document.getElementById('understocking-body');
+  var hdr  = document.getElementById('understocking-header');
+  var summary = document.getElementById('understocking-loc-summary');
+
+  var loc_id = sel.value;
+  var bucket = (_understockingData.locations || []).find(
+    function(b) { return b.location_id === loc_id; }
+  );
+  if (!bucket) {
+    body.innerHTML = '<div class="card-body"><div class="empty-state">Select a location.</div></div>';
+    hdr.textContent = '';
+    summary.textContent = '';
+    return;
+  }
+
+  hdr.innerHTML =
+    '<strong style="color:var(--text)">' + escHtml(bucket.location_name) +
+    '</strong> should stock more of these parts instead of waiting for transfers' +
+    ' &middot; report date <span style="color:var(--muted)">' +
+    escHtml(_understockingData.report_date) + '</span>';
+  summary.textContent =
+    bucket.sku_count + ' SKUs · ' + fmtMoney(bucket.total_value_at_risk) + ' demand at risk';
+
+  var rows = (bucket.rows || []).map(function(r) {
+    var pct = Math.round(r.stockout_days_pct * 100);
+    var pctBadge = pct >= 70 ? badge('critical', pct + '% short')
+                : pct >= 50 ? badge('high',     pct + '% short')
+                            : badge('medium',   pct + '% short');
+    var transferTag = r.transfer_recommended_count > 0
+      ? ' <span class="badge medium" title="Transfer recommended ' +
+        r.transfer_recommended_count + 'x in last 30d (confirms chronic shortage)">' +
+        '&#8644; ' + r.transfer_recommended_count + 'x</span>'
+      : '';
+    var gapColor = r.min_qty_gap > 0 ? 'var(--critical)' : 'var(--muted)';
+    var gapStr   = (r.min_qty_gap > 0 ? '+' : '') + fmtNum(Math.round(r.min_qty_gap));
+    return '<tr>' +
+      '<td><span class="sku-id">' + escHtml(r.sku_id) + '</span>' + transferTag + '</td>' +
+      '<td style="color:var(--muted);font-size:12px">' + escHtml(r.sku_description || '') + '</td>' +
+      '<td>' + pctBadge + '</td>' +
+      '<td style="text-align:right">' + fmtNum(Math.round(r.current_min_qty)) + '</td>' +
+      '<td style="text-align:right;font-weight:600">' + fmtNum(Math.round(r.suggested_min_qty)) + '</td>' +
+      '<td style="text-align:right;color:' + gapColor + ';font-weight:600">' + gapStr + '</td>' +
+      '<td style="text-align:right;color:var(--critical);font-weight:600">' + fmtMoney(r.inventory_value_at_risk) + '</td>' +
+      '</tr>';
+  }).join('');
+
+  body.innerHTML =
+    '<table class="data-table"><thead><tr>' +
+      '<th>SKU</th>' +
+      '<th>Description</th>' +
+      '<th>Short %</th>' +
+      '<th style="text-align:right">Current Min</th>' +
+      '<th style="text-align:right">Suggested Min</th>' +
+      '<th style="text-align:right">Gap</th>' +
+      '<th style="text-align:right">Value at Risk</th>' +
+    '</tr></thead><tbody>' + rows + '</tbody></table>';
+}
+
+function exportUnderstocking() {
+  var btn = document.getElementById('understocking-export-btn');
+  var sel = document.getElementById('understocking-loc-select');
+  var loc = sel ? sel.value : '';
+  var orig = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = 'Preparing CSV…';
+  var url = '/api/understocking/export.csv' + (loc ? ('?location_id=' + encodeURIComponent(loc)) : '');
+  window.location.href = url;
+  setTimeout(function() { btn.disabled = false; btn.textContent = orig; }, 2500);
+}
+
 function renderTransfers(data) {
   document.getElementById('transfers-updated').textContent = 'Updated ' + nowStr();
   var body = document.getElementById('transfers-body');
@@ -1612,6 +1761,7 @@ async function loadData() {
     if (data.critical_actions != null) renderCriticalActions(data.critical_actions);
     if (data.reorder != null)      renderReorder(data.reorder);
     if (data.dead_stock != null)   renderDeadStock(data.dead_stock);
+    if (data.understocking != null) renderUnderstocking(data.understocking);
     if (data.transfers != null)    renderTransfers(data.transfers);
     if (data.supplier_detail)      renderSupplierDetail(data.supplier_detail);
     if (data.inventory_health)     renderInventoryHealth(data.inventory_health);

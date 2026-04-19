@@ -1,0 +1,86 @@
+Build a new analysis called 
+"Chronic Understocking Report"
+
+This directly answers the owner's question:
+"What should each store be stocking more of 
+instead of waiting for transfers?"
+
+Algorithm:
+1. For each active location (excluding MAIN DC, 
+   INTERNET, retired locations):
+
+2. Pull last 90 days of inventory snapshots 
+   for that location
+   Calculate how many days each SKU was below 
+   its reorder point (qty_on_hand < reorder_point)
+
+3. Calculate stockout_days_pct:
+   days_below_reorder / 90 days
+   
+   If stockout_days_pct > 0.30 (below reorder 
+   30%+ of the time) = CHRONICALLY UNDERSTOCKED
+
+4. Cross-reference with transfer recommendations:
+   If the system has recommended transferring 
+   this SKU TO this location in the last 30 days,
+   that confirms chronic understocking.
+
+5. Output per location:
+   Top 20 SKUs that location is most chronically 
+   short on, ranked by:
+   (stockout_days_pct × avg_daily_demand × unit_cost)
+   
+   This prioritizes high-value, high-demand 
+   SKUs that are chronically short.
+
+6. For each chronically understocked SKU:
+   Calculate suggested_min_qty:
+   = avg_daily_demand × (lead_time_days + 14 day buffer)
+   Compare to current reorder_point
+   Show the gap
+
+7. Write to new table: understocking_report
+   Migration 028:
+   - report_date DATE
+   - location_id VARCHAR(20)
+   - location_name VARCHAR(60)
+   - sku_id VARCHAR(50)
+   - sku_description TEXT
+   - stockout_days_pct NUMERIC(5,2)
+   - avg_daily_demand NUMERIC(10,4)
+   - current_min_qty NUMERIC(10,2)
+   - suggested_min_qty NUMERIC(10,2)
+   - inventory_value_at_risk NUMERIC(14,2)
+   - transfer_recommended_count INTEGER
+   UNIQUE(report_date, location_id, sku_id)
+   DISABLE ROW LEVEL SECURITY
+
+8. Add new dashboard panel:
+   "Chronic Understocking by Location"
+   
+   Dropdown: select location
+   Shows top 20 SKUs that location keeps 
+   running short on with suggested stock levels
+   
+   Header: "PARMA should stock more of these 
+   parts instead of waiting for transfers"
+   
+   Table: SKU | Description | Short X% of time | 
+   Current Min | Suggested Min | Value at Risk
+   
+   Export button: "Download Restocking Plan"
+   
+   This is actionable: a buyer looks at PARMA's 
+   list and says "yes we should increase our 
+   min on brake pads from 5 to 20 units"
+
+9. Add to context_builder.py:
+   "Top understocked SKUs for each Tier 3 location"
+   So purchasing assistant can answer:
+   "What should PARMA be stocking more of?"
+
+10. Add to weekly pipeline in main.py
+
+Push to GitHub when done.
+This is the highest priority feature right now.
+It directly answers what ownership is asking for.

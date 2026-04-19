@@ -40,6 +40,54 @@ from typing import Any
 from db.connection import get_client
 from utils.logging_config import get_logger, setup_logging
 
+
+def _get_fresh_client() -> Any:
+    """Return a brand-new Supabase client (bypasses lru_cache when available).
+
+    Mirrors engine/reorder.py — used by the batched write loop so a stale
+    connection that just hit a 57014 statement timeout can be discarded
+    and replaced before the next retry.
+    """
+    try:
+        from db.connection import get_new_client
+        return get_new_client()
+    except ImportError:
+        return get_client()
+
+
+# ---------------------------------------------------------------------------
+# Batched-write tunables — mirror engine/reorder.py
+# ---------------------------------------------------------------------------
+WRITE_BATCH_SIZE: int = 200
+"""How many alert rows to upsert per network round-trip.
+
+A single 125k-row upsert blows past Supabase's statement timeout (57014);
+200-row batches finish well inside the timeout window and let us retry
+individual batches on transient failure without losing prior progress."""
+
+WRITE_PROGRESS_INTERVAL: int = 5_000
+"""Log a progress line every N alerts written so long runs stay observable."""
+
+_WRITE_MAX_RETRIES: int = 5
+_WRITE_RETRY_DELAY: float = 5.0
+_WRITE_RETRYABLE_TOKENS: tuple[str, ...] = (
+    "57014",
+    "statement timeout",
+    "canceling statement",
+    "ConnectionTerminated",
+    "RemoteProtocolError",
+    "ReadTimeout",
+    "ConnectTimeout",
+    "PoolTimeout",
+    "ConnectionError",
+)
+
+
+def _is_write_retryable(exc: Exception) -> bool:
+    """True if exc looks like a Supabase timeout or dropped-connection error."""
+    blob = type(exc).__name__ + " " + str(exc)
+    return any(tok in blob for tok in _WRITE_RETRYABLE_TOKENS)
+
 log = get_logger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -484,13 +532,28 @@ def _alert_dead_stock(client: Any, today: date) -> list[dict]:
 
 
 def _alert_transfer_opportunity(client: Any, today: date) -> list[dict]:
-    """TRANSFER_OPPORTUNITY — unapproved inter-location transfer recommendations.
+    """TRANSFER_OPPORTUNITY — single summary alert for all pending transfers.
 
     Reads today's reorder_recommendations where recommendation_type = 'transfer'
-    and is_approved = FALSE.  Generates one alert per pending transfer so the
-    purchasing team can review and approve before placing external POs.
+    and is_approved = FALSE.  Returns ONE summary alert (not one-per-transfer)
+    pointing the user at the reorder recommendations panel.
 
-    Returns one alert per unapproved transfer recommendation from today.
+    Why a summary instead of per-transfer alerts:
+      * The reorder engine routinely emits 15k+ unapproved transfers per day.
+      * One alert per transfer flooded the alerts table (125k+ rows in a single
+        nightly run on 2026-04-19) and pushed the alerts upsert past Supabase's
+        statement timeout (57014).
+      * The detail already lives in reorder_recommendations and is rendered on
+        the dashboard's transfer panel — duplicating each row as an alert added
+        no signal, only noise.
+
+    The summary captures the headline numbers (count, distinct SKUs, distinct
+    destination locations, total units, total covered days) so the alert text
+    is informative on its own without forcing the user to open the panel.
+
+    Returns a single-element list (or empty list when there are no pending
+    transfers today).  Keeps the same return-shape as the other generators
+    so run_alerts() needs no special-casing.
     """
     recs = _paginate(
         client, "reorder_recommendations",
@@ -502,28 +565,33 @@ def _alert_transfer_opportunity(client: Any, today: date) -> list[dict]:
         eq_bool={"is_approved": False},
     )
 
-    alerts: list[dict] = []
-    for r in recs:
-        sku_id   = r["sku_id"]
-        loc_id   = r["location_id"]
-        from_loc = r.get("transfer_from_location") or "unknown"
-        qty      = float(r.get("qty_to_order") or 0)
-        days     = float(r.get("days_of_supply_remaining") or 0)
-        alerts.append(_make_alert(
-            alert_date=today,
-            alert_type="TRANSFER_OPPORTUNITY",
-            severity="info",
-            sku_id=sku_id,
-            location_id=loc_id,
-            message=(
-                f"Transfer opportunity: move {qty:.0f} units of {sku_id} "
-                f"from {from_loc} → {loc_id} "
-                f"({days:.1f} days of supply remaining at {loc_id}).  "
-                f"Approve to avoid external PO cost."
-            ),
-            alert_key=f"TRANSFER_OPPORTUNITY|{sku_id}|{loc_id}",
-        ))
-    return alerts
+    if not recs:
+        return []
+
+    n_transfers   = len(recs)
+    distinct_skus = len({r.get("sku_id") for r in recs if r.get("sku_id")})
+    distinct_dest = len({r.get("location_id") for r in recs if r.get("location_id")})
+    total_qty     = sum(float(r.get("qty_to_order") or 0) for r in recs)
+
+    message = (
+        f"{n_transfers:,} transfer opportunities identified today "
+        f"across {distinct_skus:,} SKU(s) and {distinct_dest} destination "
+        f"location(s) — {total_qty:,.0f} total units pending approval. "
+        f"See the reorder recommendations panel for the per-SKU detail."
+    )
+
+    return [_make_alert(
+        alert_date=today,
+        alert_type="TRANSFER_OPPORTUNITY",
+        severity="info",
+        # No sku_id / location_id — this is a network-wide rollup, not a
+        # per-SKU/location row.  Leaving them NULL keeps the dashboard from
+        # double-displaying the same alert under specific SKU panels.
+        message=message,
+        # Stable per-day key so a same-day re-run of the alert engine
+        # collapses to a single row (upsert ignore_duplicates).
+        alert_key="TRANSFER_OPPORTUNITY|SUMMARY",
+    )]
 
 
 def _alert_forecast_accuracy_drop(client: Any, today: date) -> list[dict]:
@@ -704,41 +772,100 @@ def run_alerts(dry_run: bool = False) -> int:
     rows_written = 0
 
     if all_alerts and not dry_run:
-        log.info("Writing %d alert(s) to alerts table …", len(all_alerts))
-        try:
-            resp = (
-                client.table("alerts")
-                .upsert(
-                    all_alerts,
-                    on_conflict="alert_date,alert_key",
-                    ignore_duplicates=True,
-                )
-                .execute()
-            )
-            rows_written = len(resp.data or [])
-            log.info(
-                "  Rows inserted (new): %d  (existing acknowledged alerts preserved)",
-                rows_written,
-            )
-        except Exception as exc:
-            if "location_name" in str(exc):
-                log.warning("location_name column missing — retrying without it.")
-                for a in all_alerts:
-                    a.pop("location_name", None)
+        total = len(all_alerts)
+        log.info(
+            "Writing %d alert(s) to alerts table in batches of %d …",
+            total, WRITE_BATCH_SIZE,
+        )
+
+        # One-shot location_name fallback: if the very first batch fails
+        # because the alerts table predates migration 016, strip the column
+        # from EVERY remaining row (not just the failing batch) so we don't
+        # repeatedly hit the same error on each subsequent batch.
+        location_name_stripped = False
+        # Holder so retry paths can swap in a freshly-reconnected client.
+        client_holder: list = [client]
+        next_progress_at = WRITE_PROGRESS_INTERVAL
+
+        for offset in range(0, total, WRITE_BATCH_SIZE):
+            batch = all_alerts[offset:offset + WRITE_BATCH_SIZE]
+
+            # Manual attempt counter so the location_name schema fallback
+            # can retry the batch WITHOUT consuming a transient-retry slot.
+            # `for attempt in range(...)` would auto-increment every iteration
+            # — using a while loop with explicit ++ on transient failures only
+            # keeps the schema-fallback retry "free" as documented.
+            attempt = 1
+            while True:
                 try:
                     resp = (
-                        client.table("alerts")
-                        .upsert(all_alerts, on_conflict="alert_date,alert_key", ignore_duplicates=True)
+                        client_holder[0].table("alerts")
+                        .upsert(
+                            batch,
+                            on_conflict="alert_date,alert_key",
+                            ignore_duplicates=True,
+                        )
                         .execute()
                     )
-                    rows_written = len(resp.data or [])
-                    log.info("  Rows inserted (retry): %d", rows_written)
-                except Exception:
-                    log.exception("Failed to write alerts (retry) to database.")
+                    rows_written += len(resp.data or [])
+                    break
+
+                except Exception as exc:
+                    msg = str(exc)
+
+                    # ----------------------------------------------------------
+                    # Schema fallback — older alerts tables lack location_name.
+                    # Strip it from THIS batch and all remaining ones, then
+                    # retry the current batch immediately WITHOUT incrementing
+                    # `attempt` (this is a known schema mismatch, not a
+                    # transient failure, and shouldn't burn retry budget).
+                    # ----------------------------------------------------------
+                    if "location_name" in msg and not location_name_stripped:
+                        log.warning(
+                            "location_name column missing — stripping from "
+                            "all remaining alerts and retrying batch."
+                        )
+                        for a in all_alerts:
+                            a.pop("location_name", None)
+                        location_name_stripped = True
+                        continue  # retry without bumping `attempt`
+
+                    # ----------------------------------------------------------
+                    # Transient timeout / dropped-connection — reconnect with
+                    # a fresh client and retry up to _WRITE_MAX_RETRIES times.
+                    # ----------------------------------------------------------
+                    if _is_write_retryable(exc) and attempt < _WRITE_MAX_RETRIES:
+                        log.warning(
+                            "  alerts write retry %d/%d "
+                            "(offset=%d, batch=%d): %s — reconnecting in %.0fs …",
+                            attempt, _WRITE_MAX_RETRIES, offset, len(batch),
+                            type(exc).__name__, _WRITE_RETRY_DELAY,
+                        )
+                        time.sleep(_WRITE_RETRY_DELAY)
+                        client_holder[0] = _get_fresh_client()
+                        attempt += 1
+                        continue
+
+                    log.exception(
+                        "Failed to write alerts batch at offset %d (size=%d).",
+                        offset, len(batch),
+                    )
                     return 1
-            else:
-                log.exception("Failed to write alerts to database.")
-                return 1
+
+            written_so_far = offset + len(batch)
+            if written_so_far >= next_progress_at or written_so_far == total:
+                log.info(
+                    "  [ALERTS] Written %d / %d alerts (%.1f%%)",
+                    written_so_far, total,
+                    100.0 * written_so_far / total,
+                )
+                while next_progress_at <= written_so_far:
+                    next_progress_at += WRITE_PROGRESS_INTERVAL
+
+        log.info(
+            "  Rows inserted (new): %d  (existing acknowledged alerts preserved)",
+            rows_written,
+        )
     elif dry_run:
         rows_written = len(all_alerts)
 

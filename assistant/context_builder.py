@@ -661,6 +661,64 @@ def _section_dead_stock(client: Any, today: date) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _section_customer_churn(client: Any, today: date) -> str:
+    """Customer churn risk summary for the most recent ml/churn.py run.
+
+    Surfaces the count of HIGH/MEDIUM/LOW risk accounts and the top
+    at-risk customer so the assistant can answer "who's about to churn?"
+    or "how many accounts are at risk?" without re-scoring.
+    """
+    try:
+        latest = (
+            client.table("customer_churn_scores")
+            .select("run_date")
+            .order("run_date", desc=True)
+            .limit(1)
+            .execute()
+            .data or []
+        )
+    except Exception:
+        return "[CUSTOMER CHURN]\n  Table not available yet.\n"
+    if not latest:
+        return "[CUSTOMER CHURN]\n  No churn report available yet.\n"
+    run_date = latest[0]["run_date"]
+
+    rows = _paginate(
+        client, "customer_churn_scores",
+        "customer_id,customer_type,risk_tier,churn_score,"
+        "days_since_last_order,revenue_90d,at_risk_flag",
+        filters={"run_date": run_date},
+    )
+    if not rows:
+        return f"[CUSTOMER CHURN — {run_date}]\n  No customers scored.\n"
+
+    high   = [r for r in rows if r.get("risk_tier") == "HIGH"]
+    medium = [r for r in rows if r.get("risk_tier") == "MEDIUM"]
+    low    = [r for r in rows if r.get("risk_tier") == "LOW"]
+
+    high_revenue = sum(float(r.get("revenue_90d") or 0) for r in high)
+
+    lines = [f"[CUSTOMER CHURN — {run_date}]"]
+    lines.append(
+        f"  {len(rows):,} customers scored.  "
+        f"HIGH: {len(high):,}  MEDIUM: {len(medium):,}  LOW: {len(low):,}"
+    )
+    lines.append(
+        f"  HIGH-risk 90d revenue at stake: ${high_revenue/1_000:.1f}K"
+    )
+
+    top = sorted(high, key=lambda r: float(r.get("churn_score") or 0), reverse=True)[:3]
+    for r in top:
+        lines.append(
+            f"  • {r.get('customer_id')} (type={r.get('customer_type') or '—'})  "
+            f"score={float(r.get('churn_score') or 0):.0f}  "
+            f"idle={r.get('days_since_last_order')}d  "
+            f"90d=${float(r.get('revenue_90d') or 0):,.0f}"
+        )
+
+    return "\n".join(lines) + "\n"
+
+
 def _section_basket_rules(client: Any, today: date) -> str:
     try:
         rows = _paginate(
@@ -725,6 +783,7 @@ def build_context(client: Any) -> str:
         ("Forecast accuracy",    _section_forecast_accuracy),
         ("Location performance", _section_location_performance),
         ("Dead stock",           _section_dead_stock),
+        ("Customer churn",       _section_customer_churn),
         ("Basket rules",         _section_basket_rules),
     ]
 

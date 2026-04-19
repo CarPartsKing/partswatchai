@@ -68,8 +68,8 @@ Acts as shared foundation code (config, DB connection, logging utilities) and sy
 
 **8. Additional ML models**
 - Basket analysis (mlxtend) — co-purchase signals ← *COMPLETE* (see `ml/basket.py`)
-- Customer churn predictor
 - Dead stock classifier ← *COMPLETE* (see `ml/dead_stock.py`)
+- Customer churn predictor ← *COMPLETE* (see `ml/churn.py`, migration 026). RFM-style scoring (recency / frequency-trend / monetary-trend, weights 0.4/0.3/0.3) over 90-day window, written to `customer_churn_scores` (one row per customer × run_date). Tier HIGH≥70 / MED≥40 / LOW with `at_risk_flag` boolean; salesman-rep routing intentionally deferred (cube emits NULL salesman today). Wired into `WEEKLY_STAGES` between basket_analysis and accuracy_report; assistant context section `_section_customer_churn` registered. **TODO**: investigate cube `[Customer].[Type].[Type]` numeric codes ('5' etc.) — mapping unknown.
 - Forecast accuracy feedback loop ← *COMPLETE* (see `ml/accuracy.py`)
 - What-if scenario engine
 

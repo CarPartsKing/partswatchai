@@ -1,0 +1,72 @@
+Do all three — (a), (b), and (c).
+
+(b) first — update replit.md immediately:
+Document that Transfer Locs dimension is 
+unpopulated in AutoCube_DTR_23160.
+Workaround: filter Sales Detail by 
+Tran Code ending in -I for transfer transactions.
+Document the full Tran Code mapping table.
+Document that Salesman is in Sales Summary 
+cube not Sales Detail cube.
+
+(a) second — fix MDX_TRANSFERS in 
+extract/autocube_product_pull.py:
+Replace the broken Transfer Locs query with 
+Sales Detail filtered to Tran Code LIKE *-I.
+
+New transfer extract should capture:
+- transaction_date
+- sku_id (from Product dimension)
+- location_id (the shipping location — [Location].[Loc])
+- tran_code (SL-I, RT-I etc)
+- qty_shipped ([Measures].[Qty Ship])
+- ship_to ([Sales Detail].[Ship To]) 
+  — destination location
+
+Store in a new table: location_transfers
+Migration 026:
+- transfer_date DATE
+- sku_id VARCHAR(50)
+- from_location_id VARCHAR(20)
+- to_location_id VARCHAR(20)
+- tran_code VARCHAR(20)
+- qty_transferred NUMERIC(12,4)
+- transfer_value NUMERIC(14,2)
+UNIQUE(transfer_date, sku_id, from_location_id, 
+to_location_id, tran_code)
+DISABLE ROW LEVEL SECURITY
+
+This gives us real historical transfer data 
+to validate the transfer optimizer recommendations.
+Compare: what the system recommends vs 
+what actually moved historically.
+
+(c) third — wire Sales Summary for salesman:
+Add a separate extract that pulls from 
+Sales Summary cube:
+[Customer].[Cust No] → customer_id
+[Customer].[Salesman] → salesman_id
+[Customer].[Cust Type] → customer_type
+[Customer].[Status] → customer_status
+
+Store in a new table: customer_master
+Migration 027:
+- customer_id VARCHAR(50) PRIMARY KEY
+- salesman_id VARCHAR(50)
+- customer_type VARCHAR(50)
+- customer_status VARCHAR(20)
+- last_updated DATE
+DISABLE ROW LEVEL SECURITY
+
+This is the customer dimension table that 
+churn.py joins to for salesman routing.
+Run once to populate, then nightly incremental.
+
+After all three are built and pushed, 
+run a test extract for transfers:
+python -m extract.autocube_product_pull --mode transfers --dry-run
+
+Show me how many transfer transactions exist 
+in the last 90 days with Tran Code -I.
+
+Push to GitHub when done.

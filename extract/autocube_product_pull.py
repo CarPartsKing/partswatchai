@@ -40,9 +40,10 @@ MODES
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 import time
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -127,19 +128,48 @@ WHERE ([Location].[Loc].&[{loc_num}])
 # Resolution order in extraction: UCoH → Cost → ExtCoH/qty.
 # ---------------------------------------------------------------------------
 
-MDX_TRANSFERS = """\
+# ---------------------------------------------------------------------------
+# Transfers — INTERCO-based extraction
+#
+# The [Transfer Locs] dimension on the Product cube is structurally present
+# but unpopulated in AutoCube_DTR_23160 (Loc From / Loc To return ZERO
+# members), so the historical "Transfer Locs" approach silently returned 0
+# rows on every run.
+#
+# Real inter-location movement is recorded on the Sales Detail cube as
+# transactions whose [Tran Code] member name ends in "-I" (INTERCO).  The
+# canonical INTERCO codes in this deployment are:
+#   SL-I, RT-I, COSL-I, CORT-I, WREX-I, WRRT-I, WRRV-I,
+#   BAEX-I, BART-I, OPSL-I, OPRT-I
+#
+# Per-day query shape mirrors MDX_INCREMENTAL_DAY in autocube_pull.py
+# (proven against this Autocube server; a multi-day CROSSJOIN exhausts the
+# server's memory).  Tran Code stays on rows so we can capture the bare code
+# in the cleaned record; we filter to "-I" suffixes in Python.
+# ---------------------------------------------------------------------------
+MDX_TRANSFERS_BY_DAY = """\
 SELECT
   NON EMPTY {{
     [Measures].[Qty Ship],
     [Measures].[Ext Cost]
   }} ON COLUMNS,
   NON EMPTY CROSSJOIN(
-    [Product].[Prod Code].[Prod Code].MEMBERS,
-    [Transfer Locs].[Loc From].[Loc From].MEMBERS,
-    [Transfer Locs].[Loc To].[Loc To].MEMBERS
+    CROSSJOIN(
+      [Product].[Prod Code].[Prod Code].MEMBERS,
+      [Location].[Loc].[Loc].MEMBERS
+    ),
+    CROSSJOIN(
+      [Sales Detail].[Ship To].[Ship To].MEMBERS,
+      [Tran Code].[Tran Code].[Tran Code].MEMBERS
+    )
   ) ON ROWS
-FROM [Product]
+FROM [Sales Detail]
+WHERE ( [Sales Date].[Invoice Date].[Inv Date].&[{date_key}] )
 """
+
+# Days of history to pull each run.  Override with env var
+# AUTOCUBE_TRANSFER_DAYS (default 90 — matches the dashboard rolling window).
+TRANSFER_DAYS_DEFAULT = 90
 
 MDX_PRODUCT_ENRICH = """\
 SELECT
@@ -549,59 +579,163 @@ def run_inventory_extract(dry_run: bool = False) -> int:
     return 0
 
 
+def _extract_tran_code(raw: str) -> str:
+    """Extract bare tran-code from caption like 'SL-I - SALE-INTERCO' → 'SL-I'."""
+    if not raw:
+        return ""
+    head = raw.split(" - ", 1)[0].strip()
+    return head[:20]
+
+
 def run_transfer_extract(dry_run: bool = False) -> int:
+    """Pull inter-location transfer history from Sales Detail cube.
+
+    Iterates the last AUTOCUBE_TRANSFER_DAYS (default 90) one day at a time,
+    keeping only rows whose [Tran Code] ends in '-I' (INTERCO).  Each row
+    becomes a (transfer_date, sku_id, from_location_id, to_location_id,
+    tran_code) record in location_transfers.
+
+    NOTE: this replaces the legacy [Transfer Locs] approach which silently
+    returned 0 rows because that dimension is unpopulated in this Autocube
+    deployment.  See replit.md → "Transfer Locs unpopulated" for context.
+    """
     t0 = time.perf_counter()
+    days = int(os.getenv("AUTOCUBE_TRANSFER_DAYS", str(TRANSFER_DAYS_DEFAULT)))
+    end_date = date.today() - timedelta(days=1)        # yesterday — today is incomplete
+    start_date = end_date - timedelta(days=days - 1)
     log.info("=" * 60)
-    log.info("  PRODUCT CUBE — TRANSFERS%s", " [DRY RUN]" if dry_run else "")
+    log.info(
+        "  PRODUCT CUBE — TRANSFERS%s  (%s … %s, %d days)",
+        " [DRY RUN]" if dry_run else "", start_date, end_date, days,
+    )
     log.info("=" * 60)
 
     try:
         client = _get_product_client()
+        # Transfers live on Sales Detail, not Product.
+        client._cube = "Sales Detail"
         client.connect()
     except Exception:
         log.exception("Connection failed.")
         return 1
 
-    try:
-        rows = client.execute_mdx(MDX_TRANSFERS)
-        log.info("Transfer rows returned: %d", len(rows))
-    except Exception:
-        log.exception("Transfer extract failed.")
-        return 1
+    cleaned: list[dict[str, Any]] = []
+    interco_kept = 0
+    rows_seen = 0
+    days_with_data = 0
+    day_failures = 0
+    # If more than half of the queried days fail, treat the run as broken
+    # rather than reporting "no data" — silent zero is the worst failure mode.
+    failure_threshold = max(1, days // 2)
 
-    if not rows:
-        log.info("No transfer data returned.")
+    for n in range(days):
+        d = start_date + timedelta(days=n)
+        date_key = d.strftime("%Y%m%d")
+        mdx = MDX_TRANSFERS_BY_DAY.format(date_key=date_key)
+        try:
+            rows = client.execute_mdx(mdx)
+        except Exception:
+            day_failures += 1
+            log.exception(
+                "Transfer extract failed for %s — continuing (%d/%d failures so far).",
+                d, day_failures, failure_threshold,
+            )
+            if day_failures >= failure_threshold:
+                log.error(
+                    "Aborting: %d day(s) failed (threshold %d of %d).",
+                    day_failures, failure_threshold, days,
+                )
+                return 1
+            continue
+        rows_seen += len(rows)
+        if rows:
+            days_with_data += 1
+        day_kept = 0
+        for r in rows:
+            sku = (r.get("[Product].[Prod Code].[Prod Code]") or "").strip()
+            from_raw = (r.get("[Location].[Loc].[Loc]") or "").strip()
+            to_raw = (r.get("[Sales Detail].[Ship To].[Ship To]") or "").strip()
+            tran_raw = (r.get("[Tran Code].[Tran Code].[Tran Code]") or "").strip()
+            if not sku or not from_raw or not tran_raw:
+                continue
+            tran_code = _extract_tran_code(tran_raw)
+            if not tran_code.endswith("-I"):
+                continue
+            qty = clean_numeric(r.get("[Measures].[Qty Ship]"))
+            if qty is None or qty == 0:
+                continue
+            cost = clean_numeric(r.get("[Measures].[Ext Cost]"))
+            from_loc = _extract_location_code(from_raw)
+            to_loc = _extract_location_code(to_raw) if to_raw else from_loc
+            if not from_loc or not to_loc:
+                continue
+            cleaned.append({
+                "transfer_date": d.isoformat(),
+                "sku_id": sku,
+                "from_location_id": from_loc,
+                "to_location_id": to_loc,
+                "tran_code": tran_code,
+                "qty_transferred": round(float(qty), 4),
+                "transfer_value": round(float(cost), 2) if cost is not None else None,
+            })
+            day_kept += 1
+        interco_kept += day_kept
+        if rows or day_kept:
+            log.info("  %s: %5d rows → %5d INTERCO kept", d, len(rows), day_kept)
+
+    log.info(
+        "Discovery summary: %d total rows over %d days with data; %d INTERCO kept (pre-dedup).",
+        rows_seen, days_with_data, interco_kept,
+    )
+
+    if not cleaned:
+        log.info("No INTERCO transfer transactions found in window.")
         return 0
 
-    today = date.today()
-    cleaned: list[dict[str, Any]] = []
-    for r in rows:
-        sku = r.get("[Product].[Prod Code].[Prod Code]", "").strip()
-        from_raw = r.get("[Transfer Locs].[Loc From].[Loc From]", "").strip()
-        to_raw = r.get("[Transfer Locs].[Loc To].[Loc To]", "").strip()
-        if not sku or not from_raw or not to_raw:
-            continue
-        from_loc = _extract_location_code(from_raw)
-        to_loc = _extract_location_code(to_raw)
-        qty = clean_numeric(r.get("[Measures].[Qty Ship]")) or 0
-        cost = clean_numeric(r.get("[Measures].[Ext Cost]"))
-        tid = f"XF-{today.isoformat()}-{sku}-{from_loc}-{to_loc}"
-        cleaned.append({
-            "transfer_id": tid,
-            "sku_id": sku,
-            "from_location": from_loc,
-            "to_location": to_loc,
-            "transfer_date": today.isoformat(),
-            "qty_transferred": qty,
-            "transfer_cost": cost,
-        })
+    # AGGREGATE on composite key (do NOT last-write-wins) — when the cube
+    # returns multiple rows for the same (date, sku, from, to, tran_code)
+    # tuple (e.g. via Prod Code aliasing), the quantities and dollars must
+    # SUM, not be overwritten by whichever row came last.
+    pre_agg = len(cleaned)
+    agg: dict[tuple, dict[str, Any]] = {}
+    for r in cleaned:
+        key = (
+            r["transfer_date"], r["sku_id"],
+            r["from_location_id"], r["to_location_id"], r["tran_code"],
+        )
+        cur = agg.get(key)
+        if cur is None:
+            agg[key] = dict(r)
+        else:
+            cur["qty_transferred"] = round(
+                float(cur["qty_transferred"]) + float(r["qty_transferred"]), 4,
+            )
+            a, b = cur.get("transfer_value"), r.get("transfer_value")
+            if a is None and b is None:
+                cur["transfer_value"] = None
+            else:
+                cur["transfer_value"] = round(float(a or 0) + float(b or 0), 2)
+    cleaned = list(agg.values())
+    if pre_agg != len(cleaned):
+        log.info(
+            "Aggregated duplicate transfer keys: %d → %d (collapsed %d rows by SUM).",
+            pre_agg, len(cleaned), pre_agg - len(cleaned),
+        )
 
-    log.info("Cleaned %d transfer rows.", len(cleaned))
+    # Tran-code distribution is the headline metric for this extract.
+    code_counts: dict[str, int] = {}
+    for r in cleaned:
+        code_counts[r["tran_code"]] = code_counts.get(r["tran_code"], 0) + 1
+    log.info("Tran code breakdown:")
+    for code, n in sorted(code_counts.items(), key=lambda x: -x[1]):
+        log.info("  %-8s  %d", code, n)
 
     if dry_run:
         for i, r in enumerate(cleaned[:5]):
             log.info("[DRY RUN] Row %d: %s", i + 1, r)
-        log.info("[DRY RUN] %d rows ready (not loaded).", len(cleaned))
+        log.info("[DRY RUN] %d transfer rows ready (not loaded).", len(cleaned))
+        elapsed = time.perf_counter() - t0
+        log.info("Dry run complete in %.1fs.", elapsed)
         return 0
 
     from db.connection import get_client as get_db_client
@@ -613,20 +747,13 @@ def run_transfer_extract(dry_run: bool = False) -> int:
         batch = [{"sku_id": s} for s in unique_skus[i:i + _BATCH_SIZE]]
         db.table("sku_master").upsert(batch, on_conflict="sku_id", ignore_duplicates=True).execute()
 
-    pre_dedup = len(cleaned)
-    cleaned = _dedupe_by_keys(cleaned, ("transfer_id",))
-    if pre_dedup != len(cleaned):
-        log.info(
-            "Deduplicated transfer rows: %d → %d (removed %d duplicate keys).",
-            pre_dedup, len(cleaned), pre_dedup - len(cleaned),
-        )
-
     loaded = 0
     for i in range(0, len(cleaned), _BATCH_SIZE):
         batch = cleaned[i:i + _BATCH_SIZE]
         try:
             db.table("location_transfers").upsert(
-                batch, on_conflict="transfer_id"
+                batch,
+                on_conflict="transfer_date,sku_id,from_location_id,to_location_id,tran_code",
             ).execute()
             loaded += len(batch)
         except Exception:

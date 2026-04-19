@@ -431,6 +431,64 @@ No PO / Purchase Order cube exists. `purchase_orders` table is sample data
 (20 rows, sequential numbering, identical timestamps). No extraction job
 can be built until a real source is provisioned.
 
+### `[Transfer Locs]` dimension is unpopulated in AutoCube_DTR_23160
+Discovery on the Product cube confirms `[Transfer Locs]` exists as a
+dimension shell with two hierarchies (`[Loc From]`, `[Loc To]`), but the
+member tables are empty: `.MEMBERS` returns ZERO rows, so any CROSSJOIN
+that includes Transfer Locs returns 0 rows regardless of the measure.
+The legacy `MDX_TRANSFERS` (Product cube + Transfer Locs) silently produced
+empty extracts on every run.
+
+**Workaround — extract transfers from Sales Detail cube via Tran Code `-I`
+suffix.** Every transaction type has an INTERCO twin whose member name ends
+in `-I`. Filter Sales Detail to those Tran Codes and use `[Location].[Loc]`
+as the source location and `[Sales Detail].[Ship To]` as the destination:
+
+| Code     | Caption                              | Code     | Caption                                |
+|----------|--------------------------------------|----------|----------------------------------------|
+| `SL-I`   | SALE-INTERCO                         | `RT-I`   | RETURN-INTERCO                         |
+| `COSL-I` | CORE SALE-INTERCO                    | `CORT-I` | CORE RETURN-INTERCO                    |
+| `WREX-I` | WARRANTY EXCHANGE-INTERCO            | `WRRT-I` | WARRANTY RETURN-INTERCO                |
+| `WRRV-I` | WARRANTY RETURN REVERSE-INTERCO      | `BAEX-I` | BATTERY ADJUSTMENT EXCHANGE-INTERCO    |
+| `BART-I` | BATTERY ADJUSTMENT RETURN-INTERCO    | `OPSL-I` | OUTSIDE PURCHASE SALE-INTERCO          |
+| `OPRT-I` | OUTSIDE PURCHASE RETURN-INTERCO      |          |                                        |
+
+Implemented in `extract/autocube_product_pull.py` (`MDX_TRANSFERS_BY_DAY` +
+`run_transfer_extract`); persists to `location_transfers` (migration 027).
+Window default 90 days, override `AUTOCUBE_TRANSFER_DAYS`.
+
+⚠ **Empirical follow-up (2026-04-19): `-I` Tran Codes are present in the
+dimension catalog but produce ZERO Sales Detail facts.** A 3-day probe
+returned 22,816 transactions but 0 INTERCO records; querying
+`[Tran Code].[Tran Code].MEMBERS` against `[Measures].[Qty Ship]` over the
+entire all-time Sales Detail range returns only base codes (SL, RT, COSL,
+CORT, WREX, WRRT, WRRV) — never the `-I` twins. The extract is wired and
+the schema is in place, but the data source itself does not currently
+record interco transfers in the cube. Likely paths forward: pull from
+Autologue's transactional DB outside the cube, or wait for a transfers
+feed to be turned on by the vendor.
+
+Secondary signal also dead in this deployment:
+`[Inventory Adjs].[Adjustment Type] = "XX-Branch Log Recv"` returns 0 rows
+across all locations and dates. Only `IM-Invt Manual Chg` and
+`SC-Stock Count Corr` adjustment types carry any measure values.
+
+### Salesman / Cust Type / Status live in Sales Summary cube, NOT Sales Detail
+The `[Customer]` dimension on Sales Detail only exposes `Customer` and
+`Cust No`. The Sales Summary cube exposes a much richer Customer dimension:
+
+```
+[Customer].[Salesman]          [Customer].[Cust Type]
+[Customer].[Customer Salesman] [Customer].[Customer Type]
+[Customer].[Status]            [Customer].[Empl Flag] / [RS Flag]
+[Customer].[AR Balance Type]   [Customer].[Category]
+```
+
+These attributes are pulled by `extract/autocube_customer_pull.py` and
+persisted to the `customer_master` table (migration 028) — the canonical
+join target for any engine that needs salesman routing or customer-type
+segmentation (notably `ml/churn.py`).
+
 ### Min-Qty reconciliation (engine/reorder.py)
 After computing `demand_over_coverage` (the AI-derived ideal on-hand level
 that should trigger a reorder cycle), `engine/reorder.py` compares it to the

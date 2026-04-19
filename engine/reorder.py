@@ -1395,6 +1395,17 @@ def run_reorder(dry_run: bool = False) -> int:
     # _RECONCILE_THRESHOLD for the relative-difference cutoff that flags a
     # mismatch between the AI-derived reorder level and the buyer's Min Qty.
     quality_issues: list[dict] = []
+    # Directional rollup of Min-Qty reconciliation gaps so the summary
+    # log can answer "is the AI biased high or low vs buyer experience?"
+    # Sums hold relative gaps (fraction of buyer Min Qty); we average at
+    # log-time.  Both directions are tracked separately because cancelling
+    # them out would obscure the operationally interesting signal.
+    reconcile_bias: dict[str, float] = {
+        "high_count": 0,    # AI threshold > buyer Min Qty (over-ordering bias)
+        "high_gap_sum": 0.0,
+        "low_count": 0,     # AI threshold < buyer Min Qty (under-ordering bias)
+        "low_gap_sum": 0.0,
+    }
 
     for (sku_id, loc_id), summary in sorted(inventory_summary.items()):
         days_supply      = summary["days_of_supply_remaining"]
@@ -1426,8 +1437,20 @@ def run_reorder(dry_run: bool = False) -> int:
         buyer_min = summary.get("buyer_reorder_point")
         if buyer_min is not None and (buyer_min > 1 or demand_over_coverage > 1):
             denom = max(buyer_min, 1.0)
-            rel_diff = abs(demand_over_coverage - buyer_min) / denom
+            signed_diff = (demand_over_coverage - buyer_min) / denom
+            rel_diff = abs(signed_diff)
             if rel_diff > _RECONCILE_THRESHOLD:
+                # Track which side of the buyer's Min Qty we landed on so
+                # the run summary can surface "AI is over-/under-ordering"
+                # bias instead of just a single count.  Positive signed
+                # diff = AI threshold HIGHER than buyer (over-ordering
+                # bias); negative = LOWER (under-ordering bias).
+                if signed_diff > 0:
+                    reconcile_bias["high_count"] += 1
+                    reconcile_bias["high_gap_sum"] += signed_diff
+                else:
+                    reconcile_bias["low_count"] += 1
+                    reconcile_bias["low_gap_sum"] += -signed_diff
                 quality_issues.append({
                     "source_table": "reorder_recommendations",
                     "source_id":    f"{sku_id}|{loc_id}|{today.isoformat()}",
@@ -1667,6 +1690,17 @@ def run_reorder(dry_run: bool = False) -> int:
              rows_written, "  (DRY RUN — no writes made)" if dry_run else "")
     log.info("  Min-Qty reconciliation issues: %d (>%.0f%% relative gap)",
              len(quality_issues), _RECONCILE_THRESHOLD * 100)
+    # Bias breakdown — tells the buying team whether the AI is
+    # systematically asking for more stock than they would (HIGH) or
+    # less (LOW).  Average gap is in % of buyer Min Qty.
+    high_n = reconcile_bias["high_count"]
+    low_n  = reconcile_bias["low_count"]
+    high_avg_pct = (reconcile_bias["high_gap_sum"] / high_n * 100) if high_n else 0.0
+    low_avg_pct  = (reconcile_bias["low_gap_sum"]  / low_n  * 100) if low_n  else 0.0
+    log.info("    ↳ AI HIGHER than buyer Min Qty: %6d  (avg gap: +%.0f%%)",
+             high_n, high_avg_pct)
+    log.info("    ↳ AI LOWER  than buyer Min Qty: %6d  (avg gap: -%.0f%%)",
+             low_n, low_avg_pct)
     log.info("=" * 60)
     return 0
 

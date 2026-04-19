@@ -104,6 +104,14 @@ MIN_ORDERS_TO_SCORE:     int   = 3
 customer to be scored.  Below this threshold the trend math is too
 noisy to be meaningful (one "skipped" order would flip the score)."""
 
+MIN_HISTORY_DAYS:        int   = 30
+"""Minimum span (last_date - first_date, in days) of observed history
+required to score a customer.  We are scoring against a 90-day window
+that is currently being backfilled — early on, many customers will
+have only a few days of data inside the window and any "trend" we
+compute from that is noise.  Skip them and let the score population
+grow as the 90-day dataset builds up."""
+
 WEIGHT_RECENCY:          float = 0.40
 WEIGHT_FREQUENCY:        float = 0.30
 WEIGHT_MONETARY:         float = 0.30
@@ -329,17 +337,30 @@ def _score_customer(
     customer_id: str,
     agg:         _CustomerAgg,
     today:       date,
-) -> dict[str, Any] | None:
-    """Score one customer.  Returns None when the customer is unscorable.
+) -> tuple[dict[str, Any] | None, str | None]:
+    """Score one customer.  Returns (row, skip_reason).
 
-    Unscorable means: zero orders, no last_date, or fewer than
-    MIN_ORDERS_TO_SCORE distinct invoices in the lookback window.
+    skip_reason is None on a successful score, or one of
+    {'no_dates', 'low_orders', 'short_history'} when the customer is
+    unscorable — exposed so the caller can report the breakdown.
+
+    Unscorable means:
+      * no observed transactions (no last_date / first_date)
+      * fewer than MIN_ORDERS_TO_SCORE distinct invoices in the window
+      * span (last_date - first_date) < MIN_HISTORY_DAYS — too sparse
+        to compute a meaningful 30d-vs-prior-60d trend.  This filter
+        will retire itself as the 90-day re-pull populates the window.
     """
-    order_count_90d       = len(agg.orders_all)
+    if agg.last_date is None or agg.first_date is None:
+        return None, "no_dates"
+
+    order_count_90d = len(agg.orders_all)
     if order_count_90d < MIN_ORDERS_TO_SCORE:
-        return None
-    if agg.last_date is None:
-        return None
+        return None, "low_orders"
+
+    history_span_days = (agg.last_date - agg.first_date).days
+    if history_span_days < MIN_HISTORY_DAYS:
+        return None, "short_history"
 
     order_count_30d       = len(agg.orders_30d)
     order_count_prior_60d = len(agg.orders_prior_60d)
@@ -418,7 +439,7 @@ def _score_customer(
         "churn_score":           round(churn_score,     2),
         "risk_tier":             risk_tier,
         "at_risk_flag":          at_risk,
-    }
+    }, None
 
 
 # ---------------------------------------------------------------------------
@@ -533,19 +554,29 @@ def run_churn(dry_run: bool = False) -> int:
 
     log.info("Scoring %d customers …", len(aggs))
     scores: list[dict[str, Any]] = []
-    skipped_low_orders = 0
+    skip_counts: dict[str, int] = defaultdict(int)
     for customer_id, agg in aggs.items():
-        row = _score_customer(customer_id, agg, today)
+        row, skip_reason = _score_customer(customer_id, agg, today)
         if row is None:
-            skipped_low_orders += 1
+            skip_counts[skip_reason or "unknown"] += 1
             continue
         scores.append(row)
 
-    if skipped_low_orders:
-        log.info(
-            "  Skipped %d customers with < %d orders in the lookback window.",
-            skipped_low_orders, MIN_ORDERS_TO_SCORE,
-        )
+    if skip_counts:
+        log.info("Skipped customers (insufficient signal):")
+        if skip_counts.get("short_history"):
+            log.info(
+                "  short_history (< %d days span): %d  "
+                "— expected to shrink as the 90-day re-pull populates older dates.",
+                MIN_HISTORY_DAYS, skip_counts["short_history"],
+            )
+        if skip_counts.get("low_orders"):
+            log.info(
+                "  low_orders     (< %d invoices): %d",
+                MIN_ORDERS_TO_SCORE, skip_counts["low_orders"],
+            )
+        if skip_counts.get("no_dates"):
+            log.info("  no_dates                     : %d", skip_counts["no_dates"])
 
     # ---------- Tier breakdown ----------
     by_tier: dict[str, int] = defaultdict(int)

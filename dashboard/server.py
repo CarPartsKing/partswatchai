@@ -1437,6 +1437,122 @@ def index():
     return send_from_directory(str(Path(__file__).parent), "index.html")
 
 
+def _build_stocking_gaps(client: Any, today: date) -> dict:
+    """Stocking Gap Intelligence — chronic transfer-pattern gaps by location.
+
+    Returns the most-recent stocking_gaps analysis grouped by location:
+      {
+        analysis_date: 'YYYY-MM-DD',
+        total_chronic: int,
+        total_annual_savings: float,
+        locations: [{location_id, location_name, chronic_count,
+                     total_annual_savings, rows: [...top20...]}],
+        default_location_id: <location with most chronic gaps>
+      }
+
+    All locations returned in one payload so the dropdown switches client-side.
+    Gracefully returns an empty payload if migration 030 hasn't been applied.
+    """
+    try:
+        latest = (
+            client.table("stocking_gaps")
+            .select("analysis_date")
+            .order("analysis_date", desc=True)
+            .limit(1)
+            .execute()
+            .data or []
+        )
+    except Exception:
+        return {"analysis_date": None, "locations": [],
+                "total_chronic": 0, "total_annual_savings": 0.0,
+                "default_location_id": None}
+    if not latest:
+        return {"analysis_date": None, "locations": [],
+                "total_chronic": 0, "total_annual_savings": 0.0,
+                "default_location_id": None}
+    analysis_date = latest[0]["analysis_date"]
+
+    rows = _paginate(
+        client, "stocking_gaps",
+        "sku_id,location_id,location_name,transfer_from_location,"
+        "transfer_frequency,transfer_streak,avg_qty_recommended,"
+        "total_transfer_value,gap_score,gap_classification,"
+        "suggested_stock_increase,current_reorder_point,"
+        "annual_cost_savings,trend_direction",
+        filters={"analysis_date": analysis_date},
+    )
+
+    by_loc: dict[str, dict] = {}
+    total_chronic = 0
+    total_savings = 0.0
+
+    for r in rows:
+        loc = r.get("location_id") or ""
+        if not loc or loc in EXCLUDED_DISPLAY_LOCATIONS or loc == "LOC-025":
+            continue
+        cls = r.get("gap_classification") or "OCCASIONAL"
+        savings = float(r.get("annual_cost_savings") or 0)
+
+        if cls == "CHRONIC":
+            total_chronic += 1
+            total_savings += savings
+
+        bucket = by_loc.setdefault(loc, {
+            "location_id":         loc,
+            "location_name":       r.get("location_name") or LOCATION_NAMES.get(loc, loc),
+            "chronic_count":       0,
+            "total_annual_savings":0.0,
+            "rows":                [],
+        })
+        if cls == "CHRONIC":
+            bucket["chronic_count"]        += 1
+            bucket["total_annual_savings"] += savings
+
+        bucket["rows"].append({
+            "sku_id":                  r.get("sku_id"),
+            "transfer_from_location":  r.get("transfer_from_location"),
+            "transfer_from_display":   _loc_display(r["transfer_from_location"])
+                                       if r.get("transfer_from_location") else "",
+            "transfer_frequency":      int(r.get("transfer_frequency") or 0),
+            "transfer_streak":         int(r.get("transfer_streak") or 0),
+            "avg_qty_recommended":     float(r.get("avg_qty_recommended") or 0),
+            "total_transfer_value":    float(r.get("total_transfer_value") or 0),
+            "gap_score":               float(r.get("gap_score") or 0),
+            "gap_classification":      cls,
+            "suggested_stock_increase":float(r.get("suggested_stock_increase") or 0)
+                                       if r.get("suggested_stock_increase") is not None else None,
+            "current_reorder_point":   float(r.get("current_reorder_point") or 0)
+                                       if r.get("current_reorder_point") is not None else None,
+            "annual_cost_savings":     savings if cls == "CHRONIC" else None,
+            "trend_direction":         r.get("trend_direction") or "STABLE",
+        })
+
+    # Keep top 20 chronic-first per location, round totals
+    for b in by_loc.values():
+        cls_rank = {"CHRONIC": 0, "RECURRING": 1, "OCCASIONAL": 2}
+        b["rows"].sort(key=lambda r: (
+            cls_rank.get(r["gap_classification"], 9),
+            -(r.get("annual_cost_savings") or 0),
+            -r["transfer_frequency"],
+        ))
+        b["rows"] = b["rows"][:20]
+        b["total_annual_savings"] = round(b["total_annual_savings"], 2)
+
+    locations = sorted(by_loc.values(), key=lambda b: b["location_name"])
+    default_loc = (
+        max(by_loc.values(), key=lambda b: b["chronic_count"])["location_id"]
+        if by_loc else None
+    )
+
+    return {
+        "analysis_date":        analysis_date,
+        "total_chronic":        total_chronic,
+        "total_annual_savings": round(total_savings, 2),
+        "locations":            locations,
+        "default_location_id":  default_loc,
+    }
+
+
 def _build_understocking(client: Any, today: date) -> dict:
     """Chronic Understocking Report — by location.
 
@@ -1566,6 +1682,7 @@ def dashboard_data():
         ("basket_rules",         _build_basket_rules),
         ("abc_xyz_matrix",       _build_abc_xyz_matrix),
         ("understocking",        _build_understocking),
+        ("stocking_gaps",        _build_stocking_gaps),
         ("pipeline_status",      _build_pipeline_status),
     ]
 
@@ -1937,6 +2054,74 @@ def understocking_export():
         mimetype="text/csv",
         headers={"Content-Disposition": f'attachment; filename="{fname}"'},
     )
+
+
+@app.route("/api/stocking-gaps/export.csv")
+def stocking_gaps_export():
+    """CSV of stocking gaps for the latest analysis run.
+
+    Optional query string: `?location_id=LOC-005` filters to one location.
+    Used by the Stocking Gap Intelligence panel's Export CSV button.
+    """
+    try:
+        client = get_client()
+    except Exception as exc:
+        log.exception("Supabase connection failed for stocking-gaps export.")
+        return jsonify({"error": str(exc)}), 503
+
+    location_filter = (request.args.get("location_id") or "").strip()
+
+    try:
+        latest = (
+            client.table("stocking_gaps")
+            .select("analysis_date")
+            .order("analysis_date", desc=True)
+            .limit(1)
+            .execute()
+            .data or []
+        )
+    except Exception:
+        latest = []
+    if not latest:
+        return jsonify({"error": "no stocking gap analysis available yet"}), 404
+    analysis_date = latest[0]["analysis_date"]
+
+    filters: dict = {"analysis_date": analysis_date}
+    if location_filter:
+        filters["location_id"] = location_filter
+
+    rows = _paginate(
+        client, "stocking_gaps",
+        "analysis_date,sku_id,location_id,location_name,transfer_from_location,"
+        "transfer_frequency,transfer_streak,avg_qty_recommended,total_transfer_value,"
+        "gap_score,gap_classification,suggested_stock_increase,current_reorder_point,"
+        "annual_cost_savings,trend_direction",
+        filters=filters,
+    )
+
+    cls_rank = {"CHRONIC": 0, "RECURRING": 1, "OCCASIONAL": 2}
+    rows.sort(key=lambda r: (
+        cls_rank.get(r.get("gap_classification") or "OCCASIONAL", 9),
+        -(float(r.get("annual_cost_savings") or 0)),
+    ))
+
+    headers = [
+        "analysis_date", "location_id", "location_name", "sku_id",
+        "transfer_from_location", "gap_classification", "gap_score",
+        "transfer_frequency", "transfer_streak", "avg_qty_recommended",
+        "total_transfer_value", "suggested_stock_increase", "current_reorder_point",
+        "annual_cost_savings", "trend_direction",
+    ]
+    out = []
+    for r in rows:
+        out.append([r.get(h) for h in headers])
+
+    suffix = f"_{location_filter}" if location_filter else ""
+    fname  = f"stocking_gaps_{analysis_date}{suffix}.csv"
+    log.info("Stocking gaps CSV export: %d rows for %s%s",
+             len(out), analysis_date,
+             f" loc={location_filter}" if location_filter else "")
+    return _csv_response(headers, out, fname)
 
 
 @app.route("/api/chat", methods=["POST"])

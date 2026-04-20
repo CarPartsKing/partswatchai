@@ -707,6 +707,38 @@
     </div>
   </div>
 
+  <!-- ============== PANEL 5c — Stocking Gap Intelligence ============== -->
+  <div class="section card" id="stocking-gaps-section">
+    <div class="card-header">
+      <span class="card-title">Stocking Gap Intelligence &mdash; What to Stock Locally</span>
+      <div class="card-header-actions">
+        <span class="card-updated" id="stocking-gaps-updated"></span>
+        <button class="card-toggle" data-target="stocking-gaps-section" onclick="toggleCard(this)">&minus;</button>
+      </div>
+    </div>
+    <div class="collapsible">
+      <div id="stocking-gaps-controls"
+           style="padding:12px 14px;border-bottom:1px solid var(--border);background:var(--surface2);display:flex;flex-wrap:wrap;gap:12px;align-items:center;justify-content:space-between">
+        <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+          <label for="stocking-gaps-loc-select"
+                 style="font-size:12px;color:var(--muted);text-transform:uppercase;letter-spacing:0.4px;font-weight:600">Location</label>
+          <select id="stocking-gaps-loc-select" onchange="renderStockingGapsForSelected()"
+                  style="background:var(--surface);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:6px 10px;font-size:13px;min-width:220px"></select>
+          <span id="stocking-gaps-loc-summary" style="font-size:12px;color:var(--muted)"></span>
+        </div>
+        <button id="stocking-gaps-export-btn" onclick="exportStockingGaps()"
+                style="background:var(--accent,#2563eb);color:#fff;border:0;border-radius:4px;padding:8px 14px;font-size:12px;font-weight:600;cursor:pointer;letter-spacing:0.3px">
+          Export CSV
+        </button>
+      </div>
+      <div id="stocking-gaps-header"
+           style="padding:12px 14px;border-bottom:1px solid var(--border);font-size:13px;color:var(--text)"></div>
+      <div class="card-body" style="padding:0" id="stocking-gaps-body">
+        <div class="skeleton" style="height:120px;margin:16px;border-radius:6px"></div>
+      </div>
+    </div>
+  </div>
+
   <!-- ============== PANEL 6 — Transfer Opportunities ============== -->
   <div class="section card" id="transfers-section">
     <div class="card-header">
@@ -1480,6 +1512,130 @@ function exportUnderstocking() {
   setTimeout(function() { btn.disabled = false; btn.textContent = orig; }, 2500);
 }
 
+// ---------- Stocking Gap Intelligence ----------
+var _stockingGapsData = null;
+
+function renderStockingGaps(payload) {
+  document.getElementById('stocking-gaps-updated').textContent = 'Updated ' + nowStr();
+  _stockingGapsData = payload || null;
+
+  var sel     = document.getElementById('stocking-gaps-loc-select');
+  var body    = document.getElementById('stocking-gaps-body');
+  var hdr     = document.getElementById('stocking-gaps-header');
+  var summary = document.getElementById('stocking-gaps-loc-summary');
+
+  if (!payload || !payload.analysis_date || !payload.locations || !payload.locations.length) {
+    sel.innerHTML = '';
+    body.innerHTML = '<div class="empty-state"><div class="icon">&#128201;</div>' +
+      (payload && !payload.analysis_date
+        ? 'Stocking Gap Intelligence has not been generated yet — run weekly pipeline.'
+        : 'No stocking gaps detected.') + '</div>';
+    hdr.innerHTML = '';
+    summary.textContent = '';
+    return;
+  }
+
+  // Populate dropdown
+  sel.innerHTML = payload.locations.map(function(b) {
+    return '<option value="' + escHtml(b.location_id) + '">' +
+      escHtml(b.location_name) + ' (' + escHtml(b.location_id) + ')' +
+      (b.chronic_count > 0 ? ' — ' + b.chronic_count + ' chronic' : '') +
+      '</option>';
+  }).join('');
+
+  // Pre-select the location with the most chronic gaps
+  if (payload.default_location_id) {
+    sel.value = payload.default_location_id;
+  }
+
+  renderStockingGapsForSelected();
+}
+
+function renderStockingGapsForSelected() {
+  if (!_stockingGapsData) return;
+  var sel     = document.getElementById('stocking-gaps-loc-select');
+  var body    = document.getElementById('stocking-gaps-body');
+  var hdr     = document.getElementById('stocking-gaps-header');
+  var summary = document.getElementById('stocking-gaps-loc-summary');
+
+  var bucket = (_stockingGapsData.locations || []).find(
+    function(b) { return b.location_id === sel.value; }
+  );
+
+  if (!bucket) {
+    body.innerHTML = '<div class="empty-state">Select a location.</div>';
+    hdr.innerHTML = ''; summary.textContent = ''; return;
+  }
+
+  hdr.innerHTML =
+    '<strong style="color:var(--text)">' + escHtml(bucket.location_name) +
+    '</strong> &mdash; top chronic gaps (transfer patterns from last 90 days)' +
+    ' &middot; analysis date <span style="color:var(--muted)">' +
+    escHtml(_stockingGapsData.analysis_date) + '</span>';
+  summary.textContent =
+    bucket.chronic_count + ' chronic SKUs · ' +
+    fmtMoney(bucket.total_annual_savings) + ' potential annual savings';
+
+  var rows = (bucket.rows || []).map(function(r) {
+    var cls = r.gap_classification || 'OCCASIONAL';
+    var clsBadge = cls === 'CHRONIC'   ? badge('critical', 'CHRONIC')
+                 : cls === 'RECURRING' ? badge('high',     'RECURRING')
+                                       : badge('medium',   'OCCASIONAL');
+    var trendIcon = r.trend_direction === 'INCREASING' ? ' &#9650;'
+                  : r.trend_direction === 'DECREASING' ? ' &#9660;' : '';
+    var trendColor= r.trend_direction === 'INCREASING' ? 'var(--critical)'
+                  : r.trend_direction === 'DECREASING' ? 'var(--success)' : 'var(--muted)';
+    var fromStr = r.transfer_from_display
+      ? '<span style="color:var(--muted);font-size:11px">from ' + escHtml(r.transfer_from_display) + '</span>'
+      : '';
+    var suggestStr = r.suggested_stock_increase != null
+      ? fmtNum(Math.round(r.suggested_stock_increase))
+      : '—';
+    var curRop = r.current_reorder_point != null
+      ? fmtNum(Math.round(r.current_reorder_point))
+      : '—';
+    var savingsStr = r.annual_cost_savings != null
+      ? '<span style="color:var(--success);font-weight:600">' + fmtMoney(r.annual_cost_savings) + '</span>'
+      : '<span style="color:var(--muted)">—</span>';
+    return '<tr>' +
+      '<td><span class="sku-id">' + escHtml(r.sku_id) + '</span><br>' + fromStr + '</td>' +
+      '<td>' + clsBadge + '</td>' +
+      '<td style="text-align:right">' + r.transfer_frequency + 'x</td>' +
+      '<td style="text-align:right">' + r.transfer_streak + 'd</td>' +
+      '<td style="text-align:right">' + fmtNum(r.avg_qty_recommended.toFixed(1)) + '</td>' +
+      '<td style="text-align:right">' + curRop + '</td>' +
+      '<td style="text-align:right;font-weight:600;color:var(--warning)">' + suggestStr + '</td>' +
+      '<td style="text-align:right">' + savingsStr + '</td>' +
+      '<td style="color:' + trendColor + '">' + escHtml(r.trend_direction) + trendIcon + '</td>' +
+      '</tr>';
+  }).join('');
+
+  body.innerHTML =
+    '<table class="data-table"><thead><tr>' +
+      '<th>SKU</th>' +
+      '<th>Class</th>' +
+      '<th style="text-align:right">Freq/90d</th>' +
+      '<th style="text-align:right">Streak</th>' +
+      '<th style="text-align:right">Avg Qty</th>' +
+      '<th style="text-align:right">Curr Min</th>' +
+      '<th style="text-align:right">Suggest Stock</th>' +
+      '<th style="text-align:right">Annual Savings</th>' +
+      '<th>Trend</th>' +
+    '</tr></thead><tbody>' + rows + '</tbody></table>';
+}
+
+function exportStockingGaps() {
+  var btn = document.getElementById('stocking-gaps-export-btn');
+  var sel = document.getElementById('stocking-gaps-loc-select');
+  var loc = sel ? sel.value : '';
+  var orig = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = 'Preparing CSV…';
+  var url = '/api/stocking-gaps/export.csv' + (loc ? ('?location_id=' + encodeURIComponent(loc)) : '');
+  window.location.href = url;
+  setTimeout(function() { btn.disabled = false; btn.textContent = orig; }, 2500);
+}
+
 function renderTransfers(data) {
   document.getElementById('transfers-updated').textContent = 'Updated ' + nowStr();
   var body = document.getElementById('transfers-body');
@@ -1761,7 +1917,8 @@ async function loadData() {
     if (data.critical_actions != null) renderCriticalActions(data.critical_actions);
     if (data.reorder != null)      renderReorder(data.reorder);
     if (data.dead_stock != null)   renderDeadStock(data.dead_stock);
-    if (data.understocking != null) renderUnderstocking(data.understocking);
+    if (data.understocking != null)   renderUnderstocking(data.understocking);
+    if (data.stocking_gaps != null)   renderStockingGaps(data.stocking_gaps);
     if (data.transfers != null)    renderTransfers(data.transfers);
     if (data.supplier_detail)      renderSupplierDetail(data.supplier_detail);
     if (data.inventory_health)     renderInventoryHealth(data.inventory_health);

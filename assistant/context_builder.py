@@ -787,6 +787,75 @@ def _section_understocking(client: Any, today: date) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _section_stocking_gaps(client: Any, today: date) -> str:
+    """Top 5 chronic stocking gaps per location from the latest stocking_gaps run.
+
+    Lets the assistant answer "what should PARMA stock instead of transferring?"
+    or "where are we wasting the most on inter-store transfers?" precisely.
+    """
+    try:
+        latest = (
+            client.table("stocking_gaps")
+            .select("analysis_date")
+            .order("analysis_date", desc=True)
+            .limit(1)
+            .execute()
+            .data or []
+        )
+    except Exception:
+        return "[STOCKING GAP INTELLIGENCE]\n  Table not available yet — run migration 030.\n"
+    if not latest:
+        return "[STOCKING GAP INTELLIGENCE]\n  No stocking gap analysis available yet.\n"
+    analysis_date = latest[0]["analysis_date"]
+
+    rows = _paginate(
+        client, "stocking_gaps",
+        "sku_id,location_id,location_name,transfer_frequency,transfer_streak,"
+        "avg_qty_recommended,gap_score,gap_classification,"
+        "suggested_stock_increase,annual_cost_savings,trend_direction",
+        filters={"analysis_date": analysis_date, "gap_classification": "CHRONIC"},
+        order_col="annual_cost_savings",
+        order_desc=True,
+        limit=200,
+    )
+    if not rows:
+        return f"[STOCKING GAP INTELLIGENCE — {analysis_date}]\n  No CHRONIC gaps detected.\n"
+
+    # Group by location, keep top 5 per location by annual_cost_savings
+    by_loc: dict[str, list[dict]] = defaultdict(list)
+    for r in rows:
+        loc = r.get("location_id") or ""
+        if loc:
+            by_loc[loc].append(r)
+
+    total_savings = sum(float(r.get("annual_cost_savings") or 0) for r in rows)
+    total_chronic = len(rows)
+
+    lines = [f"[STOCKING GAP INTELLIGENCE — {analysis_date}]"]
+    lines.append(
+        f"  {total_chronic} CHRONIC gaps detected across {len(by_loc)} locations.  "
+        f"Estimated annual transfer savings if stocked locally: ${total_savings:,.0f}"
+    )
+    lines.append("  Top 5 chronic gaps per location (by annual savings):")
+
+    for loc, loc_rows in sorted(by_loc.items(), key=lambda kv: kv[0]):
+        loc_rows.sort(key=lambda r: float(r.get("annual_cost_savings") or 0), reverse=True)
+        loc_name = loc_rows[0].get("location_name") or LOCATION_NAMES.get(loc, loc)
+        lines.append(f"  {loc_name} ({loc}):")
+        for r in loc_rows[:5]:
+            trend = r.get("trend_direction") or "STABLE"
+            savings = float(r.get("annual_cost_savings") or 0)
+            lines.append(
+                f"    • {r.get('sku_id')}  freq={r.get('transfer_frequency')}x/90d  "
+                f"streak={r.get('transfer_streak')}d  "
+                f"avg_qty={float(r.get('avg_qty_recommended') or 0):.1f}  "
+                f"suggest_stock={float(r.get('suggested_stock_increase') or 0):.1f}  "
+                f"savings=${savings:,.0f}/yr  {trend}"
+            )
+
+    return "\n".join(lines) + "\n"
+
+
 def _section_basket_rules(client: Any, today: date) -> str:
     try:
         rows = _paginate(
@@ -853,6 +922,7 @@ def build_context(client: Any) -> str:
         ("Dead stock",           _section_dead_stock),
         ("Customer churn",       _section_customer_churn),
         ("Understocking",        _section_understocking),
+        ("Stocking gaps",        _section_stocking_gaps),
         ("Basket rules",         _section_basket_rules),
     ]
 

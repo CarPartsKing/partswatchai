@@ -213,6 +213,10 @@ NETWORK_MODEL_LABEL: str = "rolling_avg_network"
 # threshold (180 days) so the two stages stay aligned.
 DEAD_TAIL_DAYS: int = 180
 
+CHRONIC_GAP_MULTIPLIER: float = 1.5
+"""When a (sku, location) has gap_score > 0.7 in stocking_gaps, order 50% more
+to build up local stock and eliminate the recurring transfer dependency."""
+
 
 # ---------------------------------------------------------------------------
 # Fetch helpers — all paginated, retry on transient errors
@@ -741,6 +745,88 @@ def _fetch_location_shares(
             continue
 
     return dict(shares)
+
+
+# ---------------------------------------------------------------------------
+# Chronic gap fetch — load CHRONIC-classified (sku, location) pairs so the
+# reorder engine can apply CHRONIC_GAP_MULTIPLIER to those orders.
+# ---------------------------------------------------------------------------
+
+def _fetch_chronic_gaps(
+    client_holder: list,
+    at_risk_skus: list[str],
+) -> set[tuple[str, str]]:
+    """Return (sku_id, location_id) pairs classified CHRONIC in latest stocking_gaps.
+
+    Gracefully returns an empty set when the stocking_gaps table does not yet
+    exist (migration 030 not applied) — the reorder engine continues normally
+    without the gap multiplier rather than aborting.
+
+    Args:
+        client_holder: Single-element list holding the active Supabase client.
+        at_risk_skus:  SKU IDs from the at-risk pre-filter — limits the fetch
+                       to SKUs we're actually going to recommend for.
+
+    Returns:
+        Set of (sku_id, location_id) tuples with gap_score > 0.7.
+    """
+    if not at_risk_skus:
+        return set()
+
+    from postgrest.exceptions import APIError
+
+    try:
+        latest_row = (
+            client_holder[0].table("stocking_gaps")
+            .select("analysis_date")
+            .order("analysis_date", desc=True)
+            .limit(1)
+            .execute()
+            .data or []
+        )
+    except APIError as exc:
+        msg = str(exc).lower()
+        if "relation" in msg and "stocking_gaps" in msg:
+            log.info(
+                "stocking_gaps table not found — apply migration 030 to enable "
+                "chronic-gap order multiplier.  Continuing without it."
+            )
+            return set()
+        raise
+    except Exception:
+        log.warning("stocking_gaps lookup failed (non-fatal) — skipping gap multiplier.")
+        return set()
+
+    if not latest_row:
+        return set()
+    latest_date = latest_row[0]["analysis_date"]
+
+    chronic: set[tuple[str, str]] = set()
+    n_batches = math.ceil(len(at_risk_skus) / SKU_BATCH_SIZE)
+    for i in range(n_batches):
+        sku_batch = at_risk_skus[i * SKU_BATCH_SIZE:(i + 1) * SKU_BATCH_SIZE]
+        try:
+            rows = _paginate(
+                client_holder, "stocking_gaps",
+                "sku_id,location_id",
+                filters={
+                    "analysis_date":     latest_date,
+                    "gap_classification": "CHRONIC",
+                },
+                in_filters={"sku_id": sku_batch},
+            )
+        except Exception:
+            log.warning("Chronic gap batch %d/%d failed (non-fatal).", i + 1, n_batches)
+            continue
+        for r in rows:
+            chronic.add((r["sku_id"], r["location_id"]))
+
+    log.info(
+        "Chronic gap multiplier: %d (sku, location) pairs will receive "
+        "%.0f%% extra order qty (latest analysis_date=%s).",
+        len(chronic), (CHRONIC_GAP_MULTIPLIER - 1) * 100, latest_date,
+    )
+    return chronic
 
 
 # ---------------------------------------------------------------------------
@@ -1310,6 +1396,9 @@ def run_reorder(dry_run: bool = False) -> int:
         location_shares = _fetch_location_shares(client_holder, at_risk_list)
         log.info("  SKUs with location-share data: %d", len(location_shares))
 
+        log.info("Fetching chronic stocking gaps for order-multiplier …")
+        chronic_gap_pairs = _fetch_chronic_gaps(client_holder, at_risk_list)
+
     except Exception:
         log.exception("Fatal error during data fetch phase.")
         return 1
@@ -1511,6 +1600,11 @@ def run_reorder(dry_run: bool = False) -> int:
             round(days_supply, 2) if days_supply < DAYS_OF_SUPPLY_CAP
             else DAYS_OF_SUPPLY_CAP
         )
+
+        # Chronic gap boost — order 50% more to build local stock and break
+        # the transfer dependency identified by ml/stocking_intelligence.py.
+        if (sku_id, loc_id) in chronic_gap_pairs:
+            qty_to_order = qty_to_order * CHRONIC_GAP_MULTIPLIER
 
         # Round to whole units — buyers cut POs/transfers in integers, and
         # the MIN_ORDER_QTY gate above already proved we want to order.

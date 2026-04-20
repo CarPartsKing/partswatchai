@@ -78,11 +78,12 @@ NIGHTLY_STAGES: list[Stage] = [
 ]
 
 WEEKLY_STAGES: list[Stage] = [
-    Stage("dead_stock",      "ml.dead_stock",         "run_dead_stock",      "dry_run"),
-    Stage("basket_analysis", "ml.basket",             "run_basket",          "dry_run"),
-    Stage("churn",           "ml.churn",              "run_churn",           "dry_run"),
-    Stage("understocking",   "engine.understocking",  "run_understocking",   "dry_run"),
-    Stage("accuracy_report", "ml.accuracy",           "run",                 "dry_run"),
+    Stage("dead_stock",           "ml.dead_stock",             "run_dead_stock",           "dry_run"),
+    Stage("basket_analysis",      "ml.basket",                 "run_basket",               "dry_run"),
+    Stage("churn",                "ml.churn",                  "run_churn",                "dry_run"),
+    Stage("understocking",        "engine.understocking",      "run_understocking",        "dry_run"),
+    Stage("stocking_intelligence","ml.stocking_intelligence",  "run_stocking_intelligence","dry_run"),
+    Stage("accuracy_report",      "ml.accuracy",               "run",                      "dry_run"),
 ]
 
 # On-demand extract stages — not part of the nightly default loop, but
@@ -259,8 +260,9 @@ _STAGE_DISPLAY: dict[str, str] = {
     "alerts":            "Alerts engine",
     "basket_analysis":   "Basket analysis (weekly)",
     "accuracy_report":   "Forecast accuracy report (weekly)",
-    "dead_stock":        "Dead stock — capital-weighted (weekly)",
-    "product_extract":   "Product extract (Autocube inventory + master)",
+    "dead_stock":             "Dead stock — capital-weighted (weekly)",
+    "stocking_intelligence":  "Stocking gap intelligence (weekly)",
+    "product_extract":        "Product extract (Autocube inventory + master)",
 }
 
 

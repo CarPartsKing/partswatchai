@@ -1805,6 +1805,7 @@ def run_transfers_test(lookback_days: int = _TRANSFERS_TEST_DAYS) -> int:
 
     all_transfer_rows: list[dict] = []
     total_raw_rows = 0
+    sample_invoices: list[str] = []  # up to 20 invoice numbers for diagnostics
 
     for idx, (label, start_key, end_key) in enumerate(chunks, 1):
         log.info("[TRANSFERS-TEST] Chunk %d/%d: %s", idx, len(chunks), label)
@@ -1828,6 +1829,9 @@ def run_transfers_test(lookback_days: int = _TRANSFERS_TEST_DAYS) -> int:
             inv = r.get("invoice_number") or ""
             if _parse_transfer_invoice(inv) is not None:
                 all_transfer_rows.append(r)
+            # Collect a diverse sample of invoice numbers for diagnostics
+            if len(sample_invoices) < 20 and inv and inv not in sample_invoices:
+                sample_invoices.append(inv)
 
         log.info("[TRANSFERS-TEST] Chunk %d: %d raw rows, %d transfer invoices found so far",
                  idx, len(cleaned), len(all_transfer_rows))
@@ -1841,14 +1845,19 @@ def run_transfers_test(lookback_days: int = _TRANSFERS_TEST_DAYS) -> int:
 
     if not all_transfer_rows:
         log.warning(
-            "RESULT: No T-pattern invoices found in %d days of cube '%s'.\n"
-            "  All invoice numbers in the cube appear to be purely numeric.\n"
-            "  Possible causes:\n"
-            "    1. Transfer invoices use a different format than T{from}{to}\n"
-            "    2. No transfers occurred in this date range\n"
-            "    3. The extract may need a longer lookback (try --lookback-days 365)",
+            "RESULT: No T-pattern invoices found in %d days of cube '%s'.",
             lookback_days, cube,
         )
+        if sample_invoices:
+            log.info("Sample invoice_number values from cube (first 20): %s",
+                     sample_invoices)
+            non_numeric = [s for s in sample_invoices if not s.isdigit()]
+            if non_numeric:
+                log.info("Non-numeric invoice samples: %s", non_numeric)
+            else:
+                log.info("All sampled invoices are purely numeric. "
+                         "Transfer invoices may use a different format or cube.")
+        log.info("Try: --mode transfers-test --lookback-days 365 for a wider window.")
         return 0
 
     # Compute and report stats

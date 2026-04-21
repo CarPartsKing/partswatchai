@@ -34,6 +34,15 @@ MODES
     python -m extract.autocube_pull --mode incremental
         Pull previous day only.  Deduplicate before inserting.
 
+    python -m extract.autocube_pull --mode transfers [--lookback-days N]
+        Pull last N days (default 90) and filter to invoice_number matching
+        the transfer pattern "T {from_loc} {to_loc}" (e.g. "T 25 01").
+        Writes parsed rows to location_transfers with tran_code='ACTUAL'.
+        NOTE: Diagnostic (2026-04-21) found zero T-pattern invoices in
+        sales_transactions across the full 2022–2026 history — all invoice
+        numbers are purely numeric.  This mode will log a warning and write
+        zero rows if the pattern does not exist in the cube.
+
 WARRANTY FLAG (TODO — Sales Detail cube)
     The Sales Detail cube contains a Warranty Flag dimension. Once captured,
     warranty transactions (is_warranty = TRUE) should be excluded from forecast
@@ -1016,6 +1025,29 @@ _GENERATED_COLS = frozenset({
 
 _BATCH_SIZE = 500
 
+# ---------------------------------------------------------------------------
+# Transfer invoice detection
+# ---------------------------------------------------------------------------
+
+# Invoice numbers with format "T {from_num} {to_num}" (e.g. "T 25 01")
+# identify inter-store transfers in the Sales Detail cube.
+# The from/to numbers are Autologue location codes without leading zeros.
+_TRANSFER_INVOICE_RE = re.compile(r'^T\s+(\d{1,2})\s+(\d{1,2})\s*$')
+
+
+def _parse_transfer_invoice(invoice: str) -> tuple[str, str] | None:
+    """Parse a transfer invoice number into (from_location_id, to_location_id).
+
+    'T 25 01' → ('LOC-025', 'LOC-001')
+    'T 1 3'  → ('LOC-001', 'LOC-003')
+    Returns None if the string does not match the transfer pattern.
+    """
+    m = _TRANSFER_INVOICE_RE.match((invoice or "").strip())
+    if not m:
+        return None
+    from_num, to_num = m.group(1), m.group(2)
+    return f"LOC-{int(from_num):03d}", f"LOC-{int(to_num):03d}"
+
 
 def clean_numeric(value: Any) -> float | None:
     """Convert a value to float, handling scientific notation.
@@ -1686,6 +1718,169 @@ def run_historical_extract(
 
 
 # ---------------------------------------------------------------------------
+# Mode: TRANSFERS — extract T-pattern invoices → location_transfers
+# ---------------------------------------------------------------------------
+
+_TRANSFERS_LOOKBACK_DAYS: int = 90
+
+
+def run_transfers_extract(
+    dry_run: bool = False,
+    lookback_days: int = _TRANSFERS_LOOKBACK_DAYS,
+) -> int:
+    """Pull last `lookback_days` of transactions from Autocube, filter to
+    T-pattern invoice numbers, and upsert into location_transfers.
+
+    The Sales Detail cube records inter-store transfers as regular sales
+    transactions whose invoice_number follows the pattern "T {from} {to}"
+    (e.g. "T 25 01" = transfer from DC/LOC-025 to store/LOC-001).
+    tran_code is set to 'ACTUAL' to distinguish real cube data from the
+    previous INFERRED estimates written by engine/reorder.py.
+
+    Returns 0 on success, 1 on failure.
+    """
+    t0 = time.perf_counter()
+
+    log.info("=" * 60)
+    log.info("  AUTOCUBE TRANSFERS EXTRACT — last %d days%s",
+             lookback_days, " [DRY RUN]" if dry_run else "")
+    log.info("  Pattern: invoice_number matching 'T {from_loc} {to_loc}'")
+    log.info("=" * 60)
+
+    try:
+        client = get_client()
+        client.connect()
+    except Exception:
+        log.exception("Connection failed.")
+        return 1
+
+    column_map = load_column_map()
+    cube = config.AUTOCUBE_CUBE
+
+    end_date   = date.today() - timedelta(days=1)
+    start_date = end_date - timedelta(days=lookback_days - 1)
+    chunks     = _generate_chunk_ranges(start_date, end_date)
+
+    log.info("Pulling %d weekly chunks: %s → %s",
+             len(chunks), start_date.isoformat(), end_date.isoformat())
+
+    transfer_rows: list[dict] = []
+    total_raw_rows = 0
+    failed_chunks: list[str] = []
+
+    for idx, (label, start_key, end_key) in enumerate(chunks, 1):
+        log.info("[TRANSFERS] Chunk %d/%d: %s", idx, len(chunks), label)
+        mdx = MDX_MONTHLY_RANGE.format(
+            cube=cube, start_key=start_key, end_key=end_key,
+        )
+        try:
+            rows = client.execute_mdx(mdx)
+        except SecurityError:
+            log.exception("Security violation in chunk %s — aborting.", label)
+            return 1
+        except Exception:
+            log.exception("Failed to extract chunk %s — skipping.", label)
+            failed_chunks.append(label)
+            continue
+
+        total_raw_rows += len(rows)
+        cleaned = _map_and_clean_rows(rows, column_map)
+        del rows
+
+        for r in cleaned:
+            inv = r.get("invoice_number") or ""
+            parsed = _parse_transfer_invoice(inv)
+            if parsed is None:
+                continue
+            from_loc_id, to_loc_id = parsed
+            tdate = r.get("transaction_date")
+            sku   = r.get("sku_id")
+            if not tdate or not sku:
+                continue
+            transfer_rows.append({
+                "transfer_date":    tdate,
+                "sku_id":           sku,
+                "from_location_id": from_loc_id,
+                "to_location_id":   to_loc_id,
+                "tran_code":        "ACTUAL",
+                "qty_transferred":  r.get("qty_sold") or 0,
+                "transfer_value":   r.get("total_revenue"),
+            })
+
+    log.info("Raw rows pulled from Autocube: %d", total_raw_rows)
+    log.info("Total transfer invoices found: %d", len(transfer_rows))
+
+    if not transfer_rows:
+        log.warning(
+            "No T-pattern transfer invoices found in the last %d days of "
+            "cube '%s'.  Expected invoice_number format: 'T {from_num} {to_num}' "
+            "(e.g. 'T 25 01').  Diagnostic: sampled 1000 rows from "
+            "sales_transactions — all invoice_numbers were purely numeric "
+            "(e.g. '842091').  Either transfers are not in this cube or the "
+            "format differs from the T-pattern.  No rows written.",
+            lookback_days, cube,
+        )
+        return 0
+
+    # ---------- statistics ----------
+    routes: dict[tuple[str, str], int] = {}
+    total_units = 0.0
+    for r in transfer_rows:
+        key = (r["from_location_id"], r["to_location_id"])
+        routes[key] = routes.get(key, 0) + 1
+        total_units += float(r.get("qty_transferred") or 0)
+
+    most_common = max(routes, key=lambda k: routes[k])
+    log.info("Unique routes found: %d", len(routes))
+    log.info("Most common route: %s -> %s (%d transfers)",
+             most_common[0], most_common[1], routes[most_common])
+    log.info("Total units transferred: %.0f", total_units)
+
+    # ---------- write ----------
+    if dry_run:
+        log.info("DRY RUN — skipping write.  %d rows would be upserted.",
+                 len(transfer_rows))
+        elapsed = time.perf_counter() - t0
+        log.info("Transfers extract complete (dry run): %.1fs", elapsed)
+        return 0
+
+    from db.connection import get_client as get_db_client
+    try:
+        db = get_db_client()
+    except Exception:
+        log.exception("Supabase connection failed.")
+        return 1
+
+    loaded = 0
+    for i in range(0, len(transfer_rows), _BATCH_SIZE):
+        batch = transfer_rows[i : i + _BATCH_SIZE]
+        try:
+            db.table("location_transfers").upsert(
+                batch,
+                on_conflict=(
+                    "transfer_date,sku_id,from_location_id,"
+                    "to_location_id,tran_code"
+                ),
+            ).execute()
+            loaded += len(batch)
+        except Exception:
+            log.exception("location_transfers upsert failed at batch %d.", i)
+            raise
+
+    elapsed = time.perf_counter() - t0
+    log.info("=" * 60)
+    log.info("  TRANSFERS EXTRACT COMPLETE")
+    log.info("  Rows loaded:    %d", loaded)
+    log.info("  Unique routes:  %d", len(routes))
+    log.info("  Total units:    %.0f", total_units)
+    log.info("  Elapsed:        %.1fs", elapsed)
+    if failed_chunks:
+        log.warning("  Failed chunks: %s", ", ".join(failed_chunks))
+    log.info("=" * 60)
+    return 1 if failed_chunks else 0
+
+
+# ---------------------------------------------------------------------------
 # CLI entry point
 # ---------------------------------------------------------------------------
 
@@ -1706,7 +1901,7 @@ def main() -> int:
     )
     parser.add_argument(
         "--mode",
-        choices=["full", "incremental", "historical", "retry-failed"],
+        choices=["full", "incremental", "historical", "retry-failed", "transfers"],
         help="Extract mode",
     )
     parser.add_argument(
@@ -1739,6 +1934,13 @@ def main() -> int:
              "range from scratch even if rows already exist for those dates. "
              "Required after migration 022 (and any other schema change that "
              "needs all historical rows repopulated with new columns).",
+    )
+    parser.add_argument(
+        "--lookback-days",
+        type=int,
+        default=_TRANSFERS_LOOKBACK_DAYS,
+        metavar="N",
+        help=f"Days of history to pull for --mode transfers (default: {_TRANSFERS_LOOKBACK_DAYS})",
     )
     args = parser.parse_args()
 
@@ -1776,6 +1978,12 @@ def main() -> int:
             max_chunks=args.max_chunks,
             months_filter=args.months,
             auto_resume=not args.no_resume,
+        )
+
+    if args.mode == "transfers":
+        return run_transfers_extract(
+            dry_run=args.dry_run,
+            lookback_days=args.lookback_days,
         )
 
     return 1

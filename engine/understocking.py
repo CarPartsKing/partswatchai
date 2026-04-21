@@ -126,8 +126,10 @@ LOCATION_NAMES: dict[str, str] = {
 # ---------------------------------------------------------------------------
 
 PAGE_SIZE: int = 1_000
+SKU_BATCH_SIZE: int = 1_000       # SKUs per inventory_snapshots batch query
 SKU_LOOKUP_CHUNK: int = 200       # batch size for sku_master.in_(sku_ids)
 WRITE_BATCH_SIZE: int = 500
+PROGRESS_LOG_EVERY: int = 10_000  # log cadence (SKU count) during snapshot fetch
 _MAX_RETRIES: int = 5
 _RETRY_DELAY: float = 5.0
 
@@ -155,7 +157,7 @@ def _fresh_client() -> Any:
 
 
 # ---------------------------------------------------------------------------
-# Step 1 — paginate inventory_snapshots, accumulate per (sku, location).
+# Step 1 — SKU-batched fetch of inventory_snapshots, accumulate per (sku, loc).
 # ---------------------------------------------------------------------------
 
 @dataclass
@@ -167,55 +169,26 @@ class SnapStat:
     latest_unit_cost:     float | None = None  # None if every snapshot was NULL
 
 
-def _accumulate_snapshot_stats(
-    client_holder: list, cutoff: date,
-) -> dict[tuple[str, str], SnapStat]:
-    """Single ascending pass over inventory_snapshots in the window.
-
-    Server-side filters (so PostgREST does the heavy lifting):
-      * snapshot_date >= cutoff
-      * reorder_point > 0       (drops SKUs we don't actively manage)
-      * location_id NOT IN excluded
-
-    We order by snapshot_date ASC so 'last write wins' on the latest_*
-    fields without sorting in Python.  PostgREST .range() pagination
-    over ~2M filtered rows runs at roughly 300–500 ms per 1000-row
-    page — total ~10–15 minutes today, scales linearly with history
-    growth.  Acceptable for a weekly batch job.
-    """
-    stats: dict[tuple[str, str], SnapStat] = defaultdict(SnapStat)
+def _fetch_all_sku_ids(client_holder: list) -> list[str]:
+    """Return all sku_id values from sku_master via offset pagination."""
+    sku_ids: list[str] = []
     offset = 0
-    pages = 0
-    t0 = time.monotonic()
-
     while True:
-        page: list[dict] | None = None
         for attempt in range(1, _MAX_RETRIES + 1):
             try:
-                q = (
+                rows = (
                     client_holder[0]
-                    .table("inventory_snapshots")
-                    .select("sku_id,location_id,snapshot_date,"
-                            "qty_on_hand,reorder_point,unit_cost")
-                    .gte("snapshot_date", cutoff.isoformat())
-                    .gt("reorder_point", 0)
+                    .table("sku_master")
+                    .select("sku_id")
+                    .range(offset, offset + PAGE_SIZE - 1)
+                    .execute()
+                    .data or []
                 )
-                # PostgREST .not_.in_("col", "(a,b,c)") expects a tuple/list.
-                q = q.not_.in_("location_id", EXCLUDED_LOCATIONS)
-                # Deterministic ordering — required because we rely on
-                # "last write wins" to capture latest_reorder_point /
-                # latest_unit_cost.  snapshot_date alone leaves ties
-                # under-defined; sku_id + location_id break them
-                # consistently across page boundaries.
-                q = (q.order("snapshot_date", desc=False)
-                       .order("sku_id",       desc=False)
-                       .order("location_id",  desc=False))
-                page = q.range(offset, offset + PAGE_SIZE - 1).execute().data or []
                 break
             except Exception as exc:
                 if _is_retryable(exc) and attempt < _MAX_RETRIES:
                     log.warning(
-                        "  snapshots fetch retry %d/%d (offset=%d): %s — "
+                        "  sku_master fetch retry %d/%d (offset=%d): %s — "
                         "reconnecting in %.0fs …",
                         attempt, _MAX_RETRIES, offset,
                         type(exc).__name__, _RETRY_DELAY,
@@ -224,46 +197,110 @@ def _accumulate_snapshot_stats(
                     client_holder[0] = _fresh_client()
                     continue
                 raise
-
-        assert page is not None
-        if not page:
-            break
-
-        for r in page:
-            key = (r["sku_id"], r["location_id"])
-            s = stats[key]
-            s.total_days += 1
-            qoh = float(r.get("qty_on_hand") or 0)
-            rop = float(r.get("reorder_point") or 0)
-            if qoh < rop:
-                s.days_below_reorder += 1
-            # Page is ordered by snapshot_date ASC, so each successive
-            # write is at least as recent as the prior — the final
-            # value at end of pass is the latest.
-            snap_date = r["snapshot_date"]
-            if snap_date >= s.latest_snapshot_date:
-                s.latest_snapshot_date = snap_date
-                s.latest_reorder_point = rop
-                uc = r.get("unit_cost")
-                if uc is not None:
-                    s.latest_unit_cost = float(uc)
-
-        pages += 1
-        if pages % 50 == 0:
-            log.info(
-                "  snapshots: %d pages (%d rows) processed, %d (sku,loc) "
-                "pairs accumulated  [%.1fs elapsed]",
-                pages, pages * PAGE_SIZE, len(stats),
-                time.monotonic() - t0,
-            )
-
-        if len(page) < PAGE_SIZE:
+        sku_ids.extend(r["sku_id"] for r in rows)
+        if len(rows) < PAGE_SIZE:
             break
         offset += PAGE_SIZE
+    return sku_ids
+
+
+def _accumulate_snapshot_stats(
+    client_holder: list, cutoff: date,
+) -> dict[tuple[str, str], SnapStat]:
+    """SKU-batched pass over inventory_snapshots — no OFFSET pagination.
+
+    Fetches all SKU IDs from sku_master first, then queries
+    inventory_snapshots in batches of SKU_BATCH_SIZE using
+    .in_("sku_id", batch) + .gte("snapshot_date", cutoff).
+    This avoids large-offset timeouts on the 1.4M-row table.
+
+    Server-side filters applied per batch:
+      * sku_id IN <batch>
+      * snapshot_date >= cutoff
+      * reorder_point > 0       (drops SKUs we don't actively manage)
+      * location_id NOT IN excluded
+    """
+    log.info("  Fetching all SKU IDs from sku_master …")
+    all_sku_ids = _fetch_all_sku_ids(client_holder)
+    total_skus = len(all_sku_ids)
+    log.info("  %d SKUs to process in batches of %d", total_skus, SKU_BATCH_SIZE)
+
+    stats: dict[tuple[str, str], SnapStat] = defaultdict(SnapStat)
+    processed = 0
+    next_log_at = PROGRESS_LOG_EVERY
+    t0 = time.monotonic()
+
+    for batch_start in range(0, total_skus, SKU_BATCH_SIZE):
+        sku_batch = all_sku_ids[batch_start:batch_start + SKU_BATCH_SIZE]
+
+        # Inner pagination for this SKU batch (bounded by rows-per-1000-SKUs,
+        # not the full table size — large offsets never occur).
+        batch_offset = 0
+        while True:
+            page: list[dict] | None = None
+            for attempt in range(1, _MAX_RETRIES + 1):
+                try:
+                    page = (
+                        client_holder[0]
+                        .table("inventory_snapshots")
+                        .select("sku_id,location_id,snapshot_date,"
+                                "qty_on_hand,reorder_point,unit_cost")
+                        .in_("sku_id", sku_batch)
+                        .gte("snapshot_date", cutoff.isoformat())
+                        .gt("reorder_point", 0)
+                        .not_.in_("location_id", EXCLUDED_LOCATIONS)
+                        .range(batch_offset, batch_offset + PAGE_SIZE - 1)
+                        .execute()
+                        .data or []
+                    )
+                    break
+                except Exception as exc:
+                    if _is_retryable(exc) and attempt < _MAX_RETRIES:
+                        log.warning(
+                            "  snapshots fetch retry %d/%d "
+                            "(batch_start=%d, batch_offset=%d): %s — "
+                            "reconnecting in %.0fs …",
+                            attempt, _MAX_RETRIES, batch_start, batch_offset,
+                            type(exc).__name__, _RETRY_DELAY,
+                        )
+                        time.sleep(_RETRY_DELAY)
+                        client_holder[0] = _fresh_client()
+                        continue
+                    raise
+
+            assert page is not None
+            for r in page:
+                key = (r["sku_id"], r["location_id"])
+                s = stats[key]
+                s.total_days += 1
+                qoh = float(r.get("qty_on_hand") or 0)
+                rop = float(r.get("reorder_point") or 0)
+                if qoh < rop:
+                    s.days_below_reorder += 1
+                snap_date = r["snapshot_date"]
+                if snap_date >= s.latest_snapshot_date:
+                    s.latest_snapshot_date = snap_date
+                    s.latest_reorder_point = rop
+                    uc = r.get("unit_cost")
+                    if uc is not None:
+                        s.latest_unit_cost = float(uc)
+
+            if len(page) < PAGE_SIZE:
+                break
+            batch_offset += PAGE_SIZE
+
+        processed += len(sku_batch)
+        if processed >= next_log_at or processed >= total_skus:
+            log.info(
+                "[UNDERSTOCKING] Processed %d / %d SKUs",
+                processed, total_skus,
+            )
+            while next_log_at <= processed:
+                next_log_at += PROGRESS_LOG_EVERY
 
     log.info(
-        "  snapshots fetch done: %d pages, %d (sku,loc) pairs, %.1fs",
-        pages, len(stats), time.monotonic() - t0,
+        "  snapshots fetch done: %d (sku,loc) pairs, %.1fs",
+        len(stats), time.monotonic() - t0,
     )
     return stats
 
@@ -450,7 +487,7 @@ def run_understocking(dry_run: bool = False) -> int:
     client_holder: list = [_fresh_client()]
 
     # ---------- Step 1: snapshot accumulation ----------
-    log.info("Step 1 — paginating inventory_snapshots since %s …", cutoff)
+    log.info("Step 1 — SKU-batched inventory_snapshots fetch since %s …", cutoff)
     try:
         stats = _accumulate_snapshot_stats(client_holder, cutoff)
     except Exception:

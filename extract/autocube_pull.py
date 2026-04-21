@@ -269,38 +269,38 @@ MDX_MONTHLY_RANGE = (
 # form "T{from_loc}{to_loc}" (e.g. "T2501" = from LOC-025 to LOC-001).
 # Because transfer invoices have no associated customer, including Customer
 # dimensions in the CROSSJOIN causes NON EMPTY to silently drop them (a
-# member combination with a NULL measure is filtered as empty).  These two
-# queries omit Customer dims entirely and use FILTER() to select only Invoice
-# Nbr members whose name starts with "T".
+# member combination with a NULL measure is filtered as empty).
 #
-#   MDX_TRANSFERS_DIAGNOSTIC — 30-day smoke-test (no write); used by
-#     run_transfers_test() to verify the cube contains T-invoices before
-#     committing to a full extract run.
+# MDX_TRANSFERS_RANGE is identical to MDX_MONTHLY_RANGE minus the four
+# Customer axes.  This is intentional: we pull all transactions for the
+# date window and then filter Python-side to rows whose invoice_number
+# starts with 'T'.  A server-side FILTER(... LEFT(member.NAME,1)="T") was
+# tried but consistently timed out (>120 s) because SSAS must evaluate the
+# LEFT() predicate against every Invoice Nbr member in the cube before
+# returning results.  The Python-side filter is essentially free.
 #
-#   MDX_TRANSFERS_RANGE — production extract; used by run_transfers_extract().
+# Used by both run_transfers_test() and run_transfers_extract().
 # ---------------------------------------------------------------------------
 
-_TRANSFERS_MEASURES = """\
-    [Measures].[Qty Ship],
-    [Measures].[Ext Price],
-    [Measures].[Ext Cost]"""
+_FLAG_AXES_NO_CUSTOMER = (
+    "    [Sales Detail].[Warranty Flag].[Warranty Flag].MEMBERS,\n"
+    "    [Sales Detail].[Backorder Flag].[Backorder Flag].MEMBERS,\n"
+    "    [Sales Detail].[Core Flag].[Core Flag].MEMBERS,\n"
+    "    [Sales Detail].[Price Override Flag].[Price Override Flag].MEMBERS,\n"
+    "    [Sales Detail].[Invoice Nbr].[Invoice Nbr].MEMBERS"
+)
 
-MDX_TRANSFERS_DIAGNOSTIC = (
-    "SELECT\n  NON EMPTY {{\n" + _TRANSFERS_MEASURES + "\n  }} ON COLUMNS,\n"
-    "  NON EMPTY FILTER(\n"
-    "    CROSSJOIN(\n"
-    "      {{ [Sales Date].[Invoice Date].[Inv Date].&[{start_key}]"
+MDX_TRANSFERS_RANGE = (
+    "SELECT\n  NON EMPTY {{\n" + _MEASURES_BLOCK + "\n  }} ON COLUMNS,\n"
+    "  NON EMPTY CROSSJOIN(\n"
+    "    {{ [Sales Date].[Invoice Date].[Inv Date].&[{start_key}]"
     " : [Sales Date].[Invoice Date].[Inv Date].&[{end_key}] }},\n"
-    "      [Product].[Prod Code].[Prod Code].MEMBERS,\n"
-    "      [Location].[Loc].[Loc].MEMBERS,\n"
-    "      [Sales Detail].[Invoice Nbr].[Invoice Nbr].MEMBERS\n"
-    "    ),\n"
-    '    LEFT([Sales Detail].[Invoice Nbr].CURRENTMEMBER.NAME, 1) = "T"\n'
+    "    [Product].[Prod Code].[Prod Code].MEMBERS,\n"
+    "    [Location].[Loc].[Loc].MEMBERS,\n"
+    + _FLAG_AXES_NO_CUSTOMER + "\n"
     "  ) ON ROWS\n"
     "FROM [{cube}]\n"
 )
-
-MDX_TRANSFERS_RANGE = MDX_TRANSFERS_DIAGNOSTIC
 
 
 # ---------------------------------------------------------------------------
@@ -375,7 +375,7 @@ class AutocubeClient:
                         timeout=_REQUEST_TIMEOUT_SECS,
                     )
                     log.info(
-                        "  %s auth → HTTP %d  (%d bytes)",
+                        "  %s auth -> HTTP %d  (%d bytes)",
                         auth_label, resp.status_code, len(resp.content),
                     )
                     if resp.status_code == 200 and b"Envelope" in resp.content:
@@ -425,7 +425,7 @@ class AutocubeClient:
 
         elapsed_ms = (time.perf_counter() - t0) * 1000
         log.info(
-            "  → %d rows in %.0fms  [%s]",
+            "  -> %d rows in %.0fms  [%s]",
             len(rows), elapsed_ms, request_type,
         )
         return rows
@@ -490,7 +490,7 @@ class AutocubeClient:
 
         elapsed_ms = (time.perf_counter() - t0) * 1000
         log.info(
-            "  → %d rows in %.0fms",
+            "  -> %d rows in %.0fms",
             len(rows), elapsed_ms,
         )
         return rows
@@ -1772,28 +1772,25 @@ _TRANSFERS_TEST_DAYS: int = 30
 
 
 def run_transfers_test(lookback_days: int = _TRANSFERS_TEST_DAYS) -> int:
-    """Run MDX_TRANSFERS_DIAGNOSTIC against the cube and log results.
+    """Diagnostic smoke-test — reports whether T-pattern invoices exist in cube.
 
-    This is a read-only smoke-test that tells us whether T-pattern invoice
-    numbers exist in the cube at all.  It uses MDX_TRANSFERS_DIAGNOSTIC
-    which intentionally omits Customer dimensions so transfers (which have
-    no customer) are not filtered out by NON EMPTY.
-
-    Logs: row count, unique invoice numbers, unique routes, total units.
-    Does NOT write to Supabase.  Returns 0 on success, 1 on failure.
+    Uses MDX_TRANSFERS_RANGE (no Customer dims, no server-side FILTER) in
+    7-day chunks.  Filters Python-side for invoice_number starting with 'T'.
+    Stops after the first chunk that returns T-invoices so the test completes
+    quickly.  Does NOT write to Supabase.  Returns 0 on success, 1 on failure.
     """
     t0 = time.perf_counter()
 
     end_date   = date.today() - timedelta(days=1)
     start_date = end_date - timedelta(days=lookback_days - 1)
-    start_key  = start_date.strftime("%Y%m%d")
-    end_key    = end_date.strftime("%Y%m%d")
+    chunks     = _generate_chunk_ranges(start_date, end_date)
 
     log.info("=" * 60)
     log.info("  AUTOCUBE TRANSFERS DIAGNOSTIC (no write)")
-    log.info("  Window: %s → %s (%d days)",
-             start_date.isoformat(), end_date.isoformat(), lookback_days)
-    log.info("  MDX: FILTER on Invoice Nbr starting with 'T', no Customer dims")
+    log.info("  Window: %s to %s (%d days, %d chunks)",
+             start_date.isoformat(), end_date.isoformat(),
+             lookback_days, len(chunks))
+    log.info("  MDX: no Customer dims; T-filter applied in Python")
     log.info("=" * 60)
 
     try:
@@ -1803,76 +1800,92 @@ def run_transfers_test(lookback_days: int = _TRANSFERS_TEST_DAYS) -> int:
         log.exception("Connection failed.")
         return 1
 
+    column_map = load_column_map()
     cube = config.AUTOCUBE_CUBE
-    mdx = MDX_TRANSFERS_DIAGNOSTIC.format(
-        cube=cube, start_key=start_key, end_key=end_key,
-    )
 
-    try:
-        rows = client.execute_mdx(mdx)
-    except SecurityError:
-        log.exception("Security violation — aborting.")
-        return 1
-    except Exception:
-        log.exception("Transfers diagnostic MDX failed.")
-        return 1
+    all_transfer_rows: list[dict] = []
+    total_raw_rows = 0
+
+    for idx, (label, start_key, end_key) in enumerate(chunks, 1):
+        log.info("[TRANSFERS-TEST] Chunk %d/%d: %s", idx, len(chunks), label)
+        mdx = MDX_TRANSFERS_RANGE.format(
+            cube=cube, start_key=start_key, end_key=end_key,
+        )
+        try:
+            rows = client.execute_mdx(mdx)
+        except SecurityError:
+            log.exception("Security violation — aborting.")
+            return 1
+        except Exception:
+            log.exception("Chunk %s failed — skipping.", label)
+            continue
+
+        total_raw_rows += len(rows)
+        cleaned = _map_and_clean_rows(rows, column_map)
+        del rows
+
+        for r in cleaned:
+            inv = r.get("invoice_number") or ""
+            if _parse_transfer_invoice(inv) is not None:
+                all_transfer_rows.append(r)
+
+        log.info("[TRANSFERS-TEST] Chunk %d: %d raw rows, %d transfer invoices found so far",
+                 idx, len(cleaned), len(all_transfer_rows))
+
+        if all_transfer_rows:
+            log.info("T-invoices found — stopping early (run --mode transfers for full extract).")
+            break
 
     elapsed = time.perf_counter() - t0
-    log.info("Raw rows returned: %d  (%.1fs)", len(rows), elapsed)
+    log.info("Total raw rows scanned: %d  (%.1fs)", total_raw_rows, elapsed)
 
-    if not rows:
+    if not all_transfer_rows:
         log.warning(
-            "RESULT: Zero rows returned.  The cube '%s' returned no data for "
-            "T-prefix invoice numbers in the window %s → %s.\n"
+            "RESULT: No T-pattern invoices found in %d days of cube '%s'.\n"
+            "  All invoice numbers in the cube appear to be purely numeric.\n"
             "  Possible causes:\n"
             "    1. Transfer invoices use a different format than T{from}{to}\n"
             "    2. No transfers occurred in this date range\n"
-            "    3. The Invoice Nbr dimension uses a different name or path\n"
-            "    4. The LEFT() function is not supported in this MDX dialect\n"
-            "  Try --mode transfers-test --lookback-days 365 for a wider window.",
-            cube, start_date.isoformat(), end_date.isoformat(),
+            "    3. The extract may need a longer lookback (try --lookback-days 365)",
+            lookback_days, cube,
         )
         return 0
 
-    # Parse invoice numbers to show routes and stats
+    # Compute and report stats
     invoices: set[str] = set()
     routes: dict[tuple[str, str], int] = {}
     total_units = 0.0
-    unparsed = 0
 
-    for row in rows:
-        inv = str(row.get("Invoice Nbr") or row.get("invoice_number") or "").strip()
+    for r in all_transfer_rows:
+        inv = r.get("invoice_number") or ""
         invoices.add(inv)
         parsed = _parse_transfer_invoice(inv)
-        qty_raw = row.get("Qty Ship") or row.get("qty_sold") or 0
-        try:
-            qty = float(qty_raw)
-        except (TypeError, ValueError):
-            qty = 0.0
-        total_units += qty
         if parsed:
             routes[parsed] = routes.get(parsed, 0) + 1
-        else:
-            unparsed += 1
+        qty_raw = r.get("qty_sold") or 0
+        try:
+            total_units += float(qty_raw)
+        except (TypeError, ValueError):
+            pass
 
     log.info("=" * 60)
     log.info("  TRANSFERS DIAGNOSTIC RESULTS")
-    log.info("  Total rows:          %d", len(rows))
-    log.info("  Unique invoices:     %d", len(invoices))
-    log.info("  Parsed routes:       %d", len(routes))
-    log.info("  Unparsed invoices:   %d", unparsed)
-    log.info("  Total units:         %.0f", total_units)
+    log.info("  Transfer invoice rows:  %d", len(all_transfer_rows))
+    log.info("  Unique invoice numbers: %d", len(invoices))
+    log.info("  Unique routes:          %d", len(routes))
+    log.info("  Total units:            %.0f", total_units)
     if routes:
         most_common = max(routes, key=lambda k: routes[k])
-        log.info("  Most common route:   %s → %s (%d transfers)",
+        log.info("  Most common route:  %s to %s (%d transfers)",
                  most_common[0], most_common[1], routes[most_common])
         log.info("  All routes:")
         for (frm, to), cnt in sorted(routes.items(), key=lambda x: -x[1]):
-            log.info("    %s → %s: %d", frm, to, cnt)
+            log.info("    %s to %s: %d", frm, to, cnt)
     if invoices:
         sample = sorted(invoices)[:10]
         log.info("  Sample invoice numbers: %s", sample)
     log.info("=" * 60)
+    log.info("T-invoices confirmed. Run: python -m extract.autocube_pull --mode transfers")
     return 0
 
 
@@ -1893,8 +1906,7 @@ def run_transfers_extract(
     Uses MDX_TRANSFERS_RANGE which intentionally omits Customer dimensions.
     Transfer invoices (format "T{from}{to}", e.g. "T2501") have no customer,
     so including Customer dims in the CROSSJOIN causes NON EMPTY to silently
-    drop them.  The MDX uses FILTER() to select only Invoice Nbr members
-    starting with 'T'.
+    drop them.  T-invoice detection is done Python-side after each chunk.
 
     tran_code is set to 'ACTUAL' to distinguish real cube data from the
     INFERRED estimates written by engine/reorder.py.
@@ -1923,7 +1935,7 @@ def run_transfers_extract(
     start_date = end_date - timedelta(days=lookback_days - 1)
     chunks     = _generate_chunk_ranges(start_date, end_date)
 
-    log.info("Pulling %d weekly chunks: %s → %s",
+    log.info("Pulling %d weekly chunks: %s to %s",
              len(chunks), start_date.isoformat(), end_date.isoformat())
 
     transfer_rows: list[dict] = []

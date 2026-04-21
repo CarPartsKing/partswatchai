@@ -139,10 +139,16 @@ _RETRYABLE_TOKENS = (
     "502", "504", "Bad Gateway", "Gateway Time-out",
     "RemoteDisconnected", "Server disconnected", "Connection aborted",
     "EOF occurred",
+    "ReadError",                  # httpx/httpcore read failure
+    "WinError 10054",             # Windows: remote host forcibly closed connection
 )
+
+_RETRYABLE_TYPES = (ConnectionError, OSError)  # OSError covers WinError 10054
 
 
 def _is_retryable(exc: Exception) -> bool:
+    if isinstance(exc, _RETRYABLE_TYPES):
+        return True
     blob = type(exc).__name__ + " " + str(exc)
     return any(tok in blob for tok in _RETRYABLE_TOKENS)
 
@@ -230,8 +236,17 @@ def _accumulate_snapshot_stats(
     next_log_at = PROGRESS_LOG_EVERY
     t0 = time.monotonic()
 
-    for batch_start in range(0, total_skus, SKU_BATCH_SIZE):
+    for batch_num, batch_start in enumerate(range(0, total_skus, SKU_BATCH_SIZE)):
         sku_batch = all_sku_ids[batch_start:batch_start + SKU_BATCH_SIZE]
+
+        # Proactively reconnect every 50 batches to prevent Supabase from
+        # dropping long-lived connections (WinError 10054).
+        if batch_num > 0 and batch_num % 50 == 0:
+            client_holder[0] = _fresh_client()
+
+        # Brief pause between batches to reduce connection pressure.
+        if batch_num > 0:
+            time.sleep(0.1)
 
         # Inner pagination for this SKU batch (bounded by rows-per-1000-SKUs,
         # not the full table size — large offsets never occur).

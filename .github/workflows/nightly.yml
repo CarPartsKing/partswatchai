@@ -110,56 +110,62 @@ jobs:
         continue-on-error: true
         run: python -m extract.autocube_product_pull --mode full
 
-      - name: 03 — Weather pull
-        id: s03_extract_weather
+      - name: 03 — Transfers extract (no-op stub; Transfer Locs unpopulated)
+        id: s03_extract_transfers
+        if: ${{ steps.t_start.conclusion == 'success' }}
+        continue-on-error: true
+        run: python -m extract.autocube_transfers_pull
+
+      - name: 04 — Weather pull
+        id: s04_extract_weather
         if: ${{ steps.t_start.conclusion == 'success' }}
         continue-on-error: true
         run: python -m extract.weather_pull
 
-      - name: 04 — Clean
-        id: s04_clean
+      - name: 05 — Clean
+        id: s05_clean
         if: ${{ steps.t_start.conclusion == 'success' }}
         continue-on-error: true
         run: python main.py --stage clean
 
-      - name: 05 — Derive
-        id: s05_derive
+      - name: 06 — Derive
+        id: s06_derive
         if: ${{ steps.t_start.conclusion == 'success' }}
         continue-on-error: true
         run: python main.py --stage derive
 
-      - name: 06 — Location classify
-        id: s06_location_classify
+      - name: 07 — Location classify
+        id: s07_location_classify
         if: ${{ steps.t_start.conclusion == 'success' }}
         continue-on-error: true
         run: python main.py --stage location_classify
 
-      - name: 07 — Anomaly detection
-        id: s07_anomaly
+      - name: 08 — Anomaly detection
+        id: s08_anomaly
         if: ${{ steps.t_start.conclusion == 'success' }}
         continue-on-error: true
         run: python main.py --stage anomaly
 
-      - name: 08 — Forecast (rolling avg)
-        id: s08_forecast_rolling
+      - name: 09 — Forecast (rolling avg)
+        id: s09_forecast_rolling
         if: ${{ steps.t_start.conclusion == 'success' }}
         continue-on-error: true
         run: python main.py --stage forecast_rolling
 
-      - name: 09 — Forecast (LightGBM)
-        id: s09_forecast_lgbm
+      - name: 10 — Forecast (LightGBM)
+        id: s10_forecast_lgbm
         if: ${{ steps.t_start.conclusion == 'success' }}
         continue-on-error: true
         run: python main.py --stage forecast_lgbm
 
-      - name: 10 — Reorder engine
-        id: s10_reorder
+      - name: 11 — Reorder engine
+        id: s11_reorder
         if: ${{ steps.t_start.conclusion == 'success' }}
         continue-on-error: true
         run: python main.py --stage reorder
 
-      - name: 11 — Alerts engine
-        id: s11_alerts
+      - name: 12 — Alerts engine
+        id: s12_alerts
         if: ${{ steps.t_start.conclusion == 'success' }}
         continue-on-error: true
         run: python main.py --stage alerts
@@ -175,15 +181,16 @@ jobs:
           START_HUMAN:  ${{ steps.t_start.outputs.human }}
           R01: ${{ steps.s01_extract_sales.outcome }}
           R02: ${{ steps.s02_extract_product.outcome }}
-          R03: ${{ steps.s03_extract_weather.outcome }}
-          R04: ${{ steps.s04_clean.outcome }}
-          R05: ${{ steps.s05_derive.outcome }}
-          R06: ${{ steps.s06_location_classify.outcome }}
-          R07: ${{ steps.s07_anomaly.outcome }}
-          R08: ${{ steps.s08_forecast_rolling.outcome }}
-          R09: ${{ steps.s09_forecast_lgbm.outcome }}
-          R10: ${{ steps.s10_reorder.outcome }}
-          R11: ${{ steps.s11_alerts.outcome }}
+          R03: ${{ steps.s03_extract_transfers.outcome }}
+          R04: ${{ steps.s04_extract_weather.outcome }}
+          R05: ${{ steps.s05_clean.outcome }}
+          R06: ${{ steps.s06_derive.outcome }}
+          R07: ${{ steps.s07_location_classify.outcome }}
+          R08: ${{ steps.s08_anomaly.outcome }}
+          R09: ${{ steps.s09_forecast_rolling.outcome }}
+          R10: ${{ steps.s10_forecast_lgbm.outcome }}
+          R11: ${{ steps.s11_reorder.outcome }}
+          R12: ${{ steps.s12_alerts.outcome }}
         run: |
           set -u
           END_EPOCH=$(date -u +%s)
@@ -209,19 +216,20 @@ jobs:
           declare -a NAMES=(
             "01 Sales transactions (incremental)"
             "02 Product cube (full)"
-            "03 Weather pull"
-            "04 Clean"
-            "05 Derive"
-            "06 Location classify"
-            "07 Anomaly detection"
-            "08 Forecast — rolling avg"
-            "09 Forecast — LightGBM"
-            "10 Reorder engine"
-            "11 Alerts engine"
+            "03 Transfers extract (stub)"
+            "04 Weather pull"
+            "05 Clean"
+            "06 Derive"
+            "07 Location classify"
+            "08 Anomaly detection"
+            "09 Forecast — rolling avg"
+            "10 Forecast — LightGBM"
+            "11 Reorder engine"
+            "12 Alerts engine"
           )
           declare -a OUTCOMES=(
             "$R01" "$R02" "$R03" "$R04" "$R05" "$R06"
-            "$R07" "$R08" "$R09" "$R10" "$R11"
+            "$R07" "$R08" "$R09" "$R10" "$R11" "$R12"
           )
 
           PASS=0; WARN=0; FAIL=0

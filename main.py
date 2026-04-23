@@ -91,6 +91,8 @@ WEEKLY_STAGES: list[Stage] = [
 EXTRACT_STAGES: list[Stage] = [
     Stage("product_extract", "extract.autocube_product_pull",
           "run_inventory_extract", dry_run_kwarg="dry_run"),
+    Stage("transfers_extract", "extract.autocube_transfers_pull",
+          "run_transfers_extract", dry_run_kwarg="dry_run"),
 ]
 
 STAGE_INDEX: dict[str, Stage] = {

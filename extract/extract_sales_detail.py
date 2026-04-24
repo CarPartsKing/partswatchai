@@ -202,6 +202,43 @@ def _clean_row(r: dict[str, Any]) -> dict[str, Any] | None:
     }
 
 
+def _dedupe_chunk(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Remove duplicate transaction_ids within a single chunk, keeping first occurrence.
+
+    The SSAS cube can return multiple rows that collapse to the same natural key
+    (e.g. the same part sold to the same customer on the same day appearing under
+    two dimension member aliases).  Postgres ON CONFLICT DO UPDATE raises 21000
+    ("cannot affect a row a second time") when a batch contains duplicates, so
+    we must deduplicate before each upsert.
+    """
+    seen: dict[str, dict[str, Any]] = {}
+    for r in rows:
+        tid = r["transaction_id"]
+        if tid not in seen:
+            seen[tid] = r
+    removed = len(rows) - len(seen)
+    if removed:
+        log.debug("Deduped %d duplicate transaction_ids within chunk.", removed)
+    return list(seen.values())
+
+
+def _detect_resume_date(db: Any) -> str | None:
+    """Return the latest tran_date already in sales_detail_transactions, or None."""
+    try:
+        resp = (
+            db.table("sales_detail_transactions")
+            .select("tran_date")
+            .order("tran_date", desc=True)
+            .limit(1)
+            .execute()
+        )
+        if resp.data:
+            return resp.data[0]["tran_date"][:10]
+    except Exception as exc:
+        log.warning("Could not detect resume date: %s", exc)
+    return None
+
+
 def _upsert_with_retry(db: Any, batch: list[dict]) -> None:
     """Upsert a batch into sales_detail_transactions, retrying on 57014 timeouts."""
     for attempt in range(1, _MAX_RETRIES + 1):
@@ -271,13 +308,32 @@ def run_sales_detail_extract(
     else:
         db = None
 
-    all_dry_rows:   list[dict[str, Any]] = []
-    failed_chunks:  list[str]            = []
-    total_loaded    = 0
-    total_skipped   = 0
+    # Resume: find the latest date already in Supabase and skip chunks whose
+    # end date is strictly before it.  Re-processes the chunk containing the
+    # latest date to catch any partial writes on that day.
+    resume_date: str | None = None
+    if not dry_run:
+        resume_date = _detect_resume_date(db)
+        if resume_date:
+            log.info("[RESUME] Latest tran_date in Supabase: %s — skipping earlier chunks.",
+                     resume_date)
+
+    all_dry_rows:    list[dict[str, Any]] = []
+    failed_chunks:   list[str]            = []
+    skipped_chunks   = 0
+    total_loaded     = 0
+    total_skipped    = 0
     first_chunk_done = False
 
     for idx, (label, start_key, end_key) in enumerate(chunks, 1):
+        # Skip chunks whose entire window is before the resume date.
+        # Re-process the chunk that contains resume_date (end_key >= resume_date).
+        if resume_date and not dry_run:
+            chunk_end_iso = f"{end_key[:4]}-{end_key[4:6]}-{end_key[6:]}"
+            if chunk_end_iso < resume_date:
+                skipped_chunks += 1
+                continue
+
         chunk_t0 = time.perf_counter()
         mdx = MDX_SALES_DETAIL_RANGE.format(start_key=start_key, end_key=end_key)
 
@@ -317,6 +373,8 @@ def run_sales_detail_extract(
                 continue
             chunk_cleaned.append(cleaned)
 
+        chunk_cleaned = _dedupe_chunk(chunk_cleaned)
+
         if dry_run:
             all_dry_rows.extend(chunk_cleaned)
         elif chunk_cleaned:
@@ -345,8 +403,10 @@ def run_sales_detail_extract(
 
     log.info("=" * 60)
     log.info("  SALES DETAIL EXTRACT COMPLETE")
-    log.info("  Chunks:   %d succeeded / %d total",
-             len(chunks) - len(failed_chunks), len(chunks))
+    log.info("  Chunks:   %d succeeded / %d processed / %d total (%d skipped via resume)",
+             len(chunks) - len(failed_chunks) - skipped_chunks,
+             len(chunks) - skipped_chunks,
+             len(chunks), skipped_chunks)
     log.info("  Skipped:  %d (tran code filtered or missing fields)", total_skipped)
     if dry_run:
         log.info("  Ready:    %d rows (dry run — not written)", len(all_dry_rows))

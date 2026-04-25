@@ -1,8 +1,12 @@
-"""engine/opsl_analysis.py — OPSL outside-purchase flag engine for PartsWatch AI.
+"""engine/opsl_analysis.py — Outside-purchase flag engine for PartsWatch AI.
 
-OPSL = a store bought a part from an outside vendor to fill a customer order
-because it wasn't in stock locally.  Every OPSL event represents lost margin
-vs. stocking the part.
+An outside purchase = a store sourced a part from an outside vendor to fill a
+customer order because it wasn't in stock locally.  Every such event represents
+lost margin vs. stocking the part.
+
+In AutoCube_DTR_23160, outside purchases are NOT a separate tran code.  They
+are SL (sale) lines where [Sales Detail].[Stock Flag] = 'N'.  This engine
+filters sales_detail_transactions WHERE stock_flag = 'N' AND tran_code = 'SL'.
 
 METHODOLOGY
 -----------
@@ -150,26 +154,29 @@ def _upsert_batch(client: Any, rows: list[dict]) -> None:
 # ---------------------------------------------------------------------------
 
 def _detect_effective_today(client: Any) -> date:
-    """Return max tran_date from the source table.
+    """Return max tran_date from outside-purchase rows (stock_flag='N').
 
     Anchors the lookback window to actual data rather than calendar today
     so the analysis stays valid when the nightly extract lags by a day.
+    Falls back to global max tran_date if no outside-purchase rows exist yet
+    (e.g. before the first re-extract with stock_flag populated).
     """
-    try:
-        resp = (
-            client.table(_SOURCE_TABLE)
-            .select("tran_date")
-            .eq("tran_code", "OPSL")
-            .order("tran_date", desc=True)
-            .limit(1)
-            .execute()
-        )
-        if resp.data:
-            effective = date.fromisoformat(resp.data[0]["tran_date"])
-            log.info("Effective today (max OPSL tran_date): %s", effective)
-            return effective
-    except Exception as exc:
-        log.warning("Could not detect max OPSL tran_date (%s); using calendar today.", exc)
+    for filters in [
+        {"tran_code": "SL", "stock_flag": "N"},   # preferred: outside purchases only
+        {},                                         # fallback: any row
+    ]:
+        try:
+            q = client.table(_SOURCE_TABLE).select("tran_date").order("tran_date", desc=True).limit(1)
+            for col, val in filters.items():
+                q = q.eq(col, val)
+            resp = q.execute()
+            if resp.data:
+                effective = date.fromisoformat(resp.data[0]["tran_date"])
+                label = "outside-purchase" if filters else "global"
+                log.info("Effective today (max %s tran_date): %s", label, effective)
+                return effective
+        except Exception as exc:
+            log.warning("Could not detect max tran_date (%s); trying fallback.", exc)
     return date.today()
 
 

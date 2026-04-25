@@ -16,12 +16,13 @@
 -- ---------------------------------------------------------------------------
 -- Index
 -- ---------------------------------------------------------------------------
--- Partial index covers only OPSL rows (small fraction of the table).
--- Lets get_opsl_summary do an index-only scan over the 90-day window
--- without touching the main heap.
+-- Partial index covers only outside-purchase rows (stock_flag='N' on SL lines).
+-- NOTE: 038_add_stock_flag.sql drops and recreates this index with the correct
+-- predicate after adding the stock_flag column.  This version is intentionally
+-- kept as the original create; 038 handles the migration on live databases.
 CREATE INDEX IF NOT EXISTS idx_sdt_opsl_covering
     ON sales_detail_transactions (tran_date, location_id, prod_line_pn, sales, gross_profit)
-    WHERE tran_code = 'OPSL';
+    WHERE stock_flag = 'N' AND tran_code = 'SL';
 
 -- ---------------------------------------------------------------------------
 -- RPC
@@ -51,9 +52,10 @@ AS $$
         COALESCE(SUM(gross_profit), 0) AS total_opsl_gp,
         MAX(tran_date)              AS last_opsl_date
     FROM sales_detail_transactions
-    WHERE tran_code      = 'OPSL'
-      AND tran_date     >= p_start_date
-      AND prod_line_pn  IS NOT NULL
+    WHERE stock_flag    = 'N'
+      AND tran_code     = 'SL'
+      AND tran_date    >= p_start_date
+      AND prod_line_pn IS NOT NULL
     GROUP BY prod_line_pn, location_id
 $$;
 

@@ -1,20 +1,24 @@
-"""extract/extract_sales_detail.py — Sales Detail cube extract (SL / SL-I / OPSL).
+"""extract/extract_sales_detail.py — Sales Detail cube extract (SL / SL-I).
 
 Connects to AutoCube_DTR_23160 / Sales Detail and pulls 2 years of
-transactions filtered to tran codes SL, SL-I, and OPSL.  Writes to
-the sales_detail_transactions table in Supabase.
+transactions filtered to tran codes SL and SL-I.  Writes to the
+sales_detail_transactions table in Supabase.
+
+NOTE: OPSL is not a tran code in this Autocube catalog.  Outside purchases
+are identified by [Sales Detail].[Stock Flag] = 'N' on SL lines.
 
 CUBE FIELDS
 -----------
-    [Sales Date].[Invoice Date].[Inv Date]    -> tran_date
-    [Location].[Loc].[Loc]                    -> location_id  (LOC-NNN)
-    [Tran Code].[Tran Code].[Tran Code]       -> tran_code
-    [Sales Detail].[Ship To].[Ship To]        -> ship_to
-    [Product].[Prod Line PN].[Prod Line PN]   -> prod_line_pn
-    [Measures].[Qty Ship]                     -> qty_ship
-    [Measures].[Sales]                        -> sales
-    [Measures].[Gross Profit]                 -> gross_profit
-    [Measures].[Backorder]                    -> backorder_qty
+    [Sales Date].[Invoice Date].[Inv Date]        -> tran_date
+    [Location].[Loc].[Loc]                        -> location_id  (LOC-NNN)
+    [Tran Code].[Tran Code].[Tran Code]           -> tran_code
+    [Sales Detail].[Ship To].[Ship To]            -> ship_to
+    [Sales Detail].[Stock Flag].[Stock Flag]      -> stock_flag  ('Y'=stocked, 'N'=outside)
+    [Product].[Prod Line PN].[Prod Line PN]       -> prod_line_pn
+    [Measures].[Qty Ship]                         -> qty_ship
+    [Measures].[Sales]                            -> sales
+    [Measures].[Gross Profit]                     -> gross_profit
+    [Measures].[Backorder]                        -> backorder_qty
 
 MDX APPROACH
 ------------
@@ -44,6 +48,9 @@ MODES
 
     python -m extract.extract_sales_detail --lookback-days N
         Pull last N days instead of the default 730.
+
+    python -m extract.extract_sales_detail --start-date YYYY-MM-DD
+        Pull from a fixed start date to yesterday (overrides --lookback-days).
 """
 
 from __future__ import annotations
@@ -86,7 +93,9 @@ _CHUNK_DAYS        = 7     # Days per MDX request
 
 # Python-side tran-code filter.  .MEMBERS is used in MDX so SSAS does not error
 # on codes that may have no activity in this deployment.
-_ALLOWED_TRAN_CODES = frozenset({"SL", "SL-I", "OPSL"})
+# OPSL is not a tran code in AutoCube_DTR_23160; outside purchases are
+# identified by stock_flag = 'N' on SL lines.
+_ALLOWED_TRAN_CODES = frozenset({"SL", "SL-I"})
 
 # ---------------------------------------------------------------------------
 # MDX — Sales Detail cube, 7-day date range chunk.
@@ -118,7 +127,10 @@ SELECT
         [Tran Code].[Tran Code].[Tran Code].MEMBERS,
         CROSSJOIN(
           [Sales Detail].[Ship To].[Ship To].MEMBERS,
-          [Product].[Prod Code].[Prod Code].MEMBERS
+          CROSSJOIN(
+            [Sales Detail].[Stock Flag].[Stock Flag].MEMBERS,
+            [Product].[Prod Code].[Prod Code].MEMBERS
+          )
         )
       )
     )
@@ -180,8 +192,9 @@ def _clean_row(r: dict[str, Any]) -> dict[str, Any] | None:
     if not location_id:
         return None
 
-    ship_to      = (r.get("[Sales Detail].[Ship To].[Ship To]") or "").strip()
-    prod_line_pn = (r.get("[Product].[Prod Code].[Prod Code]")  or "").strip()
+    ship_to      = (r.get("[Sales Detail].[Ship To].[Ship To]")       or "").strip()
+    stock_flag   = (r.get("[Sales Detail].[Stock Flag].[Stock Flag]") or "").strip().upper()
+    prod_line_pn = (r.get("[Product].[Prod Code].[Prod Code]")        or "").strip()
 
     qty_ship      = clean_numeric(r.get("[Measures].[Qty Ship]"))
     sales         = clean_numeric(r.get("[Measures].[Ext Price]"))
@@ -193,8 +206,9 @@ def _clean_row(r: dict[str, Any]) -> dict[str, Any] | None:
         "tran_date":      tran_date,
         "location_id":    location_id,
         "tran_code":      tran_code,
-        "ship_to":        ship_to      or None,
-        "prod_line_pn":   prod_line_pn or None,
+        "ship_to":        ship_to             or None,
+        "stock_flag":     stock_flag[:1]      if stock_flag else None,
+        "prod_line_pn":   prod_line_pn        or None,
         "qty_ship":       round(float(qty_ship),      4) if qty_ship      is not None else None,
         "sales":          round(float(sales),          4) if sales         is not None else None,
         "gross_profit":   round(float(gross_profit),   4) if gross_profit  is not None else None,
@@ -266,11 +280,15 @@ def _upsert_with_retry(db: Any, batch: list[dict]) -> None:
 def run_sales_detail_extract(
     dry_run: bool = False,
     lookback_days: int = _LOOKBACK_DAYS,
+    start_date_override: date | None = None,
 ) -> int:
-    """Pull SL / SL-I / OPSL transactions from the Sales Detail cube.
+    """Pull SL / SL-I transactions from the Sales Detail cube.
 
     Iterates the lookback window in 7-day chunks.  Each chunk's rows are
     filtered Python-side to _ALLOWED_TRAN_CODES before writing to Supabase.
+    stock_flag ('Y'/'N') is captured from [Sales Detail].[Stock Flag] so
+    outside purchases (stock_flag='N') can be identified without a separate
+    OPSL tran code (which does not exist in this Autocube catalog).
 
     On the first chunk: if zero rows are returned, raw XML is printed to
     stdout for diagnosis (wrong measure name, wrong hierarchy, etc.).
@@ -280,7 +298,10 @@ def run_sales_detail_extract(
     t0 = time.perf_counter()
 
     end_date   = date.today() - timedelta(days=1)
-    start_date = end_date - timedelta(days=lookback_days - 1)
+    if start_date_override is not None:
+        start_date = start_date_override
+    else:
+        start_date = end_date - timedelta(days=lookback_days - 1)
     chunks     = _generate_chunk_ranges(start_date, end_date)
 
     log.info("=" * 60)
@@ -434,7 +455,7 @@ def run_sales_detail_extract(
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Sales Detail cube extract — SL / SL-I / OPSL tran codes",
+        description="Sales Detail cube extract — SL / SL-I tran codes + stock_flag",
     )
     parser.add_argument(
         "--dry-run", action="store_true",
@@ -444,8 +465,25 @@ def main() -> int:
         "--lookback-days", type=int, default=_LOOKBACK_DAYS, metavar="N",
         help=f"Days of history to pull (default: {_LOOKBACK_DAYS})",
     )
+    parser.add_argument(
+        "--start-date", type=str, default=None, metavar="YYYY-MM-DD",
+        help="Fixed start date (overrides --lookback-days); pulls from this date to yesterday",
+    )
     args = parser.parse_args()
-    return run_sales_detail_extract(dry_run=args.dry_run, lookback_days=args.lookback_days)
+
+    start_date_override: date | None = None
+    if args.start_date:
+        try:
+            start_date_override = date.fromisoformat(args.start_date)
+        except ValueError:
+            print(f"ERROR: --start-date must be YYYY-MM-DD, got {args.start_date!r}")
+            return 1
+
+    return run_sales_detail_extract(
+        dry_run=args.dry_run,
+        lookback_days=args.lookback_days,
+        start_date_override=start_date_override,
+    )
 
 
 if __name__ == "__main__":

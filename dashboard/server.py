@@ -2029,6 +2029,71 @@ def health():
     return jsonify({"status": "ok"})
 
 
+@app.route("/api/rpc-debug")
+def rpc_debug():
+    """Diagnostic endpoint — tests both GP RPCs and returns raw results + date params."""
+    today = date.today()
+    current_start = (today - timedelta(days=90)).isoformat()
+    prior_start   = (today - timedelta(days=180)).isoformat()
+    prior_end     = (today - timedelta(days=91)).isoformat()
+    start_date    = current_start
+
+    result: dict[str, Any] = {
+        "today": today.isoformat(),
+        "params": {
+            "current_start": current_start,
+            "prior_start":   prior_start,
+            "prior_end":     prior_end,
+        },
+    }
+
+    try:
+        client = get_client()
+    except Exception as exc:
+        return jsonify({"error": f"Supabase connect failed: {exc}"}), 503
+
+    # Test get_all_locations_gp_summary
+    try:
+        gp_resp = client.rpc("get_all_locations_gp_summary", {
+            "p_current_start": current_start,
+            "p_prior_start":   prior_start,
+            "p_prior_end":     prior_end,
+        }).execute()
+        result["gp_summary"] = {
+            "row_count": len(gp_resp.data or []),
+            "sample":    (gp_resp.data or [])[:3],
+            "error":     None,
+        }
+    except Exception as exc:
+        result["gp_summary"] = {"row_count": 0, "sample": [], "error": str(exc)}
+
+    # Test get_top_skus_by_gp
+    try:
+        sku_resp = client.rpc("get_top_skus_by_gp", {
+            "p_start_date": start_date,
+        }).execute()
+        result["top_skus"] = {
+            "row_count": len(sku_resp.data or []),
+            "sample":    (sku_resp.data or [])[:3],
+            "error":     None,
+        }
+    except Exception as exc:
+        result["top_skus"] = {"row_count": 0, "sample": [], "error": str(exc)}
+
+    # Probe actual date range in the table (cheap — uses the tran_date index)
+    try:
+        min_row = client.table("sales_detail_transactions").select("tran_date").order("tran_date", desc=False).limit(1).execute().data or []
+        max_row = client.table("sales_detail_transactions").select("tran_date").order("tran_date", desc=True).limit(1).execute().data or []
+        result["table_date_range"] = {
+            "min_tran_date": min_row[0]["tran_date"] if min_row else None,
+            "max_tran_date": max_row[0]["tran_date"] if max_row else None,
+        }
+    except Exception as exc:
+        result["table_date_range"] = {"error": str(exc)}
+
+    return jsonify(result)
+
+
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------

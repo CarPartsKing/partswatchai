@@ -1,0 +1,24 @@
+services:
+  - type: web
+    name: partswatchai
+    runtime: python
+    buildCommand: pip install .
+    startCommand: gunicorn --chdir dashboard --bind 0.0.0.0:$PORT --workers 2 --threads 4 --timeout 120 server:app
+    healthCheckPath: /health
+    autoDeploy: true
+
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.11.0"
+      - key: ENVIRONMENT
+        value: production
+      - key: LOG_LEVEL
+        value: INFO
+
+      # ── Set these in the Render dashboard (Environment → Secret Files or Env Vars) ──
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_KEY
+        sync: false
+      - key: ANTHROPIC_API_KEY
+        sync: false

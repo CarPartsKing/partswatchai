@@ -1,0 +1,478 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PartsWatch AI — Churn Intelligence</title>
+<style>
+  :root {
+    --bg:          #0d1117;
+    --surface:     #161b22;
+    --surface2:    #1c2128;
+    --border:      #30363d;
+    --border2:     #21262d;
+    --text:        #e6edf3;
+    --muted:       #8b949e;
+    --critical:    #f85149;
+    --critical-bg: rgba(248,81,73,0.12);
+    --warning:     #d29922;
+    --warning-bg:  rgba(210,153,34,0.12);
+    --info:        #388bfd;
+    --info-bg:     rgba(56,139,253,0.12);
+    --success:     #3fb950;
+    --success-bg:  rgba(63,185,80,0.12);
+    --amber:       #e3b341;
+    --blue:        #58a6ff;
+    --radius:      8px;
+    --radius-lg:   12px;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    font-size: 14px;
+    line-height: 1.5;
+    min-height: 100vh;
+  }
+
+  /* ── Header ── */
+  .header {
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    padding: 14px 24px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    position: sticky;
+    top: 0;
+    z-index: 100;
+  }
+  .header-left  { display: flex; align-items: center; gap: 14px; }
+  .header-right { display: flex; align-items: center; gap: 16px; }
+  .logo { font-size: 18px; font-weight: 700; color: var(--blue); letter-spacing: -0.3px; }
+  .logo span { color: var(--muted); font-weight: 400; }
+  .header-date { font-size: 13px; color: var(--muted); border-left: 1px solid var(--border); padding-left: 14px; }
+  .nav-link {
+    font-size: 12px; color: var(--muted); text-decoration: none;
+    padding: 4px 10px; border: 1px solid var(--border);
+    border-radius: var(--radius); transition: color 0.15s, border-color 0.15s;
+    white-space: nowrap;
+  }
+  .nav-link:hover { color: var(--blue); border-color: var(--blue); }
+  .conn-status { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); }
+  .conn-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); flex-shrink: 0; }
+  .conn-dot.live    { background: var(--success); box-shadow: 0 0 6px var(--success); }
+  .conn-dot.error   { background: var(--critical); }
+  .conn-dot.loading { background: var(--warning); animation: pulse 1s infinite; }
+  .last-updated { font-size: 12px; color: var(--muted); }
+  .refresh-btn {
+    background: var(--surface2); border: 1px solid var(--border); color: var(--text);
+    padding: 5px 12px; border-radius: var(--radius); cursor: pointer; font-size: 12px;
+    font-family: inherit; transition: background 0.15s;
+  }
+  .refresh-btn:hover { background: var(--border2); }
+
+  @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+  @keyframes shimmer {
+    0%   { background-position: 200% 0; }
+    100% { background-position: -200% 0; }
+  }
+
+  /* ── Layout ── */
+  .main { max-width: 1400px; margin: 0 auto; padding: 20px 24px 48px; }
+
+  /* ── Card ── */
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-lg); overflow: hidden; }
+  .card-header {
+    padding: 14px 18px; border-bottom: 1px solid var(--border2);
+    display: flex; align-items: center; justify-content: space-between;
+  }
+  .card-title { font-size: 13px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; color: var(--muted); }
+  .card-updated { font-size: 11px; color: var(--muted); }
+  .card-body { padding: 16px 18px; }
+  .section { margin-bottom: 20px; }
+
+  /* ── Alert summary cards (3-up row) ── */
+  .alert-summary-row {
+    display: grid; grid-template-columns: repeat(3, 1fr);
+    gap: 12px; margin-bottom: 20px;
+  }
+  .alert-card {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: var(--radius-lg); padding: 16px 20px;
+    display: flex; align-items: center; gap: 16px;
+  }
+  .alert-card.critical { border-left: 3px solid var(--critical); }
+  .alert-card.warning  { border-left: 3px solid var(--warning); }
+  .alert-card.success  { border-left: 3px solid var(--success); }
+  .alert-count { font-size: 32px; font-weight: 700; line-height: 1; }
+  .alert-card.critical .alert-count { color: var(--critical); }
+  .alert-card.warning  .alert-count { color: var(--warning); }
+  .alert-card.success  .alert-count { color: var(--success); }
+  .alert-label { font-size: 13px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.4px; }
+  .alert-sublabel { font-size: 11px; color: var(--muted); margin-top: 2px; }
+
+  /* ── Badges ── */
+  .badge {
+    display: inline-block; padding: 2px 8px; border-radius: 12px;
+    font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.3px;
+  }
+  .badge-critical { background: var(--critical-bg); color: var(--critical); border: 1px solid rgba(248,81,73,0.3); }
+  .badge-warning  { background: var(--warning-bg);  color: var(--warning);  border: 1px solid rgba(210,153,34,0.3); }
+  .badge-success  { background: var(--success-bg);  color: var(--success);  border: 1px solid rgba(63,185,80,0.3); }
+
+  /* ── Data table ── */
+  .data-table { width: 100%; border-collapse: collapse; }
+  .data-table th {
+    text-align: left; padding: 8px 12px; font-size: 11px; font-weight: 600;
+    text-transform: uppercase; letter-spacing: 0.4px; color: var(--muted);
+    border-bottom: 1px solid var(--border2);
+  }
+  .data-table th.sortable {
+    cursor: pointer; user-select: none; white-space: nowrap;
+    transition: color 0.15s;
+  }
+  .data-table th.sortable:hover { color: var(--text); }
+  .data-table th.sort-asc::after  { content: " \25B2"; color: var(--blue); font-size: 9px; }
+  .data-table th.sort-desc::after { content: " \25BC"; color: var(--blue); font-size: 9px; }
+  .data-table td { padding: 10px 12px; border-bottom: 1px solid var(--border2); font-size: 13px; }
+  .data-table tr:last-child td { border-bottom: none; }
+  .data-table tr:hover td { background: var(--surface2); }
+  .data-table th.right, .data-table td.right { text-align: right; }
+  .loc-id { font-family: "SF Mono", "Fira Code", monospace; font-size: 12px; color: var(--muted); }
+
+  /* ── Filter bar above table ── */
+  .churn-filter-bar {
+    display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+    padding: 10px 16px; background: var(--surface2);
+    border-bottom: 1px solid var(--border2);
+  }
+  .filter-label {
+    font-size: 11px; color: var(--muted); text-transform: uppercase;
+    letter-spacing: 0.4px; font-weight: 600; white-space: nowrap;
+  }
+  .loc-select {
+    background: var(--surface); border: 1px solid var(--border);
+    color: var(--text); padding: 5px 10px; border-radius: 4px;
+    font-size: 12px; font-family: inherit; cursor: pointer;
+    transition: border-color 0.15s; min-width: 200px;
+  }
+  .loc-select:focus { outline: none; border-color: var(--blue); }
+  .filter-count { font-size: 12px; color: var(--muted); margin-left: auto; }
+
+  /* ── Skeleton loader ── */
+  .skeleton {
+    background: linear-gradient(90deg, var(--surface2) 25%, var(--border2) 50%, var(--surface2) 75%);
+    background-size: 200% 100%; animation: shimmer 1.5s infinite; border-radius: 4px;
+  }
+
+  @media (max-width: 768px) {
+    .header { flex-direction: column; align-items: flex-start; gap: 10px; padding: 12px 16px; }
+    .header-right { width: 100%; justify-content: space-between; flex-wrap: wrap; }
+    .main { padding: 12px 12px 40px; }
+    .alert-summary-row { grid-template-columns: 1fr; gap: 8px; }
+    .data-table { font-size: 12px; }
+    .data-table th, .data-table td { padding: 8px; }
+  }
+  @media (max-width: 480px) {
+    .alert-summary-row { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+
+<header class="header">
+  <div class="header-left">
+    <div class="logo">PartsWatch <span>AI</span></div>
+    <a href="/" class="nav-link">&larr; Dashboard</a>
+    <div class="header-date" id="header-date"></div>
+  </div>
+  <div class="header-right">
+    <div class="conn-status">
+      <div class="conn-dot loading" id="conn-dot"></div>
+      <span id="conn-label">Connecting...</span>
+    </div>
+    <span class="last-updated" id="run-date-label"></span>
+    <button class="refresh-btn" onclick="loadData()">Refresh</button>
+  </div>
+</header>
+
+<main class="main">
+
+  <div id="error-area"></div>
+
+  <!-- ── Summary cards ── -->
+  <div class="alert-summary-row">
+    <div class="alert-card critical">
+      <div class="alert-count" id="count-churned"><div class="skeleton" style="width:48px;height:36px"></div></div>
+      <div>
+        <div class="alert-label">Churned</div>
+        <div class="alert-sublabel">Zero spend last 90 days</div>
+      </div>
+    </div>
+    <div class="alert-card warning">
+      <div class="alert-count" id="count-declining"><div class="skeleton" style="width:48px;height:36px"></div></div>
+      <div>
+        <div class="alert-label">Declining</div>
+        <div class="alert-sublabel">30%+ below baseline</div>
+      </div>
+    </div>
+    <div class="alert-card success">
+      <div class="alert-count" id="count-stable"><div class="skeleton" style="width:48px;height:36px"></div></div>
+      <div>
+        <div class="alert-label">Stable</div>
+        <div class="alert-sublabel">Within normal range</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── At-risk accounts table ── -->
+  <div class="section card">
+    <div class="card-header">
+      <span class="card-title">At-Risk Accounts &mdash; Churned &amp; Declining</span>
+      <div style="display:flex;align-items:center;gap:12px">
+        <span class="card-updated" id="run-date-badge"></span>
+      </div>
+    </div>
+
+    <div class="churn-filter-bar">
+      <span class="filter-label">Location</span>
+      <select id="loc-filter" class="loc-select" onchange="renderTable()">
+        <option value="">All Locations</option>
+      </select>
+      <span class="filter-count" id="row-count"></span>
+    </div>
+
+    <div style="overflow-x:auto">
+      <table class="data-table" id="churn-table">
+        <thead>
+          <tr>
+            <th class="sortable" data-col="customer_id">Customer</th>
+            <th class="sortable" data-col="location_name">Location</th>
+            <th class="sortable right" data-col="baseline_monthly_spend">Baseline Monthly</th>
+            <th class="sortable right" data-col="last_90_days_spend">Last 90 Days</th>
+            <th class="sortable right" data-col="pct_change">% Change</th>
+            <th class="sortable" data-col="flag">Flag</th>
+            <th class="sortable" data-col="last_purchase_date">Last Purchase</th>
+          </tr>
+        </thead>
+        <tbody id="churn-tbody">
+          <tr><td colspan="7"><div class="skeleton" style="height:36px;margin:6px 0;border-radius:4px"></div></td></tr>
+          <tr><td colspan="7"><div class="skeleton" style="height:36px;margin:6px 0;border-radius:4px"></div></td></tr>
+          <tr><td colspan="7"><div class="skeleton" style="height:36px;margin:6px 0;border-radius:4px"></div></td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+</main>
+
+<script>
+  var _data    = null;
+  var _sortCol = 'baseline_monthly_spend';
+  var _sortDir = -1; // -1 = descending, 1 = ascending
+
+  // ── Formatters ──────────────────────────────────────────────────────────
+
+  function fmtMoney(v) {
+    if (v == null || v === '') return '\u2014';
+    var n = parseFloat(v);
+    if (isNaN(n)) return '\u2014';
+    return '$' + Math.round(n).toLocaleString('en-US');
+  }
+
+  function fmtPct(v) {
+    if (v == null || v === '') return '\u2014';
+    var n = parseFloat(v);
+    if (isNaN(n)) return '\u2014';
+    return (n >= 0 ? '+' : '') + n.toFixed(1) + '%';
+  }
+
+  function fmtDate(iso) {
+    if (!iso) return '\u2014';
+    var d = new Date(iso + 'T00:00:00');
+    return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+  }
+
+  function pctStyle(v) {
+    if (v == null) return '';
+    var n = parseFloat(v);
+    if (n <= -50) return 'color:var(--critical);font-weight:600';
+    if (n <= -30) return 'color:var(--warning);font-weight:600';
+    if (n >= 0)   return 'color:var(--success)';
+    return 'color:var(--muted)';
+  }
+
+  function flagBadge(flag) {
+    if (flag === 'CHURNED')   return '<span class="badge badge-critical">Churned</span>';
+    if (flag === 'DECLINING') return '<span class="badge badge-warning">Declining</span>';
+    return '<span class="badge badge-success">Stable</span>';
+  }
+
+  function escHtml(s) {
+    return String(s || '')
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  }
+
+  // ── Data load ────────────────────────────────────────────────────────────
+
+  async function loadData() {
+    var dot   = document.getElementById('conn-dot');
+    var label = document.getElementById('conn-label');
+    dot.className   = 'conn-dot loading';
+    label.textContent = 'Loading...';
+
+    try {
+      var resp = await fetch('/api/churn');
+      if (!resp.ok) throw new Error('HTTP ' + resp.status);
+      _data = await resp.json();
+
+      if (_data.error) throw new Error(_data.error);
+
+      dot.className   = 'conn-dot live';
+      label.textContent = 'Live';
+
+      document.getElementById('header-date').textContent =
+        new Date().toLocaleDateString('en-US', {
+          weekday: 'long', month: 'long', day: 'numeric', year: 'numeric'
+        });
+
+      if (_data.run_date) {
+        document.getElementById('run-date-badge').textContent =
+          'Run: ' + fmtDate(_data.run_date);
+      }
+
+      renderSummary();
+      populateLocationFilter();
+      renderTable();
+
+    } catch (err) {
+      dot.className   = 'conn-dot error';
+      label.textContent = 'Error';
+      document.getElementById('error-area').innerHTML =
+        '<div style="background:var(--critical-bg);border:1px solid var(--critical);' +
+        'border-radius:8px;padding:12px 16px;margin-bottom:16px;color:var(--critical);font-size:13px">' +
+        'Failed to load churn data: ' + escHtml(err.message) + '</div>';
+    }
+  }
+
+  // ── Render summary cards ─────────────────────────────────────────────────
+
+  function renderSummary() {
+    if (!_data || !_data.summary) return;
+    var s = _data.summary;
+    document.getElementById('count-churned').textContent  = (s.churned  || 0).toLocaleString();
+    document.getElementById('count-declining').textContent = (s.declining || 0).toLocaleString();
+    document.getElementById('count-stable').textContent   = (s.stable   || 0).toLocaleString();
+  }
+
+  // ── Populate location dropdown ───────────────────────────────────────────
+
+  function populateLocationFilter() {
+    if (!_data) return;
+    var sel = document.getElementById('loc-filter');
+    while (sel.options.length > 1) sel.remove(1);
+
+    var locs = (_data.locations || []).slice().sort();
+    var names = _data.location_names || {};
+    locs.forEach(function(loc) {
+      var opt = document.createElement('option');
+      opt.value = loc;
+      opt.textContent = names[loc] ? names[loc] + ' (' + loc + ')' : loc;
+      sel.appendChild(opt);
+    });
+  }
+
+  // ── Render table ─────────────────────────────────────────────────────────
+
+  function renderTable() {
+    if (!_data || !_data.rows) return;
+
+    var locFilter = document.getElementById('loc-filter').value;
+    var rows = _data.rows.slice();
+
+    if (locFilter) {
+      rows = rows.filter(function(r) { return r.location_id === locFilter; });
+    }
+
+    // Sort
+    rows.sort(function(a, b) {
+      var av = a[_sortCol], bv = b[_sortCol];
+      // Nulls always last
+      if (av == null && bv == null) return 0;
+      if (av == null) return 1;
+      if (bv == null) return -1;
+      if (typeof av === 'string') av = av.toLowerCase();
+      if (typeof bv === 'string') bv = bv.toLowerCase();
+      if (av < bv) return  _sortDir;
+      if (av > bv) return -_sortDir;
+      return 0;
+    });
+
+    // Update sort indicators on headers
+    document.querySelectorAll('#churn-table th.sortable').forEach(function(th) {
+      th.classList.remove('sort-asc', 'sort-desc');
+      if (th.dataset.col === _sortCol) {
+        th.classList.add(_sortDir > 0 ? 'sort-asc' : 'sort-desc');
+      }
+    });
+
+    // Row count
+    document.getElementById('row-count').textContent =
+      rows.length.toLocaleString() + ' account' + (rows.length !== 1 ? 's' : '');
+
+    var tbody = document.getElementById('churn-tbody');
+
+    if (rows.length === 0) {
+      tbody.innerHTML =
+        '<tr><td colspan="7" style="text-align:center;padding:32px 12px;' +
+        'color:var(--muted);font-size:13px">No at-risk accounts' +
+        (locFilter ? ' for this location' : '') + '</td></tr>';
+      return;
+    }
+
+    tbody.innerHTML = rows.map(function(r) {
+      var locLabel = r.location_name
+        ? escHtml(r.location_name) + '&nbsp;<span class="loc-id">' + escHtml(r.location_id) + '</span>'
+        : '<span class="loc-id">' + escHtml(r.location_id || '\u2014') + '</span>';
+
+      return '<tr>' +
+        '<td>' + escHtml(r.customer_id || '\u2014') + '</td>' +
+        '<td>' + locLabel + '</td>' +
+        '<td class="right">' + fmtMoney(r.baseline_monthly_spend) + '</td>' +
+        '<td class="right">' + fmtMoney(r.last_90_days_spend) + '</td>' +
+        '<td class="right" style="' + pctStyle(r.pct_change) + '">' + fmtPct(r.pct_change) + '</td>' +
+        '<td>' + flagBadge(r.flag) + '</td>' +
+        '<td>' + fmtDate(r.last_purchase_date) + '</td>' +
+        '</tr>';
+    }).join('');
+  }
+
+  // ── Sort on header click ─────────────────────────────────────────────────
+
+  document.addEventListener('DOMContentLoaded', function() {
+    var NUMERIC_COLS = { baseline_monthly_spend: true, last_90_days_spend: true, pct_change: true };
+
+    document.querySelectorAll('#churn-table th.sortable').forEach(function(th) {
+      th.addEventListener('click', function() {
+        var col = th.dataset.col;
+        if (_sortCol === col) {
+          _sortDir *= -1;
+        } else {
+          _sortCol = col;
+          // Numeric cols default descending; string cols default ascending
+          _sortDir = NUMERIC_COLS[col] ? -1 : 1;
+        }
+        renderTable();
+      });
+    });
+
+    loadData();
+  });
+</script>
+</body>
+</html>

@@ -170,6 +170,18 @@ jobs:
         continue-on-error: true
         run: python main.py --stage alerts
 
+      - name: 13 — Sales detail extract (incremental)
+        id: s13_extract_sales_detail
+        if: ${{ steps.t_start.conclusion == 'success' }}
+        continue-on-error: true
+        run: python extract/extract_sales_detail.py
+
+      - name: 14 — Churn detection
+        id: s14_churn_detection
+        if: ${{ steps.t_start.conclusion == 'success' }}
+        continue-on-error: true
+        run: python -m engine.churn_detection
+
       # ============================================================
       # Completion summary — runs even if individual steps failed.
       # ============================================================
@@ -191,6 +203,8 @@ jobs:
           R10: ${{ steps.s10_forecast_lgbm.outcome }}
           R11: ${{ steps.s11_reorder.outcome }}
           R12: ${{ steps.s12_alerts.outcome }}
+          R13: ${{ steps.s13_extract_sales_detail.outcome }}
+          R14: ${{ steps.s14_churn_detection.outcome }}
         run: |
           set -u
           END_EPOCH=$(date -u +%s)
@@ -226,10 +240,13 @@ jobs:
             "10 Forecast — LightGBM"
             "11 Reorder engine"
             "12 Alerts engine"
+            "13 Sales detail extract (incremental)"
+            "14 Churn detection"
           )
           declare -a OUTCOMES=(
             "$R01" "$R02" "$R03" "$R04" "$R05" "$R06"
             "$R07" "$R08" "$R09" "$R10" "$R11" "$R12"
+            "$R13" "$R14"
           )
 
           PASS=0; WARN=0; FAIL=0

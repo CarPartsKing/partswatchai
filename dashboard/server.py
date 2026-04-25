@@ -46,9 +46,6 @@ _MAX_SESSIONS = 50          # prune oldest when limit reached
 
 _PAGE_SIZE = 1_000
 _LOW_SUPPLY_DAYS = 3.0
-_FREEZE_THRESHOLD_F = 32.0
-_WEATHER_LOOKAHEAD_DAYS = 7
-_MAPE_LOOKBACK_DAYS = 7
 
 LOCATION_NAMES: dict[str, str] = {
     "LOC-001": "BROOKPARK",
@@ -146,39 +143,6 @@ def _paginate(
 # ---------------------------------------------------------------------------
 # Data builders — each returns a JSON-serialisable dict/list
 # ---------------------------------------------------------------------------
-
-def _build_weather(client: Any, today: date) -> dict:
-    end_date = (today + timedelta(days=_WEATHER_LOOKAHEAD_DAYS)).isoformat()
-    rows = _paginate(
-        client, "weather_log",
-        "log_date,temp_min_f,temp_max_f,precipitation_in,"
-        "snowfall_in,consecutive_freeze_days,freeze_thaw_cycle",
-        gte_filters={"log_date": today.isoformat()},
-        lte_filters={"log_date": end_date},
-        order_col="log_date",
-    )
-    today_row = next((r for r in rows if r["log_date"] == today.isoformat()), None)
-    forecast = [r for r in rows if r["log_date"] > today.isoformat()]
-
-    freeze_days = [
-        r for r in forecast
-        if r.get("temp_min_f") is not None and float(r["temp_min_f"]) < _FREEZE_THRESHOLD_F
-    ]
-    coldest = min(freeze_days, key=lambda r: float(r["temp_min_f"])) if freeze_days else None
-
-    return {
-        "today": today_row,
-        "forecast": forecast,
-        "freeze_warning": len(freeze_days) > 0,
-        "freeze_days_count": len(freeze_days),
-        "coldest_temp": float(coldest["temp_min_f"]) if coldest else None,
-        "coldest_date": coldest["log_date"] if coldest else None,
-        # Static "what spikes during a freeze" list — buyers want to see
-        # which categories to push to the front of the buy when the freeze
-        # banner fires.  Front-end only renders this when freeze_warning.
-        "freeze_categories": _FREEZE_CATEGORIES if len(freeze_days) > 0 else [],
-    }
-
 
 def _build_alerts(client: Any, today: date) -> dict:
     rows = _paginate(
@@ -658,143 +622,6 @@ def _build_transfer_activity(client: Any, today: date) -> dict:
     }
 
 
-def _build_forecast_accuracy(client: Any, today: date) -> list[dict]:
-    """Forecast MAPE by ABC class × model.
-
-    The forecast_results table is 4M+ rows and there is no PostgREST view
-    that can compute MAPE server-side, so the full Python join requires
-    pulling hundreds of thousands of rows — well past Supabase's 8s
-    statement timeout.  Until a SQL view (e.g. v_forecast_accuracy_daily)
-    is added, prefer the pre-computed ml/accuracy.py output table instead.
-    """
-    yesterday = (today - timedelta(days=1)).isoformat()
-    cutoff    = (today - timedelta(days=_MAPE_LOOKBACK_DAYS)).isoformat()
-
-    # Try the materialised accuracy table first (cheap, indexed by date).
-    try:
-        rows = (
-            client.table("forecast_accuracy_daily")
-            .select("abc_class,model_type,mape_pct,n_obs")
-            .gte("accuracy_date", cutoff)
-            .lte("accuracy_date", yesterday)
-            .limit(2000)
-            .execute()
-            .data or []
-        )
-    except Exception:
-        rows = []
-
-    if not rows:
-        return []
-
-    # Aggregate to one row per (abc_class, model_type).
-    agg: dict[tuple[str, str], dict[str, float]] = defaultdict(
-        lambda: {"weighted_ape": 0.0, "n": 0}
-    )
-    for r in rows:
-        key = (r.get("abc_class") or "?", r.get("model_type") or "?")
-        n   = int(r.get("n_obs") or 0)
-        if n <= 0:
-            continue
-        agg[key]["weighted_ape"] += float(r.get("mape_pct") or 0) * n
-        agg[key]["n"]            += n
-
-    return [
-        {
-            "abc_class":       abc,
-            "model_type":      model,
-            "mape_pct":        round(v["weighted_ape"] / v["n"], 1) if v["n"] else 0.0,
-            "n_obs":           v["n"],
-            "above_threshold": (v["weighted_ape"] / v["n"]) > 25.0 if v["n"] else False,
-        }
-        for (abc, model), v in sorted(agg.items())
-    ]
-
-
-def _build_forecast_accuracy_legacy(client: Any, today: date) -> list[dict]:
-    """Original on-the-fly MAPE compute — kept for reference, not wired up."""
-    window_start = (today - timedelta(days=_MAPE_LOOKBACK_DAYS)).isoformat()
-    yesterday    = (today - timedelta(days=1)).isoformat()
-    fc_rows = _paginate(
-        client, "forecast_results",
-        "sku_id,location_id,forecast_date,model_type,predicted_qty,run_date",
-        gte_filters={"forecast_date": window_start},
-        lte_filters={"forecast_date": yesterday},
-        in_filters={"model_type": ["lightgbm", "rolling_avg"]},
-    )
-    if not fc_rows:
-        return []
-
-    latest_run: dict[tuple[str, str, str], str] = {}
-    for r in fc_rows:
-        key = (r["sku_id"], r["location_id"], r["model_type"])
-        if (r.get("run_date") or "") > latest_run.get(key, ""):
-            latest_run[key] = r["run_date"]
-
-    forecast_map: dict[tuple[str, str, str], dict[str, float]] = defaultdict(dict)
-    for r in fc_rows:
-        key = (r["sku_id"], r["location_id"], r["model_type"])
-        if r.get("run_date") == latest_run.get(key):
-            d = str(r.get("forecast_date", ""))[:10]
-            if d:
-                forecast_map[key][d] = float(r.get("predicted_qty") or 0)
-
-    # Restrict the sales scan to only the SKUs we have a forecast for.  The
-    # raw sales_transactions table has millions of rows and an unfiltered
-    # 7-day pull blows past Supabase's 8s statement timeout (57014).  Most
-    # forecasts cover only a few thousand SKUs, so an `in_filters` batch is
-    # dramatically cheaper.
-    sku_ids = list({k[0] for k in forecast_map})
-    actuals: dict[tuple[str, str, str], float] = defaultdict(float)
-    actuals_all: dict[tuple[str, str], float] = defaultdict(float)
-    _IN_BATCH = 300
-    for i in range(0, len(sku_ids), _IN_BATCH):
-        batch = sku_ids[i:i + _IN_BATCH]
-        sales_rows = _paginate(
-            client, "sales_transactions",
-            "sku_id,location_id,transaction_date,qty_sold",
-            gte_filters={"transaction_date": window_start},
-            lte_filters={"transaction_date": yesterday},
-            in_filters={"sku_id": batch},
-        )
-        for r in sales_rows:
-            d = str(r.get("transaction_date", ""))[:10]
-            actuals[(r["sku_id"], r["location_id"], d)] += float(r.get("qty_sold") or 0)
-            actuals_all[(r["sku_id"], d)] += float(r.get("qty_sold") or 0)
-
-    abc_map: dict[str, str] = {}
-    for i in range(0, len(sku_ids), _IN_BATCH):
-        batch = sku_ids[i:i + _IN_BATCH]
-        sku_rows = _paginate(client, "sku_master", "sku_id,abc_class",
-                             in_filters={"sku_id": batch})
-        for r in sku_rows:
-            abc_map[r["sku_id"]] = r.get("abc_class") or "?"
-
-    ape_by_class: dict[tuple[str, str], list[float]] = defaultdict(list)
-    for (sku_id, loc_id, model), date_qty in forecast_map.items():
-        abc = abc_map.get(sku_id, "?")
-        for d, predicted in date_qty.items():
-            actual = (
-                actuals_all.get((sku_id, d), 0.0)
-                if loc_id == "ALL"
-                else actuals.get((sku_id, loc_id, d), 0.0)
-            )
-            ape = abs(actual - predicted) / max(actual, 1.0)
-            ape_by_class[(abc, model)].append(ape)
-
-    results = []
-    for (abc, model), apes in sorted(ape_by_class.items()):
-        mape = (sum(apes) / len(apes)) * 100
-        results.append({
-            "abc_class": abc,
-            "model_type": model,
-            "mape_pct": round(mape, 1),
-            "n_obs": len(apes),
-            "above_threshold": mape > 25.0,
-        })
-    return results
-
-
 def _build_location_performance(client: Any, today: date) -> dict:
     try:
         loc_rows = _paginate(
@@ -808,33 +635,84 @@ def _build_location_performance(client: Any, today: date) -> dict:
             "location_id,location_tier,composite_tier_score,"
             "revenue_score,sku_breadth_score,fill_rate_score,return_rate_score",
         )
+
     tiers: dict[int, list[dict]] = defaultdict(list)
     scores: dict[str, float] = {}
+    loc_index: dict[str, dict] = {}
+
     for r in loc_rows:
         if r.get("is_active") is False:
             continue
         loc_id = r.get("location_id", "?")
-        # Skip retired and virtual (INTERNET) locations from the operations
-        # performance view — they distort tier rollups for branch managers.
         if loc_id in EXCLUDED_DISPLAY_LOCATIONS:
             continue
         tier = int(r.get("location_tier") or 2)
         loc_name = r.get("location_name") or LOCATION_NAMES.get(loc_id) or loc_id
-        tiers[tier].append({
-            "location_id": loc_id,
-            "location_name": loc_name,
-            "location_display": f"{loc_name} ({loc_id})",
+        entry: dict = {
+            "location_id":          loc_id,
+            "location_name":        loc_name,
+            "location_display":     f"{loc_name} ({loc_id})",
             "composite_tier_score": float(r.get("composite_tier_score") or 0),
-            "revenue_score": float(r.get("revenue_score") or 0),
-            "sku_breadth_score": float(r.get("sku_breadth_score") or 0),
-            "fill_rate_score": float(r.get("fill_rate_score") or 0),
-            "return_rate_score": float(r.get("return_rate_score") or 0),
-        })
+            "revenue_score":        float(r.get("revenue_score") or 0),
+            "sku_breadth_score":    float(r.get("sku_breadth_score") or 0),
+            "fill_rate_score":      float(r.get("fill_rate_score") or 0),
+            "return_rate_score":    float(r.get("return_rate_score") or 0),
+            "sales_90d":            None,
+            "gp_90d":               None,
+            "gp_pct":               None,
+            "sales_trend_pct":      None,
+            "churn_count":          0,
+        }
+        tiers[tier].append(entry)
+        loc_index[loc_id] = entry
         if r.get("composite_tier_score") is not None:
             scores[loc_id] = float(r["composite_tier_score"])
 
     for tier in tiers:
         tiers[tier].sort(key=lambda x: x["composite_tier_score"], reverse=True)
+
+    # GP & trend — one RPC call returns all locations
+    current_start = (today - timedelta(days=90)).isoformat()
+    prior_end     = (today - timedelta(days=91)).isoformat()
+    prior_start   = (today - timedelta(days=180)).isoformat()
+    try:
+        gp_rows = client.rpc("get_all_locations_gp_summary", {
+            "p_current_start": current_start,
+            "p_prior_start":   prior_start,
+            "p_prior_end":     prior_end,
+        }).execute().data or []
+        for r in gp_rows:
+            loc_id = r.get("location_id") or ""
+            if loc_id not in loc_index:
+                continue
+            sales_90d   = float(r.get("sales_90d")       or 0)
+            gp_90d      = float(r.get("gp_90d")          or 0)
+            prior_sales = float(r.get("prior_sales_90d") or 0)
+            entry = loc_index[loc_id]
+            entry["sales_90d"] = round(sales_90d, 2)
+            entry["gp_90d"]    = round(gp_90d, 2)
+            entry["gp_pct"]    = round(gp_90d / sales_90d * 100, 1) if sales_90d > 0 else None
+            entry["sales_trend_pct"] = (
+                round((sales_90d - prior_sales) / prior_sales * 100, 1)
+                if prior_sales > 0 else None
+            )
+    except Exception:
+        log.exception("get_all_locations_gp_summary RPC failed.")
+
+    # Churn count per location (CHURNED + DECLINING)
+    try:
+        churn_rows = _paginate(
+            client, "customer_churn_flags",
+            "location_id,flag",
+            in_filters={"flag": ["CHURNED", "DECLINING"]},
+        )
+        churn_by_loc: dict[str, int] = defaultdict(int)
+        for r in churn_rows:
+            churn_by_loc[r["location_id"]] += 1
+        for loc_id, entry in loc_index.items():
+            entry["churn_count"] = churn_by_loc.get(loc_id, 0)
+    except Exception:
+        pass
 
     tier3_locs = [l["location_id"] for l in tiers.get(3, [])]
     tier3_critical: list[str] = []
@@ -909,24 +787,24 @@ def _build_network_kpis(client: Any, today: date) -> dict:
 
 
 def _build_top_skus(client: Any, today: date) -> list[dict]:
-    rows = _paginate(
-        client, "sku_master",
-        "sku_id,abc_class,avg_weekly_units,part_category,brand,description",
-        filters={"abc_class": "A"},
-        order_col="avg_weekly_units",
-        order_desc=True,
-        limit=15,
-    )
+    start_date = (today - timedelta(days=90)).isoformat()
+    try:
+        rows = client.rpc("get_top_skus_by_gp", {
+            "p_start_date": start_date,
+        }).execute().data or []
+    except Exception:
+        log.exception("get_top_skus_by_gp RPC failed.")
+        rows = []
     result = []
     for r in rows:
-        avg_wk = float(r.get("avg_weekly_units") or 0)
+        total_gp    = float(r.get("total_gp")    or 0)
+        total_sales = float(r.get("total_sales") or 0)
         result.append({
-            "sku_id": r["sku_id"],
-            "abc_class": r.get("abc_class", "?"),
-            "avg_weekly_units": round(avg_wk, 1),
-            "category": r.get("part_category") or "",
-            "brand": r.get("brand") or "",
-            "description": r.get("description") or "",
+            "sku_id":         r.get("sku_id") or "",
+            "total_gp":       round(total_gp, 2),
+            "total_sales":    round(total_sales, 2),
+            "gp_pct":         round(total_gp / total_sales * 100, 1) if total_sales > 0 else None,
+            "location_count": int(r.get("location_count") or 0),
         })
     return result
 
@@ -1065,105 +943,6 @@ def _build_supplier_detail(client: Any, today: date) -> list[dict]:
     return result
 
 
-def _build_basket_rules(client: Any, today: date) -> list[dict]:
-    """Top co-purchase rules by lift from the most recent rule_date.
-
-    Counter staff use these as live "if a customer buys X, suggest Y"
-    prompts.  We only show the latest rule_date so stale rules from a
-    previous nightly run don't clutter the panel.
-    """
-    try:
-        latest = (
-            client.table("basket_rules")
-            .select("rule_date")
-            .order("rule_date", desc=True)
-            .limit(1)
-            .execute()
-            .data or []
-        )
-    except Exception:
-        return []
-    if not latest:
-        return []
-    rule_date = latest[0]["rule_date"]
-    try:
-        rows = (
-            client.table("basket_rules")
-            .select("antecedent_sku,consequent_sku,support,confidence,lift,transaction_count")
-            .eq("rule_date", rule_date)
-            .order("lift", desc=True)
-            .limit(10)
-            .execute()
-            .data or []
-        )
-    except Exception:
-        rows = []
-    return [
-        {
-            "antecedent_sku":    r.get("antecedent_sku"),
-            "consequent_sku":    r.get("consequent_sku"),
-            "support":           float(r.get("support") or 0),
-            "confidence":        float(r.get("confidence") or 0),
-            "lift":              float(r.get("lift") or 0),
-            "transaction_count": int(r.get("transaction_count") or 0),
-            "rule_date":         rule_date,
-        }
-        for r in rows
-    ]
-
-
-def _build_abc_xyz_matrix(client: Any, today: date) -> dict:
-    """Counts of SKUs in each ABC × XYZ cell, plus highlighted AZ list.
-
-    AZ is the highest-risk class (top revenue, erratic demand) and gets a
-    deeper safety stock — so we surface a small sample for buyer review.
-    """
-    cells = ["AX","AY","AZ","BX","BY","BZ","CX","CY","CZ"]
-    counts: dict[str, int] = {c: 0 for c in cells}
-    for c in cells:
-        try:
-            r = (
-                client.table("sku_master")
-                .select("sku_id", count="exact", head=True)
-                .eq("abc_xyz_class", c)
-                .execute()
-            )
-            counts[c] = int(r.count or 0)
-        except Exception:
-            counts[c] = 0
-
-    # Pull a small sample of AZ SKUs (highest-risk) so the panel can show
-    # what's hiding in that cell without paginating tens of thousands of rows.
-    az_sample: list[dict] = []
-    try:
-        az_sample = (
-            client.table("sku_master")
-            .select("sku_id,description,part_category,avg_weekly_units,brand")
-            .eq("abc_xyz_class", "AZ")
-            .order("avg_weekly_units", desc=True)
-            .limit(10)
-            .execute()
-            .data or []
-        )
-    except Exception:
-        az_sample = []
-
-    return {
-        "counts": counts,
-        "total":  sum(counts.values()),
-        "az_sample": [
-            {
-                "sku_id":           r.get("sku_id"),
-                "description":      r.get("description") or "",
-                "part_category":    r.get("part_category") or "",
-                "brand":            r.get("brand") or "",
-                "avg_weekly_units": round(float(r.get("avg_weekly_units") or 0), 1),
-            }
-            for r in az_sample
-        ],
-    }
-
-
 def _build_morning_brief(client: Any, today: date) -> dict:
     """Single-line headline counts for the morning-brief banner.
 
@@ -1224,12 +1003,6 @@ def _build_morning_brief(client: Any, today: date) -> dict:
         "urgent_reorders": urgent_reorders,
         "transfer_ops":    transfer_ops,
     }
-
-
-# Categories at risk during a freeze event.  Static map — these are the
-# four categories an automotive aftermarket buyer monitors when overnight
-# lows drop below 32°F.
-_FREEZE_CATEGORIES = ["Batteries", "Antifreeze / Coolant", "Starting Fluid", "Wiper Fluid"]
 
 
 def _build_critical_actions(client: Any, today: date) -> list[dict]:
@@ -1648,6 +1421,29 @@ def _build_understocking(client: Any, today: date) -> dict:
     }
 
 
+def _build_churn_summary(client: Any, today: date) -> dict:
+    """Lightweight CHURNED/DECLINING/STABLE counts for the dashboard teaser card."""
+    try:
+        rows = _paginate(client, "customer_churn_flags", "flag,run_date")
+    except Exception:
+        return {"churned": 0, "declining": 0, "stable": 0, "total": 0, "run_date": None}
+    counts: dict[str, int] = {"CHURNED": 0, "DECLINING": 0, "STABLE": 0}
+    run_date = None
+    for r in rows:
+        flag = r.get("flag") or "STABLE"
+        counts[flag] = counts.get(flag, 0) + 1
+        rd = r.get("run_date")
+        if rd and (run_date is None or rd > run_date):
+            run_date = rd
+    return {
+        "churned":  counts.get("CHURNED",  0),
+        "declining": counts.get("DECLINING", 0),
+        "stable":   counts.get("STABLE",   0),
+        "total":    sum(counts.values()),
+        "run_date": run_date,
+    }
+
+
 @app.route("/api/dashboard")
 def dashboard_data():
     """Return all dashboard sections as a single JSON payload."""
@@ -1664,25 +1460,22 @@ def dashboard_data():
     }
 
     sections = [
-        ("network_kpis",         _build_network_kpis),
-        ("weather",              _build_weather),
+        ("critical_actions",     _build_critical_actions),
         ("morning_brief",        _build_morning_brief),
         ("alerts",               _build_alerts),
-        ("critical_actions",     _build_critical_actions),
         ("reorder",              _build_reorder),
         ("dead_stock",           _build_dead_stock),
-        ("supplier_health",      _build_supplier_health),
-        ("supplier_detail",      _build_supplier_detail),
+        ("churn_summary",        _build_churn_summary),
         ("inventory_health",     _build_inventory_health),
-        ("transfers",            _build_transfer_activity),
-        ("forecast_accuracy",    _build_forecast_accuracy),
-        ("location_performance", _build_location_performance),
-        ("top_skus",             _build_top_skus),
-        ("anomaly_summary",      _build_anomaly_summary),
-        ("basket_rules",         _build_basket_rules),
-        ("abc_xyz_matrix",       _build_abc_xyz_matrix),
         ("understocking",        _build_understocking),
         ("stocking_gaps",        _build_stocking_gaps),
+        ("transfers",            _build_transfer_activity),
+        ("location_performance", _build_location_performance),
+        ("top_skus",             _build_top_skus),
+        ("supplier_health",      _build_supplier_health),
+        ("supplier_detail",      _build_supplier_detail),
+        ("anomaly_summary",      _build_anomaly_summary),
+        ("network_kpis",         _build_network_kpis),
         ("pipeline_status",      _build_pipeline_status),
     ]
 
@@ -2166,6 +1959,68 @@ def chat():
         return jsonify({"reply": reply, "session_id": session_id})
     except Exception as exc:
         log.exception("Chat failed for session %s", session_id)
+        return jsonify({"error": str(exc)}), 500
+
+
+# ---------------------------------------------------------------------------
+# Churn Intelligence
+# ---------------------------------------------------------------------------
+
+def _build_churn(client: Any) -> dict:
+    rows = _paginate(
+        client, "customer_churn_flags",
+        "customer_id,location_id,baseline_monthly_spend,last_90_days_spend,"
+        "pct_change,flag,last_purchase_date,run_date",
+        order_col="baseline_monthly_spend",
+        order_desc=True,
+    )
+
+    summary: dict[str, int] = {"CHURNED": 0, "DECLINING": 0, "STABLE": 0}
+    locations_seen: set[str] = set()
+    for r in rows:
+        f = r.get("flag", "STABLE")
+        if f in summary:
+            summary[f] += 1
+        loc = r.get("location_id")
+        if loc:
+            locations_seen.add(loc)
+
+    at_risk = []
+    for r in rows:
+        if r.get("flag") not in ("CHURNED", "DECLINING"):
+            continue
+        loc = r.get("location_id", "")
+        r["location_name"] = LOCATION_NAMES.get(loc, "")
+        at_risk.append(r)
+
+    run_date = rows[0].get("run_date") if rows else None
+
+    return {
+        "run_date":      run_date,
+        "summary": {
+            "churned":   summary["CHURNED"],
+            "declining": summary["DECLINING"],
+            "stable":    summary["STABLE"],
+            "total":     len(rows),
+        },
+        "locations":      sorted(locations_seen),
+        "location_names": {loc: LOCATION_NAMES.get(loc, loc) for loc in locations_seen},
+        "rows":           at_risk,
+    }
+
+
+@app.route("/churn")
+def churn_page():
+    return send_from_directory(str(Path(__file__).parent), "churn.html")
+
+
+@app.route("/api/churn")
+def api_churn():
+    try:
+        client = get_new_client()
+        return jsonify(_build_churn(client))
+    except Exception as exc:
+        log.exception("Error building churn data")
         return jsonify({"error": str(exc)}), 500
 
 

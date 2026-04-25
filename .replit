@@ -51,7 +51,7 @@ outputType = "webview"
 
 [[workflows.workflow.tasks]]
 task = "shell.exec"
-args = "python dashboard/server.py"
+args = "kill -9 $(ps aux | grep 'dashboard/server.py' | grep -v grep | awk '{print $2}') 2>/dev/null; sleep 1; python dashboard/server.py"
 waitForPort = 5000
 
 [[workflows.workflow]]

@@ -69,6 +69,13 @@
   }
   .refresh-btn:hover { background: var(--border2); }
   .refresh-countdown { font-size: 11px; color: var(--muted); }
+  .nav-link {
+    font-size: 12px; color: var(--muted); text-decoration: none;
+    padding: 4px 10px; border: 1px solid var(--border);
+    border-radius: var(--radius); transition: color 0.15s, border-color 0.15s;
+    white-space: nowrap;
+  }
+  .nav-link:hover { color: var(--blue); border-color: var(--blue); }
 
   @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
 
@@ -102,38 +109,6 @@
   .kpi-label { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; }
   .kpi-value { font-size: 28px; font-weight: 700; line-height: 1.2; }
   .kpi-sub { font-size: 11px; color: var(--muted); }
-
-  .weather-banner {
-    background: var(--surface); border: 1px solid var(--border);
-    border-radius: var(--radius-lg); padding: 16px 20px; margin-bottom: 20px;
-    display: flex; align-items: center; gap: 20px; flex-wrap: wrap;
-  }
-  .weather-banner.freeze-warning { border-color: var(--critical); background: var(--critical-bg); }
-  .weather-icon { font-size: 28px; line-height: 1; }
-  .weather-main .temp { font-size: 22px; font-weight: 700; color: var(--text); }
-  .weather-main .temp-range { font-size: 13px; color: var(--muted); }
-  .weather-details { display: flex; gap: 20px; flex-wrap: wrap; }
-  .weather-detail { display: flex; flex-direction: column; gap: 2px; }
-  .weather-detail .label { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.4px; }
-  .weather-detail .value { font-size: 14px; font-weight: 500; }
-  .freeze-alert-text {
-    margin-left: auto; background: var(--critical); color: #fff;
-    padding: 6px 14px; border-radius: var(--radius); font-size: 12px;
-    font-weight: 600; white-space: nowrap;
-  }
-  .forecast-strip {
-    display: flex; gap: 8px; overflow-x: auto; padding: 10px 0 4px;
-    border-top: 1px solid var(--border2); margin-top: 12px;
-    scrollbar-width: thin; scrollbar-color: var(--border) transparent;
-  }
-  .forecast-day {
-    flex-shrink: 0; background: var(--surface2); border: 1px solid var(--border2);
-    border-radius: var(--radius); padding: 6px 10px; text-align: center; min-width: 60px;
-  }
-  .forecast-day.freeze { border-color: var(--critical); background: var(--critical-bg); }
-  .forecast-day .day-label { font-size: 11px; color: var(--muted); }
-  .forecast-day .day-hi { font-size: 13px; font-weight: 600; }
-  .forecast-day .day-lo { font-size: 11px; color: var(--muted); }
 
   .alert-summary-row { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-bottom: 20px; }
   .alert-card {
@@ -560,6 +535,7 @@
 <header class="header">
   <div class="header-left">
     <div class="logo">PartsWatch <span>AI</span></div>
+    <a href="/churn" class="nav-link">Churn Intelligence</a>
     <div class="header-date" id="header-date">Loading...</div>
   </div>
   <div class="header-right">
@@ -577,34 +553,7 @@
 
   <div id="error-area"></div>
 
-  <!-- ============== PANEL 1 — Morning Brief Header ============== -->
-  <div class="morning-brief" id="morning-brief">
-    <div class="greeting">Good morning &mdash; here's what needs your attention today.</div>
-    <div class="brief-stats" id="brief-stats">
-      <div class="brief-stat"><strong>&mdash;</strong> loading network signals&hellip;</div>
-    </div>
-  </div>
-
-  <div class="kpi-row" id="kpi-row">
-    <div class="kpi-card"><div class="kpi-label">Total SKUs</div><div class="kpi-value skeleton" style="height:32px">&nbsp;</div></div>
-    <div class="kpi-card"><div class="kpi-label">Locations</div><div class="kpi-value skeleton" style="height:32px">&nbsp;</div></div>
-    <div class="kpi-card"><div class="kpi-label">Suppliers</div><div class="kpi-value skeleton" style="height:32px">&nbsp;</div></div>
-    <div class="kpi-card"><div class="kpi-label">A-Class SKUs</div><div class="kpi-value skeleton" style="height:32px">&nbsp;</div></div>
-    <div class="kpi-card"><div class="kpi-label">Anomalies Flagged</div><div class="kpi-value skeleton" style="height:32px">&nbsp;</div></div>
-  </div>
-
-  <!-- ============== PANEL 2 — Weather & Freeze ============== -->
-  <div id="weather-section" class="section">
-    <div class="skeleton" style="height:80px;border-radius:12px"></div>
-  </div>
-
-  <div class="alert-summary-row" id="alert-summary">
-    <div class="alert-card critical"><div class="alert-count skeleton" style="width:40px;height:36px">&nbsp;</div><div><div class="alert-label">Critical</div></div></div>
-    <div class="alert-card warning"><div class="alert-count skeleton" style="width:40px;height:36px">&nbsp;</div><div><div class="alert-label">Warning</div></div></div>
-    <div class="alert-card info"><div class="alert-count skeleton" style="width:40px;height:36px">&nbsp;</div><div><div class="alert-label">Info</div></div></div>
-  </div>
-
-  <!-- ============== PANEL 3 — Critical Action Items (NEW) ============== -->
+  <!-- 1. Critical Actions -->
   <div class="section card" id="critical-actions-section">
     <div class="card-header">
       <span class="card-title">Critical Action Items</span>
@@ -618,6 +567,21 @@
     </div>
   </div>
 
+  <!-- 2. Morning Brief -->
+  <div class="morning-brief" id="morning-brief">
+    <div class="greeting">Good morning &mdash; here's what needs your attention today.</div>
+    <div class="brief-stats" id="brief-stats">
+      <div class="brief-stat"><strong>&mdash;</strong> loading network signals&hellip;</div>
+    </div>
+  </div>
+
+  <!-- 3. Alerts -->
+  <div class="alert-summary-row" id="alert-summary">
+    <div class="alert-card critical"><div class="alert-count skeleton" style="width:40px;height:36px">&nbsp;</div><div><div class="alert-label">Critical</div></div></div>
+    <div class="alert-card warning"><div class="alert-count skeleton" style="width:40px;height:36px">&nbsp;</div><div><div class="alert-label">Warning</div></div></div>
+    <div class="alert-card info"><div class="alert-count skeleton" style="width:40px;height:36px">&nbsp;</div><div><div class="alert-label">Info</div></div></div>
+  </div>
+
   <div class="section card" id="alerts-section">
     <div class="card-header">
       <span class="card-title">Critical &amp; Warning Alerts</span>
@@ -629,7 +593,7 @@
     <div class="collapsible card-body" id="alerts-body"><div class="skeleton" style="height:60px"></div></div>
   </div>
 
-  <!-- ============== PANEL 4 — Reorder Recommendations ============== -->
+  <!-- 4. Reorder Recommendations -->
   <div class="section card" id="reorder-section">
     <div class="card-header">
       <span class="card-title">Reorder Recommendations</span>
@@ -652,7 +616,7 @@
     </div>
   </div>
 
-  <!-- ============== PANEL 5 — Dead Stock Intelligence (HEADLINE) ============== -->
+  <!-- 5. Dead Stock -->
   <div class="section card dead-stock-card" id="dead-stock-section">
     <div class="card-header">
       <span class="card-title">Dead Stock Intelligence &mdash; Capital at Risk</span>
@@ -674,7 +638,34 @@
     </div>
   </div>
 
-  <!-- ============== PANEL 5b — Chronic Understocking by Location ============== -->
+  <!-- 6. Churn Intelligence -->
+  <div class="section card" id="churn-summary-section">
+    <div class="card-header">
+      <span class="card-title">Churn Intelligence</span>
+      <div class="card-header-actions">
+        <span class="card-updated" id="churn-summary-updated"></span>
+        <a href="/churn" class="nav-link" style="font-size:11px">View Full Report &rarr;</a>
+        <button class="card-toggle" data-target="churn-summary-section" onclick="toggleCard(this)">&minus;</button>
+      </div>
+    </div>
+    <div class="collapsible card-body" id="churn-summary-body">
+      <div class="skeleton" style="height:60px"></div>
+    </div>
+  </div>
+
+  <!-- 7. Inventory Health -->
+  <div class="section card" id="inventory-section">
+    <div class="card-header">
+      <span class="card-title">Inventory Health</span>
+      <div class="card-header-actions">
+        <span class="card-updated" id="inventory-updated"></span>
+        <button class="card-toggle" data-target="inventory-section" onclick="toggleCard(this)">&minus;</button>
+      </div>
+    </div>
+    <div class="collapsible card-body" id="inventory-body"><div class="skeleton" style="height:100px"></div></div>
+  </div>
+
+  <!-- 8. Understocking -->
   <div class="section card" id="understocking-section">
     <div class="card-header">
       <span class="card-title">Chronic Understocking by Location &mdash; What to Stock More Of</span>
@@ -691,8 +682,7 @@
                  style="font-size:12px;color:var(--muted);text-transform:uppercase;letter-spacing:0.4px;font-weight:600">Location</label>
           <select id="understocking-loc-select" onchange="renderUnderstockingForSelected()"
                   style="background:var(--surface);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:6px 10px;font-size:13px;min-width:220px"></select>
-          <span id="understocking-loc-summary"
-                style="font-size:12px;color:var(--muted)"></span>
+          <span id="understocking-loc-summary" style="font-size:12px;color:var(--muted)"></span>
         </div>
         <button id="understocking-export-btn" onclick="exportUnderstocking()"
                 style="background:var(--accent,#2563eb);color:#fff;border:0;border-radius:4px;padding:8px 14px;font-size:12px;font-weight:600;cursor:pointer;letter-spacing:0.3px">
@@ -707,7 +697,7 @@
     </div>
   </div>
 
-  <!-- ============== PANEL 5c — Stocking Gap Intelligence ============== -->
+  <!-- 9. Stocking Gaps -->
   <div class="section card" id="stocking-gaps-section">
     <div class="card-header">
       <span class="card-title">Stocking Gap Intelligence &mdash; What to Stock Locally</span>
@@ -739,7 +729,7 @@
     </div>
   </div>
 
-  <!-- ============== PANEL 6 — Transfer Opportunities ============== -->
+  <!-- 10. Transfers -->
   <div class="section card" id="transfers-section">
     <div class="card-header">
       <span class="card-title">Transfer Opportunities (Last 30 Days)</span>
@@ -752,18 +742,52 @@
     <div class="collapsible card-body" id="transfers-body"><div class="skeleton" style="height:80px"></div></div>
   </div>
 
-  <!-- ============== PANEL 7 — Supplier Health ============== -->
+  <!-- 11. Location Performance -->
+  <div class="section card" id="location-section">
+    <div class="card-header">
+      <span class="card-title">Location Performance</span>
+      <div class="card-header-actions">
+        <span class="card-updated" id="location-updated"></span>
+        <button class="card-toggle" data-target="location-section" onclick="toggleCard(this)">&minus;</button>
+      </div>
+    </div>
+    <div class="collapsible card-body" id="location-body"><div class="skeleton" style="height:120px"></div></div>
+  </div>
+
+  <!-- 12. Top SKUs by GP -->
+  <div class="section card" id="topsku-section">
+    <div class="card-header">
+      <span class="card-title">Top SKUs by Gross Profit &mdash; Last 90 Days</span>
+      <div class="card-header-actions">
+        <span class="card-updated" id="topsku-updated"></span>
+        <button class="card-toggle" data-target="topsku-section" onclick="toggleCard(this)">&minus;</button>
+      </div>
+    </div>
+    <div class="collapsible card-body" style="padding:0" id="topsku-body"><div class="skeleton" style="height:100px;margin:16px;border-radius:6px"></div></div>
+  </div>
+
+  <!-- 13. Supplier Health -->
+  <div class="section card" id="supplier-health-section">
+    <div class="card-header">
+      <span class="card-title">Supplier Health</span>
+      <div class="card-header-actions">
+        <span class="card-updated" id="supplier-health-updated"></span>
+        <button class="card-toggle" data-target="supplier-health-section" onclick="toggleCard(this)">&minus;</button>
+      </div>
+    </div>
+    <div class="collapsible card-body" id="supplier-health-body"><div class="skeleton" style="height:60px"></div></div>
+  </div>
+
+  <!-- 14. Supplier Detail -->
   <div class="section card" id="supplier-detail-section">
     <div class="card-header">
-      <span class="card-title">Supplier Health &amp; Open POs</span>
+      <span class="card-title">Supplier Detail &mdash; Scores &amp; Open POs</span>
       <div class="card-header-actions">
         <span class="card-updated" id="supplier-updated"></span>
         <button class="card-toggle" data-target="supplier-detail-section" onclick="toggleCard(this)">&minus;</button>
       </div>
     </div>
     <div class="collapsible">
-      <!-- Persistent advisory: PO dataset is sample-only until PartsWatch EDI
-           is connected.  Hide this banner once real PO history flows in. -->
       <div class="data-quality-banner" id="supplier-po-warning">
         <span class="dqb-icon">&#9888;</span>
         <div class="dqb-body">
@@ -776,79 +800,7 @@
     </div>
   </div>
 
-  <!-- ============== PANEL 8 — Inventory Health ============== -->
-  <div class="section card" id="inventory-section">
-    <div class="card-header">
-      <span class="card-title">Inventory Health</span>
-      <div class="card-header-actions">
-        <span class="card-updated" id="inventory-updated"></span>
-        <button class="card-toggle" data-target="inventory-section" onclick="toggleCard(this)">&minus;</button>
-      </div>
-    </div>
-    <div class="collapsible card-body" id="inventory-body"><div class="skeleton" style="height:100px"></div></div>
-  </div>
-
-  <!-- ============== PANEL 9 — Basket Intelligence (NEW) ============== -->
-  <div class="section card" id="basket-section">
-    <div class="card-header">
-      <span class="card-title">Basket Intelligence &mdash; Top Co-Purchase Rules</span>
-      <div class="card-header-actions">
-        <span class="card-updated" id="basket-updated"></span>
-        <button class="card-toggle" data-target="basket-section" onclick="toggleCard(this)">&minus;</button>
-      </div>
-    </div>
-    <div class="collapsible card-body" style="padding:0" id="basket-body">
-      <div class="skeleton" style="height:80px;margin:16px;border-radius:6px"></div>
-    </div>
-  </div>
-
-  <!-- ============== PANEL 10 — Location Performance ============== -->
-  <div class="section card" id="location-section">
-    <div class="card-header">
-      <span class="card-title">Location Performance</span>
-      <div class="card-header-actions">
-        <span class="card-updated" id="location-updated"></span>
-        <button class="card-toggle" data-target="location-section" onclick="toggleCard(this)">&minus;</button>
-      </div>
-    </div>
-    <div class="collapsible card-body" id="location-body"><div class="skeleton" style="height:120px"></div></div>
-  </div>
-
-  <!-- ============== PANEL 11 — ABC × XYZ Classification ============== -->
-  <div class="section card" id="abc-xyz-section">
-    <div class="card-header">
-      <span class="card-title">ABC &times; XYZ Classification Matrix</span>
-      <div class="card-header-actions">
-        <span class="card-updated" id="abc-xyz-updated"></span>
-        <button class="card-toggle" data-target="abc-xyz-section" onclick="toggleCard(this)">&minus;</button>
-      </div>
-    </div>
-    <div class="collapsible card-body" id="abc-xyz-body"><div class="skeleton" style="height:140px"></div></div>
-  </div>
-
-  <div class="section card" id="topsku-section">
-    <div class="card-header">
-      <span class="card-title">Top A-Class SKUs</span>
-      <div class="card-header-actions">
-        <span class="card-updated" id="topsku-updated"></span>
-        <button class="card-toggle" data-target="topsku-section" onclick="toggleCard(this)">&minus;</button>
-      </div>
-    </div>
-    <div class="collapsible card-body" style="padding:0" id="topsku-body"><div class="skeleton" style="height:100px;margin:16px;border-radius:6px"></div></div>
-  </div>
-
-  <!-- ============== PANEL 12 — Forecast Accuracy ============== -->
-  <div class="section card" id="accuracy-section">
-    <div class="card-header">
-      <span class="card-title">Forecast Accuracy</span>
-      <div class="card-header-actions">
-        <span class="card-updated" id="accuracy-updated"></span>
-        <button class="card-toggle" data-target="accuracy-section" onclick="toggleCard(this)">&minus;</button>
-      </div>
-    </div>
-    <div class="collapsible card-body" id="accuracy-body"><div class="skeleton" style="height:100px"></div></div>
-  </div>
-
+  <!-- 15. Anomaly Summary -->
   <div class="section card" id="anomaly-section">
     <div class="card-header">
       <span class="card-title">Anomaly Detection</span>
@@ -860,7 +812,16 @@
     <div class="collapsible card-body" id="anomaly-body"><div class="skeleton" style="height:120px"></div></div>
   </div>
 
-  <!-- ============== PANEL 13 — Pipeline Status ============== -->
+  <!-- 16. Network KPIs -->
+  <div class="kpi-row" id="kpi-row">
+    <div class="kpi-card"><div class="kpi-label">Total SKUs</div><div class="kpi-value skeleton" style="height:32px">&nbsp;</div></div>
+    <div class="kpi-card"><div class="kpi-label">Locations</div><div class="kpi-value skeleton" style="height:32px">&nbsp;</div></div>
+    <div class="kpi-card"><div class="kpi-label">Suppliers</div><div class="kpi-value skeleton" style="height:32px">&nbsp;</div></div>
+    <div class="kpi-card"><div class="kpi-label">A-Class SKUs</div><div class="kpi-value skeleton" style="height:32px">&nbsp;</div></div>
+    <div class="kpi-card"><div class="kpi-label">Anomalies Flagged</div><div class="kpi-value skeleton" style="height:32px">&nbsp;</div></div>
+  </div>
+
+  <!-- 17. Pipeline Status -->
   <div class="section card" id="pipeline-section">
     <div class="card-header">
       <span class="card-title">Pipeline Status</span>
@@ -1039,81 +1000,6 @@ function renderCriticalActions(items) {
   body.innerHTML = '<div class="crit-action-list">' + rows + '</div>';
 }
 
-// ---------- Panel 9: Basket Intelligence ----------
-function renderBasketRules(items) {
-  document.getElementById('basket-updated').textContent = 'Updated ' + nowStr();
-  var body = document.getElementById('basket-body');
-  if (!items || !items.length) {
-    body.innerHTML = '<div class="empty-state"><div class="icon">&#128722;</div>No basket rules computed yet. Run the basket pipeline to populate.</div>';
-    return;
-  }
-  var html = items.map(function(r) {
-    var conf = (r.confidence * 100).toFixed(0);
-    var lift = r.lift.toFixed(1);
-    var supp = (r.support * 100).toFixed(2);
-    return '<div class="basket-rule">' +
-      'When customers buy <span class="sku-id">' + escHtml(r.antecedent_sku) + '</span>' +
-      '<span class="arrow">&rarr;</span>' +
-      'they also buy <span class="sku-id">' + escHtml(r.consequent_sku) + '</span>' +
-      '<div class="stats"><strong>' + conf + '%</strong> confidence &middot; ' +
-      '<strong>' + lift + '&times;</strong> lift &middot; ' +
-      'support ' + supp + '% &middot; ' +
-      fmtNum(r.transaction_count) + ' baskets</div>' +
-      '</div>';
-  }).join('');
-  body.innerHTML = html;
-}
-
-// ---------- Panel 11: ABC × XYZ matrix ----------
-function renderAbcXyz(data) {
-  document.getElementById('abc-xyz-updated').textContent = 'Updated ' + nowStr();
-  var body = document.getElementById('abc-xyz-body');
-  if (!data || !data.counts) {
-    body.innerHTML = '<div class="no-data">XYZ classification has not run yet.</div>';
-    return;
-  }
-  var c = data.counts;
-  var hint = {
-    AX: 'Stock confidently',  AY: 'Watch seasonality', AZ: 'Deep safety stock',
-    BX: 'Auto-replenish',     BY: 'Standard buffer',   BZ: 'Watch for spikes',
-    CX: 'Min-stock',          CY: 'Reactive buy',      CZ: 'On-demand only'
-  };
-  function cell(code) {
-    var klass = 'abc-xyz-cell' + (code === 'AZ' ? ' az' : '');
-    return '<div class="' + klass + '">' +
-      '<div class="cell-name">' + code + '</div>' +
-      '<div class="cell-count">' + fmtNum(c[code] || 0) + '</div>' +
-      '<div class="cell-hint">' + hint[code] + '</div></div>';
-  }
-  var matrix =
-    '<div class="abc-xyz-matrix">' +
-      '<div class="abc-xyz-axis-y"></div>' +
-      '<div class="abc-xyz-axis-x">X &mdash; consistent</div>' +
-      '<div class="abc-xyz-axis-x">Y &mdash; variable</div>' +
-      '<div class="abc-xyz-axis-x">Z &mdash; erratic</div>' +
-      '<div class="abc-xyz-axis-y">A</div>' + cell('AX') + cell('AY') + cell('AZ') +
-      '<div class="abc-xyz-axis-y">B</div>' + cell('BX') + cell('BY') + cell('BZ') +
-      '<div class="abc-xyz-axis-y">C</div>' + cell('CX') + cell('CY') + cell('CZ') +
-    '</div>';
-  var azNote = (c.AZ || 0) > 0
-    ? '<div style="margin-top:12px;padding:10px;background:var(--critical-bg);border:1px solid rgba(248,81,73,0.3);border-radius:6px;font-size:12px;color:var(--text)">' +
-      '<strong>AZ &mdash; ' + fmtNum(c.AZ) + ' SKUs</strong> are top revenue with erratic demand. ' +
-      'These need the deepest safety stock and a manual review cadence.</div>'
-    : '';
-  var azSample = '';
-  if (data.az_sample && data.az_sample.length) {
-    azSample = '<div style="margin-top:10px;font-size:11px;color:var(--muted)">' +
-      '<div style="text-transform:uppercase;letter-spacing:0.4px;margin-bottom:6px">AZ sample (top by avg weekly units)</div>' +
-      data.az_sample.map(function(s) {
-        return '<div style="padding:2px 0"><span class="sku-id">' + escHtml(s.sku_id) + '</span> ' +
-          escHtml((s.description || s.part_category || '').substring(0,50)) + ' &middot; ' +
-          fmtNum(s.avg_weekly_units, 1) + '/wk</div>';
-      }).join('') + '</div>';
-  }
-  body.innerHTML = matrix + azNote + azSample +
-    '<div style="margin-top:8px;font-size:11px;color:var(--muted)">Total classified: <strong style="color:var(--text)">' + fmtNum(data.total) + '</strong></div>';
-}
-
 // ---------- Reorder filter state + exports ----------
 var _reorderItemsCache = [];
 var _reorderFilter = 'all';
@@ -1158,48 +1044,6 @@ function _renderReorderTable() {
 
 function exportReorder() { window.location.href = '/api/reorder/export.csv'; }
 function exportTransfers() { window.location.href = '/api/transfers/export.csv'; }
-
-function renderWeather(data) {
-  var t = data.today || {};
-  var forecast = data.forecast || [];
-  var freeze = data.freeze_warning;
-  var hi = fmtTemp(t.temp_max_f);
-  var lo = fmtTemp(t.temp_min_f);
-  var icon = freeze ? '\u{1F976}' : (t.temp_max_f > 70 ? '\u2600\uFE0F' : t.temp_max_f > 45 ? '\u{1F324}' : '\u{1F328}');
-  var extras = [];
-  if (t.snowfall_in > 0) extras.push(fmtNum(t.snowfall_in,1) + '" snow');
-  if (t.precipitation_in > 0) extras.push(fmtNum(t.precipitation_in,2) + '" precip');
-  if (t.freeze_thaw_cycle) extras.push('Freeze-thaw active');
-  if (t.consecutive_freeze_days > 0) extras.push('Freeze streak: ' + t.consecutive_freeze_days + 'd');
-
-  var freezeHtml = freeze
-    ? '<div class="freeze-alert-text">FREEZE ALERT: ' + data.freeze_days_count + ' day(s) below 32\u00B0F &mdash; lowest ' + fmtTemp(data.coldest_temp) + ' on ' + (data.coldest_date||'') + '</div>'
-    : '';
-
-  // When a freeze is active, surface the categories buyers should push.
-  var cats = (freeze && data.freeze_categories) ? data.freeze_categories : [];
-  var freezeCatsHtml = cats.length
-    ? '<div class="freeze-cats"><span class="label">Push these categories:</span>' +
-      cats.map(function(c) { return '<span class="freeze-cat-chip">' + escHtml(c) + '</span>'; }).join('') +
-      '</div>'
-    : '';
-
-  var forecastHtml = forecast.map(function(f) {
-    var isFr = f.temp_min_f != null && f.temp_min_f < 32;
-    var d = f.log_date ? f.log_date.slice(5).replace('-','/') : '?';
-    return '<div class="forecast-day ' + (isFr ? 'freeze' : '') + '"><div class="day-label">' + d + '</div><div class="day-hi">' + fmtTemp(f.temp_max_f) + '</div><div class="day-lo">' + fmtTemp(f.temp_min_f) + '</div></div>';
-  }).join('');
-
-  document.getElementById('weather-section').innerHTML =
-    '<div class="weather-banner ' + (freeze ? 'freeze-warning' : '') + '">' +
-    '<div class="weather-icon">' + icon + '</div>' +
-    '<div class="weather-main"><div class="temp">' + hi + ' <span style="font-size:16px;color:var(--muted)">/ ' + lo + '</span></div>' +
-    '<div class="temp-range">NE Ohio &mdash; Today' + (extras.length ? ' &middot; ' + extras.join(' &middot; ') : '') + '</div></div>' +
-    freezeHtml +
-    freezeCatsHtml +
-    (forecastHtml ? '<div class="forecast-strip" style="width:100%">' + forecastHtml + '</div>' : '') +
-    '</div>';
-}
 
 function renderAlertSummary(summary) {
   var c = summary.critical || 0, w = summary.warning || 0, i = summary.info || 0;
@@ -1263,20 +1107,30 @@ function renderABC(data) {
 function renderTopSKUs(items) {
   document.getElementById('topsku-updated').textContent = 'Updated ' + nowStr();
   if (!items || !items.length) {
-    document.getElementById('topsku-body').innerHTML = '<div class="card-body"><div class="no-data">No A-class SKUs loaded yet.</div></div>';
+    document.getElementById('topsku-body').innerHTML = '<div class="card-body"><div class="no-data">No SKU GP data yet — run nightly pipeline.</div></div>';
     return;
   }
-  var rows = items.slice(0, 10).map(function(r, i) {
-    var desc = r.description || r.category || r.brand || '\u2014';
+  var rows = items.map(function(r, i) {
+    var gpColor = (r.gp_pct != null && r.gp_pct >= 25) ? 'var(--success)' : 'var(--warning)';
+    var gpStr   = r.gp_pct != null ? r.gp_pct.toFixed(1) + '%' : '\u2014';
+    var locStr  = r.location_count > 0 ? r.location_count + ' loc' + (r.location_count > 1 ? 's' : '') : '\u2014';
     return '<tr>' +
       '<td style="color:var(--muted);font-size:12px;text-align:center">' + (i+1) + '</td>' +
       '<td><span class="sku-id">' + escHtml(r.sku_id) + '</span></td>' +
-      '<td style="font-size:12px;color:var(--muted)">' + escHtml(desc).substring(0,40) + '</td>' +
-      '<td class="right" style="font-weight:600">' + fmtNum(r.avg_weekly_units, 1) + '</td>' +
+      '<td style="text-align:right;font-weight:600;color:var(--success)">' + fmtMoney(r.total_gp) + '</td>' +
+      '<td style="text-align:right;color:' + gpColor + ';font-weight:600">' + gpStr + '</td>' +
+      '<td style="text-align:right;color:var(--muted)">' + fmtMoney(r.total_sales) + '</td>' +
+      '<td style="text-align:right;font-size:11px;color:var(--muted)">' + locStr + '</td>' +
       '</tr>';
   }).join('');
   document.getElementById('topsku-body').innerHTML =
-    '<table class="data-table"><thead><tr><th style="width:30px">#</th><th>SKU</th><th>Description</th><th class="right">Avg Wk Units</th></tr></thead><tbody>' + rows + '</tbody></table>';
+    '<table class="data-table"><thead><tr>' +
+    '<th style="width:30px">#</th><th>SKU</th>' +
+    '<th style="text-align:right">Gross Profit</th>' +
+    '<th style="text-align:right">GP%</th>' +
+    '<th style="text-align:right">Sales</th>' +
+    '<th style="text-align:right">Locations</th>' +
+    '</tr></thead><tbody>' + rows + '</tbody></table>';
 }
 
 function renderReorder(payload) {
@@ -1767,24 +1621,6 @@ function renderInventoryHealth(data) {
     (pairs ? '<div style="font-size:11px;color:var(--muted);padding-top:8px">' + pairs + '</div>' : '');
 }
 
-function renderForecastAccuracy(items) {
-  document.getElementById('accuracy-updated').textContent = 'Updated ' + nowStr();
-  if (!items || !items.length) {
-    document.getElementById('accuracy-body').innerHTML = '<div class="no-data">Accuracy tracking starts once forecasts enter the history window.</div>';
-    return;
-  }
-  var html = items.map(function(a) {
-    var pct = Math.min(a.mape_pct / 50 * 100, 100);
-    var cls = a.above_threshold ? 'above' : 'ok';
-    return '<div class="accuracy-item ' + cls + '">' +
-      '<div class="accuracy-header"><span class="accuracy-model">' + escHtml(a.model_type) + ' &middot; ' + escHtml(a.abc_class) + '-class</span>' +
-      '<span class="accuracy-mape ' + cls + '">' + a.mape_pct + '%</span></div>' +
-      '<div class="accuracy-bar-bg"><div class="accuracy-bar-fill ' + cls + '" style="width:' + pct + '%"></div></div>' +
-      '<div class="accuracy-meta">' + a.n_obs + ' observations &middot; Threshold: 25%' + (a.above_threshold ? ' &middot; Above threshold' : '') + '</div></div>';
-  }).join('');
-  document.getElementById('accuracy-body').innerHTML = '<div class="accuracy-row">' + html + '</div>';
-}
-
 function renderAnomalySummary(data) {
   document.getElementById('anomaly-updated').textContent = 'Updated ' + nowStr();
   if (!data) return;
@@ -1840,40 +1676,119 @@ function renderLocations(data) {
   (data.tier3_critical || []).forEach(function(l) { critSet[l] = true; });
 
   var tiers = [
-    { key: 'tier1', label: 'Tier 1 \u2014 High Volume', cls: 't1', color: 'var(--success)' },
-    { key: 'tier2', label: 'Tier 2 \u2014 Mid Volume', cls: 't2', color: 'var(--info)' },
-    { key: 'tier3', label: 'Tier 3 \u2014 Low Volume', cls: 't3', color: 'var(--warning)' },
+    { key: 'tier1', label: 'Tier 1 \u2014 High Volume', cls: 't1' },
+    { key: 'tier2', label: 'Tier 2 \u2014 Mid Volume',  cls: 't2' },
+    { key: 'tier3', label: 'Tier 3 \u2014 Low Volume',  cls: 't3' },
   ];
 
-  var html = tiers.map(function(t) {
+  function trendHtml(pct) {
+    if (pct == null) return '<span style="color:var(--muted)">\u2014</span>';
+    var color = pct >= 0 ? 'var(--success)' : 'var(--critical)';
+    var arrow = pct >= 5 ? ' \u2191' : pct <= -5 ? ' \u2193' : '';
+    return '<span style="color:' + color + ';font-weight:600">' + (pct >= 0 ? '+' : '') + pct.toFixed(1) + '%' + arrow + '</span>';
+  }
+
+  var tableRows = [];
+  tiers.forEach(function(t) {
     var locs = data[t.key] || [];
-    if (!locs.length) return '';
-
-    var header = '<div class="tier-separator ' + t.cls + '">' + t.label + ' (' + locs.length + ' locations)</div>';
-    var rows = locs.map(function(loc) {
-      var l = typeof loc === 'string' ? { location_id: loc, composite_tier_score: data.scores ? data.scores[loc] || 0 : 0 } : loc;
+    if (!locs.length) return;
+    tableRows.push('<tr style="background:var(--surface2)"><td colspan="7" style="font-size:11px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:0.5px;padding:6px 10px">' + t.label + ' (' + locs.length + ')</td></tr>');
+    locs.forEach(function(loc) {
+      var l = typeof loc === 'string' ? { location_id: loc } : loc;
       var isCrit = critSet[l.location_id];
-      var score = l.composite_tier_score || 0;
-      var scoreColor = score > 0.5 ? 'var(--success)' : score > 0.25 ? 'var(--info)' : 'var(--warning)';
-      var barPct = Math.min(score * 100 / 0.8, 100);
       var locLabel = l.location_name || l.location_display || l.location_id;
+      var gpColor = (l.gp_pct != null && l.gp_pct >= 25) ? 'var(--success)' : (l.gp_pct != null ? 'var(--warning)' : 'var(--muted)');
+      var gpStr   = l.gp_pct != null ? l.gp_pct.toFixed(1) + '%' : '\u2014';
+      var salesStr = l.sales_90d != null ? fmtMoney(l.sales_90d) : '\u2014';
+      var gpDolStr = l.gp_90d   != null ? fmtMoney(l.gp_90d)    : '\u2014';
+      var churnBadge = l.churn_count > 0
+        ? '<span style="background:var(--critical-bg);color:var(--critical);border:1px solid rgba(248,81,73,0.3);border-radius:4px;padding:1px 6px;font-size:11px;font-weight:600">' + l.churn_count + '</span>'
+        : '<span style="color:var(--muted)">0</span>';
+      var critBadge = isCrit ? '<span style="color:var(--critical);font-size:10px;margin-left:4px">\u26a0</span>' : '';
+      tableRows.push('<tr>' +
+        '<td><span style="font-weight:500">' + escHtml(locLabel) + '</span>' + critBadge + '</td>' +
+        '<td style="text-align:right">' + salesStr + '</td>' +
+        '<td style="text-align:right;color:' + gpColor + ';font-weight:600">' + gpDolStr + '</td>' +
+        '<td style="text-align:right;color:' + gpColor + '">' + gpStr + '</td>' +
+        '<td style="text-align:right">' + trendHtml(l.sales_trend_pct) + '</td>' +
+        '<td style="text-align:right">' + churnBadge + '</td>' +
+        '<td style="text-align:right;font-size:11px;color:var(--muted)">' + ((l.composite_tier_score || 0) * 100).toFixed(0) + '</td>' +
+        '</tr>');
+    });
+  });
 
-      return '<div class="loc-row ' + (isCrit ? 'critical-loc' : '') + '">' +
-        '<div class="loc-name">' + escHtml(locLabel) + '</div>' +
-        '<div><div style="display:flex;align-items:center;gap:8px">' +
-        '<div class="score-bar-bg" style="flex:1"><div class="score-bar-fill" style="width:' + barPct + '%;background:' + scoreColor + '"></div></div>' +
-        '<span style="font-size:10px;color:var(--muted)">' +
-        (l.revenue_score != null ? 'R:' + (l.revenue_score * 100).toFixed(0) : '') +
-        (l.sku_breadth_score != null ? ' S:' + (l.sku_breadth_score * 100).toFixed(0) : '') +
-        (l.fill_rate_score != null ? ' F:' + (l.fill_rate_score * 100).toFixed(0) : '') +
-        '</span></div></div>' +
-        '<div class="loc-score" style="color:' + scoreColor + '">' + (score * 100).toFixed(1) + '</div>' +
-        '</div>';
-    }).join('');
-    return header + rows;
-  }).join('');
+  document.getElementById('location-body').innerHTML =
+    '<table class="data-table"><thead><tr>' +
+    '<th>Location</th>' +
+    '<th style="text-align:right">Sales 90d</th>' +
+    '<th style="text-align:right">GP 90d</th>' +
+    '<th style="text-align:right">GP%</th>' +
+    '<th style="text-align:right">vs Prior 90d</th>' +
+    '<th style="text-align:right">At-Risk Accts</th>' +
+    '<th style="text-align:right">Score</th>' +
+    '</tr></thead><tbody>' + tableRows.join('') + '</tbody></table>';
+}
 
-  document.getElementById('location-body').innerHTML = '<div class="tier-grid">' + html + '</div>';
+function renderChurnSummary(data) {
+  document.getElementById('churn-summary-updated').textContent = 'Updated ' + nowStr();
+  var body = document.getElementById('churn-summary-body');
+  if (!data || !data.total) {
+    body.innerHTML = '<div class="empty-state"><div class="icon">&#10003;</div>No churn data yet &mdash; run nightly pipeline to generate.</div>';
+    return;
+  }
+  var runLabel = data.run_date ? '<span style="font-size:11px;color:var(--muted)">Run: ' + escHtml(data.run_date) + '</span>' : '';
+  body.innerHTML =
+    '<div style="display:flex;align-items:center;gap:24px;flex-wrap:wrap">' +
+    '<div style="display:flex;gap:16px;flex:1;flex-wrap:wrap">' +
+    '<div style="background:var(--critical-bg);border:1px solid rgba(248,81,73,0.3);border-radius:8px;padding:12px 20px;min-width:100px;text-align:center">' +
+      '<div style="font-size:11px;color:var(--critical);text-transform:uppercase;letter-spacing:0.5px;font-weight:600">Churned</div>' +
+      '<div style="font-size:28px;font-weight:700;color:var(--critical)">' + fmtNum(data.churned) + '</div>' +
+    '</div>' +
+    '<div style="background:var(--warning-bg);border:1px solid rgba(210,153,34,0.3);border-radius:8px;padding:12px 20px;min-width:100px;text-align:center">' +
+      '<div style="font-size:11px;color:var(--warning);text-transform:uppercase;letter-spacing:0.5px;font-weight:600">Declining</div>' +
+      '<div style="font-size:28px;font-weight:700;color:var(--warning)">' + fmtNum(data.declining) + '</div>' +
+    '</div>' +
+    '<div style="background:var(--success-bg);border:1px solid rgba(63,185,80,0.3);border-radius:8px;padding:12px 20px;min-width:100px;text-align:center">' +
+      '<div style="font-size:11px;color:var(--success);text-transform:uppercase;letter-spacing:0.5px;font-weight:600">Stable</div>' +
+      '<div style="font-size:28px;font-weight:700;color:var(--success)">' + fmtNum(data.stable) + '</div>' +
+    '</div>' +
+    '</div>' +
+    '<div style="display:flex;flex-direction:column;align-items:flex-end;gap:8px">' + runLabel +
+    '<a href="/churn" style="background:var(--surface2);color:var(--blue);border:1px solid var(--border);border-radius:6px;padding:8px 16px;font-size:12px;font-weight:600;text-decoration:none;white-space:nowrap">View Full Report &rarr;</a>' +
+    '</div>' +
+    '</div>';
+}
+
+function renderSupplierHealth(data) {
+  document.getElementById('supplier-health-updated').textContent = 'Updated ' + nowStr();
+  var body = document.getElementById('supplier-health-body');
+  if (!data || !data.total) {
+    body.innerHTML = '<div class="no-data">No supplier score data available.</div>';
+    return;
+  }
+  var redList = (data.red_suppliers || []).map(function(s) {
+    return '<span class="sku-id" style="color:var(--critical)">' + escHtml(s.supplier_id) + '</span>' +
+           ' <span style="color:var(--muted);font-size:11px">(' + fmtNum(s.score, 1) + ')</span>';
+  }).join(' &nbsp; ');
+
+  body.innerHTML =
+    '<div style="display:flex;align-items:center;gap:24px;flex-wrap:wrap">' +
+    '<div style="display:flex;gap:16px;flex-wrap:wrap">' +
+    '<div style="text-align:center;padding:10px 18px;background:var(--success-bg);border:1px solid rgba(63,185,80,0.3);border-radius:8px">' +
+      '<div style="font-size:11px;color:var(--success);text-transform:uppercase;letter-spacing:0.5px;font-weight:600">Green</div>' +
+      '<div style="font-size:26px;font-weight:700;color:var(--success)">' + fmtNum(data.green) + '</div>' +
+    '</div>' +
+    '<div style="text-align:center;padding:10px 18px;background:var(--warning-bg);border:1px solid rgba(210,153,34,0.3);border-radius:8px">' +
+      '<div style="font-size:11px;color:var(--warning);text-transform:uppercase;letter-spacing:0.5px;font-weight:600">Amber</div>' +
+      '<div style="font-size:26px;font-weight:700;color:var(--warning)">' + fmtNum(data.amber) + '</div>' +
+    '</div>' +
+    '<div style="text-align:center;padding:10px 18px;background:var(--critical-bg);border:1px solid rgba(248,81,73,0.3);border-radius:8px">' +
+      '<div style="font-size:11px;color:var(--critical);text-transform:uppercase;letter-spacing:0.5px;font-weight:600">Red</div>' +
+      '<div style="font-size:26px;font-weight:700;color:var(--critical)">' + fmtNum(data.red) + '</div>' +
+    '</div>' +
+    '</div>' +
+    (redList ? '<div style="flex:1;font-size:12px"><span style="color:var(--muted);text-transform:uppercase;letter-spacing:0.4px;font-size:11px">Red suppliers: </span>' + redList + '</div>' : '') +
+    '</div>';
 }
 
 function renderPipelineStatus(items) {
@@ -1909,25 +1824,23 @@ async function loadData() {
     var data = await resp.json();
     if (data.error) throw new Error(data.error);
 
+    if (data.critical_actions != null) renderCriticalActions(data.critical_actions);
     if (data.morning_brief)        renderMorningBrief(data.morning_brief);
-    if (data.network_kpis)         renderKPIs(data.network_kpis);
-    if (data.weather)              renderWeather(data.weather);
     if (data.alerts)               renderAlertSummary(data.alerts.summary || {});
     if (data.alerts)               renderAlerts(data.alerts.items || []);
-    if (data.critical_actions != null) renderCriticalActions(data.critical_actions);
     if (data.reorder != null)      renderReorder(data.reorder);
     if (data.dead_stock != null)   renderDeadStock(data.dead_stock);
+    if (data.churn_summary != null) renderChurnSummary(data.churn_summary);
+    if (data.inventory_health)     renderInventoryHealth(data.inventory_health);
     if (data.understocking != null)   renderUnderstocking(data.understocking);
     if (data.stocking_gaps != null)   renderStockingGaps(data.stocking_gaps);
     if (data.transfers != null)    renderTransfers(data.transfers);
-    if (data.supplier_detail)      renderSupplierDetail(data.supplier_detail);
-    if (data.inventory_health)     renderInventoryHealth(data.inventory_health);
-    if (data.basket_rules != null) renderBasketRules(data.basket_rules);
     if (data.location_performance) renderLocations(data.location_performance);
-    if (data.abc_xyz_matrix)       renderAbcXyz(data.abc_xyz_matrix);
     if (data.top_skus)             renderTopSKUs(data.top_skus);
-    if (data.forecast_accuracy != null) renderForecastAccuracy(data.forecast_accuracy);
+    if (data.supplier_health)      renderSupplierHealth(data.supplier_health);
+    if (data.supplier_detail)      renderSupplierDetail(data.supplier_detail);
     if (data.anomaly_summary)      renderAnomalySummary(data.anomaly_summary);
+    if (data.network_kpis)         renderKPIs(data.network_kpis);
     if (data.pipeline_status)      renderPipelineStatus(data.pipeline_status);
 
     document.getElementById('last-updated').textContent =

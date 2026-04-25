@@ -1,3 +1,9 @@
+# Claude Code memory (local only)
+.claude/
+
+# Accidentally-created credential files
+SUPABASE_URL=*.txt
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]

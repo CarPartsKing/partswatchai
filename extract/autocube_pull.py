@@ -112,6 +112,13 @@ _XMLA_PATHS = [
 
 _REQUEST_TIMEOUT_SECS = 120
 
+# Shorter timeout used only during connect() endpoint probing.
+# 16 probe attempts (8 paths × 2 auth methods) at the full 120 s would waste
+# up to 32 minutes per module when the server is slow/unreachable.  10 s is
+# enough to distinguish "port closed fast" from "port open but no XMLA" without
+# hanging indefinitely.  Actual MDX data queries still use _REQUEST_TIMEOUT_SECS.
+_PROBE_TIMEOUT_SECS = 10
+
 # ---------------------------------------------------------------------------
 # Security — query validation
 # ---------------------------------------------------------------------------
@@ -372,7 +379,7 @@ class AutocubeClient:
                         url,
                         data=soap_probe,
                         auth=auth_obj,
-                        timeout=_REQUEST_TIMEOUT_SECS,
+                        timeout=_PROBE_TIMEOUT_SECS,
                     )
                     log.info(
                         "  %s auth -> HTTP %d  (%d bytes)",
@@ -716,10 +723,19 @@ def get_client() -> AutocubeClient:
     cube     = config.AUTOCUBE_CUBE
     path     = config.AUTOCUBE_XMLA_PATH
 
-    if not all([server, user, password, catalog]):
+    _missing = [
+        name for name, val in (
+            ("AUTOCUBE_SERVER",   server),
+            ("AUTOCUBE_USER",     user),
+            ("AUTOCUBE_PASSWORD", password),
+            ("AUTOCUBE_CATALOG",  catalog),
+        ) if not val
+    ]
+    if _missing:
         raise EnvironmentError(
-            "Missing Autocube credentials. Set AUTOCUBE_SERVER, AUTOCUBE_USER, "
-            "AUTOCUBE_PASSWORD, and AUTOCUBE_CATALOG."
+            f"Missing Autocube credential(s): {', '.join(_missing)}. "
+            "Ensure each is set as a GitHub Secret and listed under the "
+            "workflow job's `env:` block."
         )
 
     return AutocubeClient(

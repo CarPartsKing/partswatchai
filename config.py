@@ -86,10 +86,10 @@ ROLLING_AVERAGE_WEEKS: int = 13    # C-class rolling window
 # ---------------------------------------------------------------------------
 # Autocube (Autologue-hosted OLAP cube via XMLA/SOAP over HTTPS)
 # ---------------------------------------------------------------------------
-AUTOCUBE_SERVER: str = _optional("AUTOCUBE_SERVER", "")
-AUTOCUBE_USER: str = _optional("AUTOCUBE_USER", "")
-AUTOCUBE_PASSWORD: str = _optional("AUTOCUBE_PASSWORD", "")
-AUTOCUBE_CATALOG: str = _optional("AUTOCUBE_CATALOG", "")
+AUTOCUBE_SERVER: str = _require("AUTOCUBE_SERVER")
+AUTOCUBE_USER: str = _require("AUTOCUBE_USER")
+AUTOCUBE_PASSWORD: str = _require("AUTOCUBE_PASSWORD")
+AUTOCUBE_CATALOG: str = _require("AUTOCUBE_CATALOG")
 AUTOCUBE_CUBE: str = _optional("AUTOCUBE_CUBE", "Sales Detail")
 AUTOCUBE_XMLA_PATH: str = _optional("AUTOCUBE_XMLA_PATH", "/msmdpump.dll")
 AUTOCUBE_COLUMN_MAP_PATH: str = "config/autocube_column_map.json"

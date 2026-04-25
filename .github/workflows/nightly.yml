@@ -32,9 +32,11 @@ jobs:
       ANTHROPIC_API_KEY:  ${{ secrets.ANTHROPIC_API_KEY }}
       # ── Optional secrets (have defaults in config.py) ───────────────
       PARTSWATCH_SOURCE:  ${{ secrets.PARTSWATCH_SOURCE }}
-      AUTOCUBE_BASE_URL:  ${{ secrets.AUTOCUBE_BASE_URL }}
+      # ── Autocube OLAP credentials (all four required by config.py) ──
+      AUTOCUBE_SERVER:    ${{ secrets.AUTOCUBE_SERVER }}
       AUTOCUBE_USER:      ${{ secrets.AUTOCUBE_USER }}
       AUTOCUBE_PASSWORD:  ${{ secrets.AUTOCUBE_PASSWORD }}
+      AUTOCUBE_CATALOG:   ${{ secrets.AUTOCUBE_CATALOG }}
       ENVIRONMENT:        production
       LOG_LEVEL:          INFO
       # ── Open-Meteo NE Ohio coordinates (no API key needed) ──────────
@@ -48,9 +50,15 @@ jobs:
 
     steps:
       - name: Checkout repository
+        # actions/checkout v4 runs on Node.js 20 (deprecated).
+        # Update to the latest major version that uses Node.js 24 once it is
+        # released — check https://github.com/marketplace/actions/checkout
         uses: actions/checkout@v4
 
       - name: Set up Python 3.11
+        # actions/setup-python v5 runs on Node.js 20 (deprecated).
+        # Update to the latest major version that uses Node.js 24 once it is
+        # released — check https://github.com/marketplace/actions/setup-python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
@@ -122,6 +130,27 @@ jobs:
         continue-on-error: true
         run: python -m extract.weather_pull
 
+      # ── S13 background start ──────────────────────────────────────────────
+      # S13 (2-year sales-detail pull, 100+ weekly XMLA chunks) is independent
+      # of the S05-S12 transform/ML/engine chain.  Starting it here lets it
+      # overlap with the ~30-60 min S05-S12 window, trimming its contribution
+      # to the critical-path runtime from ~50 min down to near zero when the
+      # two chains finish at roughly the same time.
+      #
+      # Implementation: the subshell writes its own exit code to /tmp/s13.rc
+      # when it finishes.  The S13 "wait" step (step 13) polls that file and
+      # exits with the captured code so `outcome` is correct in the summary.
+      # `disown` removes the child from the shell's job table so the step's
+      # shell can exit without reaping it (GitHub Actions runs each step in
+      # its own shell process).
+      - name: 13-bg — Start sales detail extract in background
+        id: s13_bg_start
+        if: ${{ steps.t_start.conclusion == 'success' }}
+        run: |
+          (python extract/extract_sales_detail.py >/tmp/s13.log 2>&1; echo $? >/tmp/s13.rc) &
+          disown $!
+          echo "Sales detail extract started in background (PID $!)"
+
       - name: 05 — Clean
         id: s05_clean
         if: ${{ steps.t_start.conclusion == 'success' }}
@@ -170,11 +199,28 @@ jobs:
         continue-on-error: true
         run: python main.py --stage alerts
 
-      - name: 13 — Sales detail extract (incremental)
+      - name: 13 — Sales detail extract (wait for background)
         id: s13_extract_sales_detail
         if: ${{ steps.t_start.conclusion == 'success' }}
         continue-on-error: true
-        run: python extract/extract_sales_detail.py
+        run: |
+          # Spin until the background process writes its exit code.
+          # Maximum wait: 90 minutes (5400 s) — adjust if the 2-year pull grows.
+          WAITED=0
+          while [ ! -f /tmp/s13.rc ] && [ $WAITED -lt 5400 ]; do
+            echo "  [$(date -u +%H:%M:%S)] Waiting for S13 sales detail extract…"
+            sleep 20
+            WAITED=$((WAITED + 20))
+          done
+
+          if [ ! -f /tmp/s13.rc ]; then
+            echo "::error::S13 background process did not finish within 90 minutes."
+            exit 1
+          fi
+
+          # Print captured log then exit with the process's own return code.
+          cat /tmp/s13.log
+          exit "$(cat /tmp/s13.rc)"
 
       - name: 14 — Churn detection
         id: s14_churn_detection

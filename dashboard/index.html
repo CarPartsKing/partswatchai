@@ -653,7 +653,21 @@
     </div>
   </div>
 
-  <!-- 7. Inventory Health -->
+  <!-- 7. OPSL Intelligence -->
+  <div class="section card" id="opsl-section">
+    <div class="card-header">
+      <span class="card-title">OPSL Intelligence &mdash; Outside Purchase Opportunities</span>
+      <div class="card-header-actions">
+        <span class="card-updated" id="opsl-updated"></span>
+        <button class="card-toggle" data-target="opsl-section" onclick="toggleCard(this)">&minus;</button>
+      </div>
+    </div>
+    <div class="collapsible card-body" id="opsl-body">
+      <div class="skeleton" style="height:60px"></div>
+    </div>
+  </div>
+
+  <!-- 8. Inventory Health -->
   <div class="section card" id="inventory-section">
     <div class="card-header">
       <span class="card-title">Inventory Health</span>
@@ -910,6 +924,21 @@ function fmtDate(iso) {
 function nowStr() { return new Date().toLocaleTimeString('en-US', { hour:'2-digit', minute:'2-digit' }); }
 function badge(cls, text) { return '<span class="badge badge-' + cls + '">' + text + '</span>'; }
 function escHtml(s) { if (!s) return ''; return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+function sortTableBy(tableId, colIdx, numeric) {
+  var tbl = document.getElementById(tableId);
+  if (!tbl) return;
+  var tbody = tbl.querySelector('tbody');
+  var rows = Array.from(tbody.querySelectorAll('tr'));
+  var asc = tbl.dataset.sortCol == colIdx && tbl.dataset.sortDir != 'asc';
+  tbl.dataset.sortCol = colIdx; tbl.dataset.sortDir = asc ? 'asc' : 'desc';
+  rows.sort(function(a, b) {
+    var av = a.cells[colIdx] ? a.cells[colIdx].textContent.replace(/[$,% ✓]/g,'').trim() : '';
+    var bv = b.cells[colIdx] ? b.cells[colIdx].textContent.replace(/[$,% ✓]/g,'').trim() : '';
+    if (numeric) { av = parseFloat(av) || 0; bv = parseFloat(bv) || 0; return asc ? av - bv : bv - av; }
+    return asc ? av.localeCompare(bv) : bv.localeCompare(av);
+  });
+  rows.forEach(function(r) { tbody.appendChild(r); });
+}
 function pctBar(val, max, color) {
   const pct = Math.min((val / max) * 100, 100);
   return '<div style="display:flex;align-items:center;gap:8px"><div class="score-bar-bg"><div class="score-bar-fill" style="width:' + pct + '%;background:' + color + '"></div></div><span style="font-size:11px;color:var(--muted);min-width:35px;text-align:right">' + (val * 100).toFixed(0) + '%</span></div>';
@@ -1759,6 +1788,72 @@ function renderChurnSummary(data) {
     '</div>';
 }
 
+function renderOPSLIntelligence(data) {
+  document.getElementById('opsl-updated').textContent = 'Updated ' + nowStr();
+  var body = document.getElementById('opsl-body');
+  if (!data || (data.high === 0 && data.medium === 0 && data.low === 0)) {
+    body.innerHTML = '<div class="empty-state"><div class="icon">&#10003;</div>No OPSL data yet &mdash; run nightly pipeline to generate.</div>';
+    return;
+  }
+  var runLabel = data.run_date ? '<span style="font-size:11px;color:var(--muted)">Run: ' + escHtml(data.run_date) + '</span>' : '';
+  var statsHtml =
+    '<div style="display:flex;align-items:center;gap:24px;flex-wrap:wrap;margin-bottom:20px">' +
+    '<div style="display:flex;gap:16px;flex:1;flex-wrap:wrap">' +
+    '<div style="background:var(--critical-bg);border:1px solid rgba(248,81,73,0.3);border-radius:8px;padding:12px 20px;min-width:100px;text-align:center">' +
+      '<div style="font-size:11px;color:var(--critical);text-transform:uppercase;letter-spacing:0.5px;font-weight:600">HIGH</div>' +
+      '<div style="font-size:28px;font-weight:700;color:var(--critical)">' + fmtNum(data.high) + '</div>' +
+    '</div>' +
+    '<div style="background:var(--warning-bg);border:1px solid rgba(210,153,34,0.3);border-radius:8px;padding:12px 20px;min-width:100px;text-align:center">' +
+      '<div style="font-size:11px;color:var(--warning);text-transform:uppercase;letter-spacing:0.5px;font-weight:600">MEDIUM</div>' +
+      '<div style="font-size:28px;font-weight:700;color:var(--warning)">' + fmtNum(data.medium) + '</div>' +
+    '</div>' +
+    '<div style="background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:12px 20px;min-width:100px;text-align:center">' +
+      '<div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:0.5px;font-weight:600">LOW</div>' +
+      '<div style="font-size:28px;font-weight:700;color:var(--text)">' + fmtNum(data.low) + '</div>' +
+    '</div>' +
+    '<div style="background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:12px 20px;min-width:140px;text-align:center">' +
+      '<div style="font-size:11px;color:var(--blue);text-transform:uppercase;letter-spacing:0.5px;font-weight:600">Est. Recovery</div>' +
+      '<div style="font-size:28px;font-weight:700;color:var(--blue)">$' + fmtNum(data.total_recovery, 0) + '</div>' +
+    '</div>' +
+    '</div>' +
+    '<div style="display:flex;flex-direction:column;align-items:flex-end;gap:8px">' + runLabel + '</div>' +
+    '</div>';
+
+  var rows = data.high_rows || [];
+  var tableHtml = '';
+  if (rows.length > 0) {
+    tableHtml =
+      '<div style="font-size:12px;font-weight:600;color:var(--critical);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px">HIGH Priority — Sort by Estimated Recovery</div>' +
+      '<div style="overflow-x:auto"><table class="data-table" id="opsl-table">' +
+      '<thead><tr>' +
+      '<th onclick="sortTableBy(\'opsl-table\',0)" style="cursor:pointer">SKU</th>' +
+      '<th onclick="sortTableBy(\'opsl-table\',1)" style="cursor:pointer">Location</th>' +
+      '<th onclick="sortTableBy(\'opsl-table\',2,true)" style="cursor:pointer;text-align:right">Outside Purchases</th>' +
+      '<th onclick="sortTableBy(\'opsl-table\',3,true)" style="cursor:pointer;text-align:right">Total Sales</th>' +
+      '<th onclick="sortTableBy(\'opsl-table\',4,true)" style="cursor:pointer;text-align:right">Avg GP%</th>' +
+      '<th onclick="sortTableBy(\'opsl-table\',5,true)" style="cursor:pointer;text-align:right">Est. Recovery</th>' +
+      '<th style="text-align:center">In Reorder Queue</th>' +
+      '</tr></thead><tbody>' +
+      rows.map(function(r) {
+        var queueBadge = r.in_reorder_queue
+          ? '<span style="color:var(--success);font-weight:600">&#10003; Yes</span>'
+          : '<span style="color:var(--muted)">No</span>';
+        return '<tr>' +
+          '<td><span class="sku-id">' + escHtml(r.prod_line_pn) + '</span></td>' +
+          '<td>' + escHtml(r.location_display) + '</td>' +
+          '<td style="text-align:right;color:var(--critical);font-weight:600">' + fmtNum(r.opsl_count) + '</td>' +
+          '<td style="text-align:right">$' + fmtNum(r.total_opsl_sales, 0) + '</td>' +
+          '<td style="text-align:right">' + fmtNum(r.avg_gp_pct, 1) + '%</td>' +
+          '<td style="text-align:right;color:var(--blue);font-weight:600">$' + fmtNum(r.estimated_margin_recovery, 0) + '</td>' +
+          '<td style="text-align:center">' + queueBadge + '</td>' +
+          '</tr>';
+      }).join('') +
+      '</tbody></table></div>';
+  }
+
+  body.innerHTML = statsHtml + tableHtml;
+}
+
 function renderSupplierHealth(data) {
   document.getElementById('supplier-health-updated').textContent = 'Updated ' + nowStr();
   var body = document.getElementById('supplier-health-body');
@@ -1830,8 +1925,9 @@ async function loadData() {
     if (data.alerts)               renderAlerts(data.alerts.items || []);
     if (data.reorder != null)      renderReorder(data.reorder);
     if (data.dead_stock != null)   renderDeadStock(data.dead_stock);
-    if (data.churn_summary != null) renderChurnSummary(data.churn_summary);
-    if (data.inventory_health)     renderInventoryHealth(data.inventory_health);
+    if (data.churn_summary != null)     renderChurnSummary(data.churn_summary);
+    if (data.opsl_intelligence != null) renderOPSLIntelligence(data.opsl_intelligence);
+    if (data.inventory_health)          renderInventoryHealth(data.inventory_health);
     if (data.understocking != null)   renderUnderstocking(data.understocking);
     if (data.stocking_gaps != null)   renderStockingGaps(data.stocking_gaps);
     if (data.transfers != null)    renderTransfers(data.transfers);

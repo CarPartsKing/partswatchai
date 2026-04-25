@@ -1444,6 +1444,50 @@ def _build_churn_summary(client: Any, today: date) -> dict:
     }
 
 
+def _build_opsl_intelligence(client: Any, today: date) -> dict:
+    """HIGH/MEDIUM/LOW outside-purchase counts + HIGH detail rows for the dashboard."""
+    try:
+        rows = _paginate(
+            client, "opsl_flags",
+            "prod_line_pn,location_id,opsl_count,total_opsl_sales,"
+            "avg_gp_pct,estimated_margin_recovery,flag,last_opsl_date,in_reorder_queue,run_date",
+        )
+    except Exception:
+        return {"high": 0, "medium": 0, "low": 0, "total_recovery": 0.0, "run_date": None, "high_rows": []}
+    counts: dict[str, int] = {"HIGH": 0, "MEDIUM": 0, "LOW": 0}
+    total_recovery = 0.0
+    run_date = None
+    high_rows: list[dict] = []
+    for r in rows:
+        flag = r.get("flag") or "LOW"
+        counts[flag] = counts.get(flag, 0) + 1
+        total_recovery += float(r.get("estimated_margin_recovery") or 0)
+        rd = r.get("run_date")
+        if rd and (run_date is None or rd > run_date):
+            run_date = rd
+        if flag == "HIGH":
+            loc_id = r.get("location_id") or ""
+            high_rows.append({
+                "prod_line_pn":              r.get("prod_line_pn"),
+                "location_id":               loc_id,
+                "location_display":          _loc_display(loc_id),
+                "opsl_count":                int(r.get("opsl_count") or 0),
+                "total_opsl_sales":          round(float(r.get("total_opsl_sales") or 0), 2),
+                "avg_gp_pct":                round(float(r.get("avg_gp_pct") or 0) * 100, 1),
+                "estimated_margin_recovery": round(float(r.get("estimated_margin_recovery") or 0), 2),
+                "in_reorder_queue":          bool(r.get("in_reorder_queue")),
+            })
+    high_rows.sort(key=lambda x: x["estimated_margin_recovery"], reverse=True)
+    return {
+        "high":           counts["HIGH"],
+        "medium":         counts["MEDIUM"],
+        "low":            counts["LOW"],
+        "total_recovery": round(total_recovery, 2),
+        "run_date":       run_date,
+        "high_rows":      high_rows,
+    }
+
+
 @app.route("/api/dashboard")
 def dashboard_data():
     """Return all dashboard sections as a single JSON payload."""
@@ -1466,6 +1510,7 @@ def dashboard_data():
         ("reorder",              _build_reorder),
         ("dead_stock",           _build_dead_stock),
         ("churn_summary",        _build_churn_summary),
+        ("opsl_intelligence",    _build_opsl_intelligence),
         ("inventory_health",     _build_inventory_health),
         ("understocking",        _build_understocking),
         ("stocking_gaps",        _build_stocking_gaps),

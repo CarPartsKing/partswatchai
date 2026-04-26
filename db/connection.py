@@ -42,7 +42,7 @@ def get_client() -> Client:
     # when env vars are not yet set (e.g., during unit test discovery).
     from config import SUPABASE_URL, SUPABASE_KEY
 
-    log.info("Initializing Supabase client → %s", SUPABASE_URL)
+    log.info("Initializing Supabase client -> %s", SUPABASE_URL)
     client = create_client(SUPABASE_URL, SUPABASE_KEY)
     log.info("Supabase client ready.")
     return client

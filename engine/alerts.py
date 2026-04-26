@@ -1,26 +1,32 @@
 """engine/alerts.py — Daily alert generation for the partswatch-ai dashboard.
 
-Runs nightly after engine/reorder.py.  Generates seven categories of alerts
-and writes them to the ``alerts`` table.  Re-runs on the same day are safe —
-existing acknowledged alerts are never overwritten (upsert ignore_duplicates
-on the (alert_date, alert_key) unique index).
+Runs nightly after engine/reorder.py.  Generates nine categories of alerts
+and writes them to the ``alerts`` table.
 
 ALERT TYPES
 -----------
-1.  CRITICAL_STOCKOUT       — SKU is at zero stock with active demand
-2.  LOW_SUPPLY              — days_of_supply_remaining < LOW_SUPPLY_DAYS
-3.  FREEZE_ALERT            — extreme cold forecast; battery/antifreeze SKUs
-4.  SUPPLIER_RISK           — red-flag supplier has open purchase orders
-5.  DEAD_STOCK              — is_dead_stock = TRUE, no sale in DEAD_STOCK_DAYS
-6.  TRANSFER_OPPORTUNITY    — unapproved transfer recommendation pending
-7.  FORECAST_ACCURACY_DROP  — ABC-class weekly MAPE > MAPE_THRESHOLD_PCT
+ 1. CRITICAL_STOCKOUT       — SKU at zero stock with active demand
+ 2. LOW_SUPPLY              — days_of_supply_remaining < LOW_SUPPLY_DAYS
+ 3. FREEZE_ALERT            — extreme cold forecast; freeze-sensitive SKUs
+ 4. SUPPLIER_RISK           — red-flag supplier has open purchase orders
+ 5. DEAD_STOCK              — is_dead_stock = TRUE, no sale in DEAD_STOCK_DAYS
+ 6. TRANSFER_OPPORTUNITY    — unapproved transfer recommendation pending
+ 7. FORECAST_ACCURACY_DROP  — ABC-class weekly MAPE > MAPE_THRESHOLD_PCT
+ 8. CHURN_RISK              — customer flagged AT_RISK / CHURNED / LOST
+ 9. OPSL_GAP                — HIGH OPSL flag not yet in reorder queue
 
 DESIGN RULES
 ------------
 - Each alert type is its own isolated function — no shared state between types.
-- No thresholds are hardcoded in logic; all tunable values are module constants.
-- All DB reads are paginated; no per-SKU round trips.
-- Log the count of each alert type generated.
+- Deduplication: if an alert_key already exists in a resolved=FALSE alert from
+  the last DEDUP_LOOKBACK_DAYS days, the existing row's days_active counter is
+  incremented instead of creating a new row.  first_seen_date is preserved.
+- Auto-resolve: after writing, open alerts whose condition no longer holds are
+  marked resolved=TRUE / resolved_date=today.  Resolvable types: CRITICAL_STOCKOUT,
+  LOW_SUPPLY, CHURN_RISK, OPSL_GAP.
+- Financial impact: every alert carries a financial_impact NUMERIC(14,2) field.
+  Alerts are sorted descending by financial_impact within each severity tier.
+- Dashboard queries must filter resolved=FALSE to exclude auto-resolved rows.
 
 Usage
 -----
@@ -42,12 +48,7 @@ from utils.logging_config import get_logger, setup_logging
 
 
 def _get_fresh_client() -> Any:
-    """Return a brand-new Supabase client (bypasses lru_cache when available).
-
-    Mirrors engine/reorder.py — used by the batched write loop so a stale
-    connection that just hit a 57014 statement timeout can be discarded
-    and replaced before the next retry.
-    """
+    """Return a brand-new Supabase client (bypasses lru_cache when available)."""
     try:
         from db.connection import get_new_client
         return get_new_client()
@@ -56,17 +57,13 @@ def _get_fresh_client() -> Any:
 
 
 # ---------------------------------------------------------------------------
-# Batched-write tunables — mirror engine/reorder.py
+# Batched-write tunables
 # ---------------------------------------------------------------------------
 WRITE_BATCH_SIZE: int = 200
-"""How many alert rows to upsert per network round-trip.
-
-A single 125k-row upsert blows past Supabase's statement timeout (57014);
-200-row batches finish well inside the timeout window and let us retry
-individual batches on transient failure without losing prior progress."""
+"""How many alert rows to upsert per network round-trip."""
 
 WRITE_PROGRESS_INTERVAL: int = 5_000
-"""Log a progress line every N alerts written so long runs stay observable."""
+"""Log a progress line every N alerts written."""
 
 _WRITE_MAX_RETRIES: int = 5
 _WRITE_RETRY_DELAY: float = 5.0
@@ -88,27 +85,25 @@ def _is_write_retryable(exc: Exception) -> bool:
     blob = type(exc).__name__ + " " + str(exc)
     return any(tok in blob for tok in _WRITE_RETRYABLE_TOKENS)
 
+
 log = get_logger(__name__)
 
 # ---------------------------------------------------------------------------
-# Tunable constants — easy to adjust without touching logic
+# Tunable constants
 # ---------------------------------------------------------------------------
 
-# CRITICAL_STOCKOUT: how many days back to look for "active demand" (recent sales)
+# CRITICAL_STOCKOUT
 ACTIVE_DEMAND_LOOKBACK_DAYS: int = 30
 
-# LOW_SUPPLY: threshold from reorder_recommendations.days_of_supply_remaining
+# LOW_SUPPLY
 LOW_SUPPLY_DAYS: float = 3.0
 
 # FREEZE_ALERT
-FREEZE_TEMP_THRESHOLD_F: float = 20.0        # Flag when temp_min_f drops below this
-FREEZE_LOOKAHEAD_DAYS: int = 7               # How many days ahead to scan weather
-
-# Part categories and sub-categories considered freeze-sensitive.
-# Add entries here as the SKU catalog grows — no code changes needed.
+FREEZE_TEMP_THRESHOLD_F: float = 20.0
+FREEZE_LOOKAHEAD_DAYS: int = 7
 FREEZE_SENSITIVE_PART_CATEGORIES: frozenset[str] = frozenset({
-    "electrical",   # batteries, starters, alternators
-    "cooling",      # coolant system — radiator hoses, water pumps
+    "electrical",
+    "cooling",
 })
 FREEZE_SENSITIVE_SUBCATEGORIES: frozenset[str] = frozenset({
     "batteries",
@@ -118,14 +113,31 @@ FREEZE_SENSITIVE_SUBCATEGORIES: frozenset[str] = frozenset({
     "radiator hoses",
 })
 
-# DEAD_STOCK: minimum days since last sale to fire the alert
+# DEAD_STOCK
 DEAD_STOCK_DAYS: int = 180
 
 # FORECAST_ACCURACY_DROP
-MAPE_THRESHOLD_PCT: float = 25.0     # Alert when weekly MAPE exceeds this %
-MAPE_LOOKBACK_DAYS: int = 7          # Window for "weekly" MAPE calculation
+MAPE_THRESHOLD_PCT: float = 25.0
+MAPE_LOOKBACK_DAYS: int = 7
+
+# Deduplication — look back this many days for existing open alerts with the
+# same alert_key before deciding to increment vs insert.
+DEDUP_LOOKBACK_DAYS: int = 30
+
+# CHURN_RISK — financial_impact = baseline_monthly_spend × this multiplier
+# (one quarter of annualized revenue at risk)
+CHURN_QUARTER_MULTIPLIER: float = 3.0
+CHURN_ACTIVE_FLAGS: tuple[str, ...] = ("AT_RISK", "CHURNED", "LOST")
 
 _PAGE_SIZE: int = 1_000
+
+# Severity sort order for financial-impact ranking within tier
+_SEV_RANK: dict[str, int] = {"critical": 0, "warning": 1, "info": 2}
+
+# Alert types whose condition can be auto-detected as resolved
+_AUTO_RESOLVE_TYPES: frozenset[str] = frozenset({
+    "CRITICAL_STOCKOUT", "LOW_SUPPLY", "CHURN_RISK", "OPSL_GAP",
+})
 
 
 # ---------------------------------------------------------------------------
@@ -142,21 +154,7 @@ def _paginate(
     in_filters:  dict | None = None,
     eq_bool:     dict | None = None,
 ) -> list[dict]:
-    """Paginate through a Supabase table and return all matching rows.
-
-    Args:
-        client:      Active Supabase client.
-        table:       Table name.
-        select:      PostgREST column selector string.
-        filters:     {col: value} exact equality.
-        gte_filters: {col: value} for col >= value.
-        lte_filters: {col: value} for col <= value.
-        in_filters:  {col: [values]} for col IN (values).
-        eq_bool:     {col: bool} for boolean equality (avoids string coercion).
-
-    Returns:
-        All matching rows as a list of dicts.
-    """
+    """Paginate through a Supabase table and return all matching rows."""
     rows: list[dict] = []
     offset = 0
     while True:
@@ -216,54 +214,96 @@ def _make_alert(
     severity:   str,
     message:    str,
     alert_key:  str,
-    sku_id:     str | None = None,
-    location_id: str | None = None,
-    supplier_id: str | None = None,
+    sku_id:           str | None = None,
+    location_id:      str | None = None,
+    supplier_id:      str | None = None,
+    customer_id:      str | None = None,
+    financial_impact: float = 0.0,
 ) -> dict:
-    """Build a single alert dict ready for DB insertion.
+    """Build a single alert dict ready for DB insertion."""
+    return {
+        "alert_date":       alert_date.isoformat(),
+        "alert_type":       alert_type,
+        "severity":         severity,
+        "sku_id":           sku_id,
+        "location_id":      location_id,
+        "location_name":    _LOCATION_NAMES.get(location_id or "") or None,
+        "supplier_id":      supplier_id,
+        "customer_id":      customer_id,
+        "message":          message,
+        "alert_key":        alert_key,
+        "financial_impact": round(float(financial_impact or 0), 2),
+        "is_acknowledged":  False,
+        "acknowledged_by":  None,
+        "acknowledged_at":  None,
+    }
 
-    Args:
-        alert_date:  Date the alert was generated (always today's date).
-        alert_type:  One of the seven ALERT TYPE constants.
-        severity:    'critical', 'warning', or 'info'.
-        message:     Human-readable text shown on the dashboard.
-        alert_key:   Pipe-delimited dedup key (must be unique per alert_date).
-        sku_id:      Optional SKU context.
-        location_id: Optional location context.
-        supplier_id: Optional supplier context.
+
+# ---------------------------------------------------------------------------
+# Shared pre-fetch helpers
+# ---------------------------------------------------------------------------
+
+def _fetch_unit_cost_map(client: Any) -> dict[str, float]:
+    """Return sku_id → unit_cost for all SKUs that have a non-null unit_cost."""
+    rows = _paginate(client, "sku_master", "sku_id,unit_cost")
+    return {
+        r["sku_id"]: float(r["unit_cost"])
+        for r in rows
+        if r.get("sku_id") and r.get("unit_cost") is not None
+    }
+
+
+def _fetch_existing_open_alerts(
+    client: Any,
+    today: date,
+    lookback_days: int = DEDUP_LOOKBACK_DAYS,
+) -> dict[str, dict]:
+    """Return the most-recent open alert row per alert_key from the last N days.
+
+    Includes today's rows so that a same-day re-run can detect alerts already
+    written in a previous run and skip both INSERT and UPDATE for them.
 
     Returns:
-        Dict ready to insert into the alerts table.
+        dict mapping alert_key → {id, alert_date, alert_type, days_active}
+        May return {} if the resolved column doesn't exist yet (pre-migration).
     """
-    return {
-        "alert_date":      alert_date.isoformat(),
-        "alert_type":      alert_type,
-        "severity":        severity,
-        "sku_id":          sku_id,
-        "location_id":     location_id,
-        "location_name":   _LOCATION_NAMES.get(location_id or "") or None,
-        "supplier_id":     supplier_id,
-        "message":         message,
-        "alert_key":       alert_key,
-        "is_acknowledged": False,
-        "acknowledged_by": None,
-        "acknowledged_at": None,
-    }
+    cutoff = (today - timedelta(days=lookback_days)).isoformat()
+    try:
+        rows = _paginate(
+            client, "alerts",
+            "id,alert_key,alert_date,alert_type,days_active,resolved",
+            gte_filters={"alert_date": cutoff},
+        )
+    except Exception as exc:
+        log.warning(
+            "Could not fetch existing open alerts (%s) — dedup disabled. "
+            "Run migration 047 if resolved column is missing.",
+            exc.__class__.__name__,
+        )
+        return {}
+
+    by_key: dict[str, dict] = {}
+    for r in rows:
+        k = r["alert_key"]
+        if k not in by_key or r["alert_date"] > by_key[k]["alert_date"]:
+            by_key[k] = r
+    return by_key
 
 
 # ---------------------------------------------------------------------------
 # Alert generators — each is fully isolated (own DB reads, own return value)
 # ---------------------------------------------------------------------------
 
-def _alert_critical_stockout(client: Any, today: date) -> list[dict]:
-    """CRITICAL_STOCKOUT — SKU at zero stock with active recent demand.
+def _alert_critical_stockout(
+    client: Any,
+    today: date,
+    unit_cost_map: dict[str, float] | None = None,
+) -> list[dict]:
+    """CRITICAL_STOCKOUT — SKU at zero stock per latest inventory snapshot.
 
-    Pulls the most recent inventory snapshot per (sku_id, location_id),
-    flags rows where is_stockout = TRUE, then cross-references with
-    sales_transactions from the last ACTIVE_DEMAND_LOOKBACK_DAYS days
-    to confirm the SKU has had recent demand (not a permanently dead line).
-
-    Returns one alert per (sku_id, location_id) stockout with active demand.
+    financial_impact = qty_to_order × unit_cost from today's reorder recs.
+    Items with no reorder recommendation get financial_impact=0 and naturally
+    sort below items with active demand, so no separate demand query is needed.
     """
     cutoff_inv = (today - timedelta(days=7)).isoformat()
     inv_rows = _paginate(
@@ -272,7 +312,6 @@ def _alert_critical_stockout(client: Any, today: date) -> list[dict]:
         gte_filters={"snapshot_date": cutoff_inv},
     )
 
-    # Most recent snapshot per pair
     latest: dict[tuple[str, str], dict] = {}
     for r in inv_rows:
         key = (r["sku_id"], r["location_id"])
@@ -283,62 +322,64 @@ def _alert_critical_stockout(client: Any, today: date) -> list[dict]:
     if not stockouts:
         return []
 
-    # SKUs with recent sales — active demand proxy
-    demand_cutoff = (today - timedelta(days=ACTIVE_DEMAND_LOOKBACK_DAYS)).isoformat()
-    sales_rows = _paginate(
-        client, "sales_transactions",
-        "sku_id,location_id",
-        gte_filters={"transaction_date": demand_cutoff},
-    )
-    active_pairs: set[tuple[str, str]] = {
-        (r["sku_id"], r["location_id"]) for r in sales_rows
-    }
-    # Also count at the SKU level (any location had sales → SKU has demand)
-    active_skus: set[str] = {r["sku_id"] for r in sales_rows}
+    reorder_qty: dict[tuple[str, str], float] = {}
+    try:
+        rec_rows = _paginate(
+            client, "reorder_recommendations",
+            "sku_id,location_id,qty_to_order",
+            filters={"recommendation_date": today.isoformat()},
+        )
+        reorder_qty = {
+            (r["sku_id"], r["location_id"]): float(r.get("qty_to_order") or 0)
+            for r in rec_rows
+        }
+    except Exception:
+        pass
 
+    ucm = unit_cost_map or {}
     alerts: list[dict] = []
     for (sku_id, loc_id), inv in stockouts.items():
-        if sku_id not in active_skus and (sku_id, loc_id) not in active_pairs:
-            continue  # No recent demand — skip to avoid noise
+        qty  = reorder_qty.get((sku_id, loc_id), 0.0)
+        cost = ucm.get(sku_id, 0.0)
         alerts.append(_make_alert(
             alert_date=today,
             alert_type="CRITICAL_STOCKOUT",
             severity="critical",
             sku_id=sku_id,
             location_id=loc_id,
-            message=(
-                f"{sku_id} is completely out of stock at {loc_id} "
-                f"and has had sales activity in the past {ACTIVE_DEMAND_LOOKBACK_DAYS} days."
-            ),
+            message=f"{sku_id} is completely out of stock at {loc_id}.",
             alert_key=f"CRITICAL_STOCKOUT|{sku_id}|{loc_id}",
+            financial_impact=qty * cost,
         ))
     return alerts
 
 
-def _alert_low_supply(client: Any, today: date) -> list[dict]:
+def _alert_low_supply(
+    client: Any,
+    today: date,
+    unit_cost_map: dict[str, float] | None = None,
+) -> list[dict]:
     """LOW_SUPPLY — days_of_supply_remaining below LOW_SUPPLY_DAYS.
 
-    Reads from today's reorder_recommendations (generated by engine/reorder.py
-    just before this module runs).  Excludes full stockouts (qty == 0) since
-    those are captured by CRITICAL_STOCKOUT.
-
-    Returns one alert per (sku_id, location_id) with critically low supply
-    that is not yet a stockout.
+    financial_impact = qty_to_order × unit_cost.
     """
     recs = _paginate(
         client, "reorder_recommendations",
-        "sku_id,location_id,days_of_supply_remaining,urgency,forecast_model_used",
+        "sku_id,location_id,days_of_supply_remaining,urgency,"
+        "forecast_model_used,qty_to_order",
         filters={"recommendation_date": today.isoformat()},
     )
 
+    ucm = unit_cost_map or {}
     alerts: list[dict] = []
     for r in recs:
         days = float(r.get("days_of_supply_remaining") or 0)
-        # Exclude zero days (stockout — already in CRITICAL_STOCKOUT)
         if days <= 0 or days >= LOW_SUPPLY_DAYS:
             continue
-        sku_id  = r["sku_id"]
-        loc_id  = r["location_id"]
+        sku_id = r["sku_id"]
+        loc_id = r["location_id"]
+        qty    = float(r.get("qty_to_order") or 0)
+        cost   = ucm.get(sku_id, 0.0)
         alerts.append(_make_alert(
             alert_date=today,
             alert_type="LOW_SUPPLY",
@@ -351,21 +392,13 @@ def _alert_low_supply(client: Any, today: date) -> list[dict]:
                 f"Forecast model: {r.get('forecast_model_used', 'unknown')}."
             ),
             alert_key=f"LOW_SUPPLY|{sku_id}|{loc_id}",
+            financial_impact=qty * cost,
         ))
     return alerts
 
 
 def _alert_freeze(client: Any, today: date) -> list[dict]:
-    """FREEZE_ALERT — extreme cold forecast; battery and antifreeze SKUs flagged.
-
-    Scans weather_log for the next FREEZE_LOOKAHEAD_DAYS days.  If any day
-    has temp_min_f < FREEZE_TEMP_THRESHOLD_F, generates one alert per
-    freeze-sensitive SKU (Batteries, Antifreeze, Cooling categories).
-
-    Returns:
-        One alert per freeze-sensitive SKU when a cold event is forecast.
-        Empty list when the next week stays above the threshold.
-    """
+    """FREEZE_ALERT — extreme cold forecast; battery and antifreeze SKUs flagged."""
     lookahead_end = (today + timedelta(days=FREEZE_LOOKAHEAD_DAYS)).isoformat()
     weather_rows = _paginate(
         client, "weather_log",
@@ -382,18 +415,16 @@ def _alert_freeze(client: Any, today: date) -> list[dict]:
     if not cold_days:
         return []
 
-    coldest   = min(cold_days, key=lambda r: float(r["temp_min_f"]))
-    cold_temp = float(coldest["temp_min_f"])
-    cold_date = coldest["log_date"]
+    coldest    = min(cold_days, key=lambda r: float(r["temp_min_f"]))
+    cold_temp  = float(coldest["temp_min_f"])
+    cold_date  = coldest["log_date"]
     cold_count = len(cold_days)
 
-    # Fetch all active SKUs and filter for freeze-sensitive categories
     sku_rows = _paginate(
         client, "sku_master",
         "sku_id,part_category,sub_category",
         eq_bool={"is_active": True},
     )
-
     freeze_skus = [
         r for r in sku_rows
         if (r.get("part_category") or "").lower() in FREEZE_SENSITIVE_PART_CATEGORIES
@@ -422,15 +453,14 @@ def _alert_freeze(client: Any, today: date) -> list[dict]:
     return alerts
 
 
-def _alert_supplier_risk(client: Any, today: date) -> list[dict]:
+def _alert_supplier_risk(
+    client: Any,
+    today: date,
+    unit_cost_map: dict[str, float] | None = None,
+) -> list[dict]:
     """SUPPLIER_RISK — red-flag supplier has open purchase orders.
 
-    Identifies suppliers whose most recent score has risk_flag = 'red',
-    then finds all open PO lines routed through those suppliers.
-    Generates one alert per (supplier_id, sku_id) open PO line.
-
-    Returns:
-        One alert per open PO line with a red-flag supplier.
+    financial_impact = qty_ordered × unit_cost (total open PO value).
     """
     score_cutoff = (today - timedelta(days=90)).isoformat()
     score_rows = _paginate(
@@ -439,7 +469,6 @@ def _alert_supplier_risk(client: Any, today: date) -> list[dict]:
         gte_filters={"score_date": score_cutoff},
     )
 
-    # Most recent score per supplier
     latest_score: dict[str, dict] = {}
     for r in score_rows:
         sid = r.get("supplier_id")
@@ -466,12 +495,15 @@ def _alert_supplier_risk(client: Any, today: date) -> list[dict]:
     if not po_rows:
         return []
 
+    ucm = unit_cost_map or {}
     alerts: list[dict] = []
     for r in po_rows:
         sid    = r["supplier_id"]
         sku_id = r["sku_id"]
         score  = latest_score.get(sid, {}).get("composite_score")
         score_str = f"{score:.1f}/100" if score is not None else "n/a"
+        qty  = float(r.get("qty_ordered") or 0)
+        cost = ucm.get(sku_id, 0.0)
         alerts.append(_make_alert(
             alert_date=today,
             alert_type="SUPPLIER_RISK",
@@ -484,19 +516,13 @@ def _alert_supplier_risk(client: Any, today: date) -> list[dict]:
                 f"Consider alternate sourcing or expedite status check."
             ),
             alert_key=f"SUPPLIER_RISK|{sid}|{sku_id}|{r['po_number']}",
+            financial_impact=qty * cost,
         ))
     return alerts
 
 
 def _alert_dead_stock(client: Any, today: date) -> list[dict]:
-    """DEAD_STOCK — SKUs with is_dead_stock = TRUE sitting more than DEAD_STOCK_DAYS.
-
-    Reads is_dead_stock and last_sale_date from sku_master.  Alerts when:
-        is_dead_stock = TRUE  AND
-        (last_sale_date IS NULL OR last_sale_date < today − DEAD_STOCK_DAYS)
-
-    Returns one alert per dead-stock SKU.
-    """
+    """DEAD_STOCK — SKUs with is_dead_stock = TRUE, no sale in DEAD_STOCK_DAYS."""
     sku_rows = _paginate(
         client, "sku_master",
         "sku_id,part_category,sub_category,last_sale_date,is_dead_stock",
@@ -508,7 +534,7 @@ def _alert_dead_stock(client: Any, today: date) -> list[dict]:
     for r in sku_rows:
         last_sale = r.get("last_sale_date")
         if last_sale and last_sale >= dead_cutoff:
-            continue  # Sold recently enough — not yet stale
+            continue
 
         sku_id   = r["sku_id"]
         days_ago = (
@@ -534,37 +560,18 @@ def _alert_dead_stock(client: Any, today: date) -> list[dict]:
 def _alert_transfer_opportunity(client: Any, today: date) -> list[dict]:
     """TRANSFER_OPPORTUNITY — single summary alert for all pending transfers.
 
-    Reads today's reorder_recommendations where recommendation_type = 'transfer'
-    and is_approved = FALSE.  Returns ONE summary alert (not one-per-transfer)
-    pointing the user at the reorder recommendations panel.
-
-    Why a summary instead of per-transfer alerts:
-      * The reorder engine routinely emits 15k+ unapproved transfers per day.
-      * One alert per transfer flooded the alerts table (125k+ rows in a single
-        nightly run on 2026-04-19) and pushed the alerts upsert past Supabase's
-        statement timeout (57014).
-      * The detail already lives in reorder_recommendations and is rendered on
-        the dashboard's transfer panel — duplicating each row as an alert added
-        no signal, only noise.
-
-    The summary captures the headline numbers (count, distinct SKUs, distinct
-    destination locations, total units, total covered days) so the alert text
-    is informative on its own without forcing the user to open the panel.
-
-    Returns a single-element list (or empty list when there are no pending
-    transfers today).  Keeps the same return-shape as the other generators
-    so run_alerts() needs no special-casing.
+    Returns ONE summary alert (not one-per-transfer) to avoid flooding the
+    alerts table.  Detail lives in the reorder_recommendations panel.
     """
     recs = _paginate(
         client, "reorder_recommendations",
         "sku_id,location_id,transfer_from_location,qty_to_order,days_of_supply_remaining",
         filters={
-            "recommendation_date":  today.isoformat(),
-            "recommendation_type":  "transfer",
+            "recommendation_date": today.isoformat(),
+            "recommendation_type": "transfer",
         },
         eq_bool={"is_approved": False},
     )
-
     if not recs:
         return []
 
@@ -573,58 +580,48 @@ def _alert_transfer_opportunity(client: Any, today: date) -> list[dict]:
     distinct_dest = len({r.get("location_id") for r in recs if r.get("location_id")})
     total_qty     = sum(float(r.get("qty_to_order") or 0) for r in recs)
 
-    message = (
-        f"{n_transfers:,} transfer opportunities identified today "
-        f"across {distinct_skus:,} SKU(s) and {distinct_dest} destination "
-        f"location(s) — {total_qty:,.0f} total units pending approval. "
-        f"See the reorder recommendations panel for the per-SKU detail."
-    )
-
     return [_make_alert(
         alert_date=today,
         alert_type="TRANSFER_OPPORTUNITY",
         severity="info",
-        # No sku_id / location_id — this is a network-wide rollup, not a
-        # per-SKU/location row.  Leaving them NULL keeps the dashboard from
-        # double-displaying the same alert under specific SKU panels.
-        message=message,
-        # Stable per-day key so a same-day re-run of the alert engine
-        # collapses to a single row (upsert ignore_duplicates).
+        message=(
+            f"{n_transfers:,} transfer opportunities identified today "
+            f"across {distinct_skus:,} SKU(s) and {distinct_dest} destination "
+            f"location(s) — {total_qty:,.0f} total units pending approval. "
+            f"See the reorder recommendations panel for the per-SKU detail."
+        ),
         alert_key="TRANSFER_OPPORTUNITY|SUMMARY",
     )]
 
 
 def _alert_forecast_accuracy_drop(client: Any, today: date) -> list[dict]:
-    """FORECAST_ACCURACY_DROP — weekly MAPE > MAPE_THRESHOLD_PCT for an ABC class.
+    """FORECAST_ACCURACY_DROP — weekly MAPE > MAPE_THRESHOLD_PCT for an ABC class."""
+    window_start   = (today - timedelta(days=MAPE_LOOKBACK_DAYS)).isoformat()
+    run_date_start = (today - timedelta(days=7)).isoformat()
+    yesterday      = (today - timedelta(days=1)).isoformat()
 
-    Compares recent past forecasts (forecast_date in last MAPE_LOOKBACK_DAYS days)
-    against actual sales in sales_transactions for the same dates.
-
-    MAPE per (abc_class, model_type):
-        MAPE = mean(|actual − predicted| / max(actual, 1)) × 100
-
-    For lightgbm forecasts with location_id = 'ALL', actual demand is the
-    network-wide sum across all locations for that SKU and date.
-
-    Returns one alert per (abc_class, model_type) combination where MAPE
-    exceeds the threshold.  Returns empty list when no past forecasts exist.
-    """
-    window_start = (today - timedelta(days=MAPE_LOOKBACK_DAYS)).isoformat()
-    yesterday    = (today - timedelta(days=1)).isoformat()
-
-    # Fetch past forecast rows
-    fc_rows = _paginate(
-        client, "forecast_results",
-        "sku_id,location_id,forecast_date,model_type,predicted_qty,run_date",
-        gte_filters={"forecast_date": window_start},
-        lte_filters={"forecast_date": yesterday},
-        in_filters={"model_type": ["lightgbm", "rolling_avg"]},
-    )
+    # Limit run_date to last 7 days so PostgREST only touches recent forecast
+    # rows — the full table spans years and times out without this constraint.
+    # If the table still times out (no composite index), skip gracefully.
+    try:
+        fc_rows = _paginate(
+            client, "forecast_results",
+            "sku_id,location_id,forecast_date,model_type,predicted_qty,run_date",
+            gte_filters={"forecast_date": window_start, "run_date": run_date_start},
+            lte_filters={"forecast_date": yesterday},
+            in_filters={"model_type": ["lightgbm", "rolling_avg"]},
+        )
+    except Exception as exc:
+        log.warning(
+            "FORECAST_ACCURACY_DROP: forecast_results query timed out (%s) — "
+            "skipping. Add an index on (run_date, model_type) to enable.",
+            exc.__class__.__name__,
+        )
+        return []
     if not fc_rows:
         log.debug("FORECAST_ACCURACY_DROP: no past forecast rows in window — skipping.")
         return []
 
-    # Keep only the latest run_date per (sku_id, location_id, model_type)
     latest_run: dict[tuple[str, str, str], str] = {}
     for r in fc_rows:
         key = (r["sku_id"], r["location_id"], r["model_type"])
@@ -639,35 +636,32 @@ def _alert_forecast_accuracy_drop(client: Any, today: date) -> list[dict]:
             if d:
                 forecast_map[key][d] = float(r.get("predicted_qty") or 0)
 
-    # Fetch actual sales for the same window
-    sales_rows = _paginate(
-        client, "sales_transactions",
-        "sku_id,location_id,transaction_date,qty_sold",
-        gte_filters={"transaction_date": window_start},
-        lte_filters={"transaction_date": yesterday},
-    )
+    # Batch sales lookup by the specific forecast SKUs to avoid a full table scan.
+    sku_ids_in_fc = list({k[0] for k in forecast_map})
+    _FC_BATCH = 50
+    actuals:     dict[tuple[str, str, str], float] = defaultdict(float)
+    actuals_all: dict[tuple[str, str], float]      = defaultdict(float)
+    for _i in range(0, max(1, len(sku_ids_in_fc)), _FC_BATCH):
+        _batch = sku_ids_in_fc[_i:_i + _FC_BATCH]
+        _rows = _paginate(
+            client, "sales_transactions",
+            "sku_id,location_id,transaction_date,qty_sold",
+            gte_filters={"transaction_date": window_start},
+            lte_filters={"transaction_date": yesterday},
+            in_filters={"sku_id": _batch},
+        )
+        for r in _rows:
+            d = str(r.get("transaction_date", ""))[:10]
+            actuals[(r["sku_id"], r["location_id"], d)] += float(r.get("qty_sold") or 0)
+            actuals_all[(r["sku_id"], d)]               += float(r.get("qty_sold") or 0)
 
-    # Build actuals lookup {(sku_id, location_id, date_str): qty}
-    actuals: dict[tuple[str, str, str], float] = defaultdict(float)
-    # And network-level {(sku_id, date_str): qty} for 'ALL' lightgbm forecasts
-    actuals_all: dict[tuple[str, str], float] = defaultdict(float)
-    for r in sales_rows:
-        d = str(r.get("transaction_date", ""))[:10]
-        actuals[(r["sku_id"], r["location_id"], d)] += float(r.get("qty_sold") or 0)
-        actuals_all[(r["sku_id"], d)] += float(r.get("qty_sold") or 0)
-
-    # Fetch abc_class lookup for all SKUs in forecast window
-    sku_ids_in_fc = {k[0] for k in forecast_map}
     sku_rows = _paginate(
         client, "sku_master",
         "sku_id,abc_class",
-        in_filters={"sku_id": list(sku_ids_in_fc)},
+        in_filters={"sku_id": sku_ids_in_fc},
     )
-    abc_map: dict[str, str] = {
-        r["sku_id"]: (r.get("abc_class") or "?") for r in sku_rows
-    }
+    abc_map: dict[str, str] = {r["sku_id"]: (r.get("abc_class") or "?") for r in sku_rows}
 
-    # Accumulate absolute percentage errors per (abc_class, model_type)
     ape_by_class: dict[tuple[str, str], list[float]] = defaultdict(list)
     for (sku_id, loc_id, model), date_qty in forecast_map.items():
         abc = abc_map.get(sku_id, "?")
@@ -702,6 +696,164 @@ def _alert_forecast_accuracy_drop(client: Any, today: date) -> list[dict]:
     return alerts
 
 
+def _alert_churn_risk(client: Any, today: date) -> list[dict]:
+    """CHURN_RISK — customers flagged AT_RISK / CHURNED / LOST.
+
+    Reads customer_churn_flags for any customer whose flag is in
+    CHURN_ACTIVE_FLAGS.  Deduplication (days_active increment) is handled by
+    the orchestrator using alert_key; this function always returns the full
+    current list regardless of whether the alert already exists.
+
+    financial_impact = baseline_monthly_spend × CHURN_QUARTER_MULTIPLIER
+    (one quarter of annualised revenue at risk).
+    """
+    rows = _paginate(
+        client, "customer_churn_flags",
+        "customer_id,location_id,flag,baseline_monthly_spend,last_purchase_date",
+        in_filters={"flag": list(CHURN_ACTIVE_FLAGS)},
+    )
+
+    alerts: list[dict] = []
+    for r in rows:
+        cid      = r.get("customer_id") or ""
+        loc      = r.get("location_id") or ""
+        flag     = r.get("flag") or ""
+        baseline = float(r.get("baseline_monthly_spend") or 0)
+        impact   = round(baseline * CHURN_QUARTER_MULTIPLIER, 2)
+        last_dt  = r.get("last_purchase_date") or "unknown"
+
+        if not cid or not loc:
+            continue
+
+        alerts.append(_make_alert(
+            alert_date=today,
+            alert_type="CHURN_RISK",
+            severity="warning",
+            customer_id=cid,
+            location_id=loc,
+            message=(
+                f"Customer {cid} at {loc} is flagged {flag}.  "
+                f"Baseline monthly spend: ${baseline:,.0f}.  "
+                f"Last purchase: {last_dt}.  "
+                f"Quarterly revenue at risk: ${impact:,.0f}.  "
+                f"Assign rep follow-up immediately."
+            ),
+            alert_key=f"CHURN_RISK|{cid}|{loc}",
+            financial_impact=impact,
+        ))
+    return alerts
+
+
+def _alert_opsl_gap(client: Any, today: date) -> list[dict]:
+    """OPSL_GAP — HIGH OPSL flag not yet added to the reorder queue.
+
+    Reads opsl_flags for flag='HIGH' AND in_reorder_queue=FALSE.  Each row
+    represents a SKU+location that is regularly sourced outside (costing margin)
+    but has no reorder recommendation yet.
+
+    financial_impact = estimated_margin_recovery (pre-computed by the OPSL engine).
+    """
+    rows = _paginate(
+        client, "opsl_flags",
+        "prod_line_pn,location_id,opsl_count,estimated_margin_recovery,last_opsl_date",
+        filters={"flag": "HIGH"},
+        eq_bool={"in_reorder_queue": False},
+    )
+
+    alerts: list[dict] = []
+    for r in rows:
+        pn       = r.get("prod_line_pn") or ""
+        loc      = r.get("location_id") or ""
+        count    = int(r.get("opsl_count") or 0)
+        recovery = float(r.get("estimated_margin_recovery") or 0)
+        last_dt  = r.get("last_opsl_date") or "unknown"
+
+        if not pn or not loc:
+            continue
+
+        alerts.append(_make_alert(
+            alert_date=today,
+            alert_type="OPSL_GAP",
+            severity="info",
+            sku_id=pn,
+            location_id=loc,
+            message=(
+                f"{pn} at {loc} has {count} outside-purchase (OPSL) events "
+                f"(last: {last_dt}) and is not in the reorder queue.  "
+                f"Estimated margin recovery if stocked locally: ${recovery:,.0f}.  "
+                f"Add to reorder queue to recover margin."
+            ),
+            alert_key=f"OPSL_GAP|{pn}|{loc}",
+            financial_impact=round(recovery, 2),
+        ))
+    return alerts
+
+
+# ---------------------------------------------------------------------------
+# Auto-resolve
+# ---------------------------------------------------------------------------
+
+def _auto_resolve(
+    client: Any,
+    today: date,
+    current_keys_by_type: dict[str, set[str]],
+    dry_run: bool = False,
+) -> int:
+    """Mark open alerts resolved when their underlying condition no longer holds.
+
+    Resolution rule (same for all resolvable types): if an open alert's
+    alert_key is NOT present in today's newly-generated alerts for the same
+    alert_type, the condition is no longer detected → resolve it.
+
+    Resolvable types: CRITICAL_STOCKOUT, LOW_SUPPLY, CHURN_RISK, OPSL_GAP.
+    Types not in this set (FREEZE_ALERT, DEAD_STOCK, etc.) require manual
+    acknowledgement and are never auto-resolved.
+
+    Args:
+        current_keys_by_type: {alert_type: set of alert_keys} from today's run.
+        dry_run: When True, count candidates but do not write.
+
+    Returns:
+        Number of alerts resolved (or that would be resolved in dry-run).
+    """
+    cutoff = (today - timedelta(days=DEDUP_LOOKBACK_DAYS)).isoformat()
+    try:
+        open_rows = _paginate(
+            client, "alerts",
+            "id,alert_type,alert_key",
+            gte_filters={"alert_date": cutoff},
+            in_filters={"alert_type": list(_AUTO_RESOLVE_TYPES)},
+            eq_bool={"resolved": False},
+        )
+    except Exception as exc:
+        log.warning(
+            "auto-resolve fetch failed (%s) — skipping. "
+            "Run migration 047 if resolved column is missing.",
+            exc.__class__.__name__,
+        )
+        return 0
+
+    to_resolve: list[int] = [
+        r["id"]
+        for r in open_rows
+        if r["alert_key"] not in current_keys_by_type.get(r.get("alert_type", ""), set())
+    ]
+
+    if to_resolve and not dry_run:
+        payload = {"resolved": True, "resolved_date": today.isoformat()}
+        for i in range(0, len(to_resolve), 200):
+            batch = to_resolve[i:i + 200]
+            try:
+                client.table("alerts").update(payload).in_("id", batch).execute()
+            except Exception as exc:
+                log.warning(
+                    "auto-resolve UPDATE failed for batch of %d ids: %s",
+                    len(batch), exc.__class__.__name__,
+                )
+
+    return len(to_resolve)
+
+
 # ---------------------------------------------------------------------------
 # Orchestrator
 # ---------------------------------------------------------------------------
@@ -710,7 +862,7 @@ def run_alerts(dry_run: bool = False) -> int:
     """Execute all alert generators and write results to the alerts table.
 
     Args:
-        dry_run: When True, compute all alerts but skip the DB write.
+        dry_run: When True, compute and log all alerts but skip DB writes.
 
     Returns:
         Exit code: 0 on success, 1 on fatal error.
@@ -721,9 +873,9 @@ def run_alerts(dry_run: bool = False) -> int:
     log.info("partswatch-ai — engine.alerts")
     log.info(
         "  freeze_threshold=%.0f°F  low_supply=%.0fd  dead_stock=%dd  "
-        "mape_threshold=%.0f%%",
+        "mape_threshold=%.0f%%  dedup_window=%dd",
         FREEZE_TEMP_THRESHOLD_F, LOW_SUPPLY_DAYS,
-        DEAD_STOCK_DAYS, MAPE_THRESHOLD_PCT,
+        DEAD_STOCK_DAYS, MAPE_THRESHOLD_PCT, DEDUP_LOOKBACK_DAYS,
     )
     log.info(banner)
 
@@ -740,14 +892,37 @@ def run_alerts(dry_run: bool = False) -> int:
     log.info("Alert date: %s", today.isoformat())
     log.info("-" * 60)
 
+    # ------------------------------------------------------------------
+    # Pre-fetch shared data
+    # ------------------------------------------------------------------
+    log.info("Pre-fetching unit costs …")
+    try:
+        unit_cost_map = _fetch_unit_cost_map(client)
+        log.info("  %d SKU unit costs loaded.", len(unit_cost_map))
+    except Exception:
+        log.warning("unit_cost fetch failed — financial_impact will be 0 for reorder/PO alerts.")
+        unit_cost_map = {}
+
+    log.info("Pre-fetching existing open alerts (last %d days) …", DEDUP_LOOKBACK_DAYS)
+    existing_open = _fetch_existing_open_alerts(client, today)
+    log.info("  %d open alert(s) eligible for dedup.", len(existing_open))
+
+    # ------------------------------------------------------------------
+    # Run generators
+    # ------------------------------------------------------------------
     generators = [
-        ("CRITICAL_STOCKOUT",      _alert_critical_stockout),
-        ("LOW_SUPPLY",             _alert_low_supply),
-        ("FREEZE_ALERT",           _alert_freeze),
-        ("SUPPLIER_RISK",          _alert_supplier_risk),
-        ("DEAD_STOCK",             _alert_dead_stock),
-        ("TRANSFER_OPPORTUNITY",   _alert_transfer_opportunity),
+        ("CRITICAL_STOCKOUT",
+         lambda c, t: _alert_critical_stockout(c, t, unit_cost_map)),
+        ("LOW_SUPPLY",
+         lambda c, t: _alert_low_supply(c, t, unit_cost_map)),
+        ("FREEZE_ALERT",        _alert_freeze),
+        ("SUPPLIER_RISK",
+         lambda c, t: _alert_supplier_risk(c, t, unit_cost_map)),
+        ("DEAD_STOCK",          _alert_dead_stock),
+        ("TRANSFER_OPPORTUNITY", _alert_transfer_opportunity),
         ("FORECAST_ACCURACY_DROP", _alert_forecast_accuracy_drop),
+        ("CHURN_RISK",          _alert_churn_risk),
+        ("OPSL_GAP",            _alert_opsl_gap),
     ]
 
     all_alerts: list[dict] = []
@@ -767,34 +942,109 @@ def run_alerts(dry_run: bool = False) -> int:
     log.info("Total alerts generated: %d", len(all_alerts))
 
     # ------------------------------------------------------------------
-    # Write to database
+    # Sort by severity tier then financial_impact descending
+    # ------------------------------------------------------------------
+    all_alerts.sort(key=lambda a: (
+        _SEV_RANK.get(a.get("severity", "info"), 2),
+        -(float(a.get("financial_impact") or 0)),
+    ))
+
+    # ------------------------------------------------------------------
+    # Dedup split: existing alert_key → UPDATE; new → INSERT
+    # ------------------------------------------------------------------
+    to_update: list[dict] = []   # {id, days_active, financial_impact, message, ...}
+    to_insert: list[dict] = []   # full alert dicts ready for upsert
+
+    today_iso = today.isoformat()
+    for alert in all_alerts:
+        key = alert["alert_key"]
+        if key in existing_open:
+            existing_row = existing_open[key]
+            if existing_row["alert_date"] == today_iso:
+                # Already written today (previous run) — skip entirely.
+                continue
+            if existing_row.get("resolved"):
+                # Most-recent prior row was resolved; treat as new occurrence.
+                alert["first_seen_date"] = today_iso
+                alert["days_active"]     = 1
+                to_insert.append(alert)
+                continue
+            to_update.append({
+                "id":               existing_row["id"],
+                "alert_date":       today_iso,
+                "days_active":      (existing_row.get("days_active") or 1) + 1,
+                "financial_impact": alert.get("financial_impact", 0.0),
+                "message":          alert["message"],
+                "severity":         alert["severity"],
+            })
+        else:
+            alert["first_seen_date"] = today_iso
+            alert["days_active"]     = 1
+            to_insert.append(alert)
+
+    log.info(
+        "  Dedup: %d will increment days_active on existing rows  |  "
+        "%d new rows to insert",
+        len(to_update), len(to_insert),
+    )
+
+    # ------------------------------------------------------------------
+    # Build current-keys lookup for auto-resolve
+    # ------------------------------------------------------------------
+    current_keys_by_type: dict[str, set[str]] = defaultdict(set)
+    for a in all_alerts:
+        current_keys_by_type[a["alert_type"]].add(a["alert_key"])
+
+    # ------------------------------------------------------------------
+    # Dry-run summary
+    # ------------------------------------------------------------------
+    if dry_run:
+        resolve_count = _auto_resolve(
+            client, today, dict(current_keys_by_type), dry_run=True,
+        )
+        log.info("-" * 60)
+        log.info("DRY RUN SUMMARY")
+        log.info("  Alerts generated:         %d", len(all_alerts))
+        log.info("  Would deduplicate:        %d  (days_active++)", len(to_update))
+        log.info("  Would insert (new):       %d", len(to_insert))
+        log.info("  Would auto-resolve:       %d", resolve_count)
+        log.info("  New CHURN_RISK alerts:    %d", counts.get("CHURN_RISK", 0))
+        log.info("  New OPSL_GAP alerts:      %d", counts.get("OPSL_GAP", 0))
+        if to_insert:
+            top_n = min(10, len(to_insert))
+            log.info("  Top %d new alerts by financial impact:", top_n)
+            for a in to_insert[:top_n]:
+                fi = float(a.get("financial_impact") or 0)
+                log.info(
+                    f"    {a['alert_type']:<22s}  {a['severity']:<8s}"
+                    f"  ${fi:>10,.0f}  {a['alert_key'][:60]}"
+                )
+        log.info("=" * 60)
+        elapsed = time.monotonic() - t0
+        log.info("Alert engine complete  (%.2fs)  — DRY RUN, no writes made.", elapsed)
+        return 0
+
+    # ------------------------------------------------------------------
+    # Live writes
     # ------------------------------------------------------------------
     rows_written = 0
 
-    if all_alerts and not dry_run:
-        total = len(all_alerts)
+    # --- 1. INSERT new alerts ---
+    if to_insert:
+        total = len(to_insert)
         log.info(
-            "Writing %d alert(s) to alerts table in batches of %d …",
+            "Writing %d new alert(s) in batches of %d …",
             total, WRITE_BATCH_SIZE,
         )
 
-        # One-shot location_name fallback: if the very first batch fails
-        # because the alerts table predates migration 016, strip the column
-        # from EVERY remaining row (not just the failing batch) so we don't
-        # repeatedly hit the same error on each subsequent batch.
         location_name_stripped = False
-        # Holder so retry paths can swap in a freshly-reconnected client.
-        client_holder: list = [client]
-        next_progress_at = WRITE_PROGRESS_INTERVAL
+        new_cols_stripped       = False
+        client_holder: list    = [client]
+        next_progress_at        = WRITE_PROGRESS_INTERVAL
 
         for offset in range(0, total, WRITE_BATCH_SIZE):
-            batch = all_alerts[offset:offset + WRITE_BATCH_SIZE]
+            batch = to_insert[offset:offset + WRITE_BATCH_SIZE]
 
-            # Manual attempt counter so the location_name schema fallback
-            # can retry the batch WITHOUT consuming a transient-retry slot.
-            # `for attempt in range(...)` would auto-increment every iteration
-            # — using a while loop with explicit ++ on transient failures only
-            # keeps the schema-fallback retry "free" as documented.
             attempt = 1
             while True:
                 try:
@@ -813,27 +1063,33 @@ def run_alerts(dry_run: bool = False) -> int:
                 except Exception as exc:
                     msg = str(exc)
 
-                    # ----------------------------------------------------------
-                    # Schema fallback — older alerts tables lack location_name.
-                    # Strip it from THIS batch and all remaining ones, then
-                    # retry the current batch immediately WITHOUT incrementing
-                    # `attempt` (this is a known schema mismatch, not a
-                    # transient failure, and shouldn't burn retry budget).
-                    # ----------------------------------------------------------
                     if "location_name" in msg and not location_name_stripped:
                         log.warning(
                             "location_name column missing — stripping from "
                             "all remaining alerts and retrying batch."
                         )
-                        for a in all_alerts:
+                        for a in to_insert:
                             a.pop("location_name", None)
                         location_name_stripped = True
-                        continue  # retry without bumping `attempt`
+                        continue
 
-                    # ----------------------------------------------------------
-                    # Transient timeout / dropped-connection — reconnect with
-                    # a fresh client and retry up to _WRITE_MAX_RETRIES times.
-                    # ----------------------------------------------------------
+                    # Strip new migration-047 columns if migration not yet applied
+                    new_col_names = (
+                        "financial_impact", "days_active", "first_seen_date",
+                        "resolved", "resolved_date", "customer_id",
+                    )
+                    if any(c in msg for c in new_col_names) and not new_cols_stripped:
+                        log.warning(
+                            "New column(s) from migration 047 missing — "
+                            "stripping and retrying.  Apply 047 to enable "
+                            "financial_impact, dedup, and auto-resolve."
+                        )
+                        for a in to_insert:
+                            for c in new_col_names:
+                                a.pop(c, None)
+                        new_cols_stripped = True
+                        continue
+
                     if _is_write_retryable(exc) and attempt < _WRITE_MAX_RETRIES:
                         log.warning(
                             "  alerts write retry %d/%d "
@@ -866,8 +1122,54 @@ def run_alerts(dry_run: bool = False) -> int:
             "  Rows inserted (new): %d  (existing acknowledged alerts preserved)",
             rows_written,
         )
-    elif dry_run:
-        rows_written = len(all_alerts)
+
+    # --- 2. UPDATE deduped alerts (days_active++) ---
+    # Group by new days_active so we can issue one UPDATE…WHERE id IN (…) per
+    # group instead of 96K individual row calls, which time out.
+    if to_update:
+        log.info("Updating %d deduped alert row(s) …", len(to_update))
+        by_days: dict[int, list[int]] = {}
+        for upd in to_update:
+            by_days.setdefault(upd["days_active"], []).append(upd["id"])
+
+        _UPD_BATCH = 200
+        update_ok   = 0
+        update_fail = 0
+        for new_days, row_ids in by_days.items():
+            for _i in range(0, len(row_ids), _UPD_BATCH):
+                batch_ids = row_ids[_i:_i + _UPD_BATCH]
+                try:
+                    client.table("alerts").update({
+                        "alert_date":  today.isoformat(),
+                        "days_active": new_days,
+                    }).in_("id", batch_ids).execute()
+                    update_ok += len(batch_ids)
+                except Exception as exc:
+                    err_str = str(exc)
+                    if "23505" in err_str:
+                        # today row already exists from a prior run —
+                        # alert data is correct, days_active not incremented.
+                        update_ok += len(batch_ids)
+                        log.debug(
+                            "Dedup batch skipped (today row exists, "
+                            "days_active=%d, batch=%d).",
+                            new_days, len(batch_ids),
+                        )
+                    else:
+                        update_fail += len(batch_ids)
+                        log.warning(
+                            "Dedup batch UPDATE failed "
+                            "(days_active=%d, batch=%d): %s — %s",
+                            new_days, len(batch_ids),
+                            exc.__class__.__name__, err_str[:200],
+                        )
+
+        log.info("  Dedup updates: %d succeeded, %d failed.", update_ok, update_fail)
+
+    # --- 3. Auto-resolve ---
+    log.info("Scanning for auto-resolvable alerts …")
+    resolved_count = _auto_resolve(client, today, dict(current_keys_by_type))
+    log.info("  Auto-resolved: %d alert(s).", resolved_count)
 
     # ------------------------------------------------------------------
     # Summary
@@ -878,9 +1180,9 @@ def run_alerts(dry_run: bool = False) -> int:
     for name, cnt in counts.items():
         log.info("  %-30s  %d", name, cnt)
     log.info("  %-30s  %d", "TOTAL", len(all_alerts))
-    log.info("  Rows written to DB:  %d%s",
-             rows_written,
-             "  (DRY RUN — no writes made)" if dry_run else "")
+    log.info("  %-30s  %d", "Deduped (days_active++)", len(to_update))
+    log.info("  %-30s  %d", "Inserted (new rows)", rows_written)
+    log.info("  %-30s  %d", "Auto-resolved", resolved_count)
     log.info("=" * 60)
     return 0
 

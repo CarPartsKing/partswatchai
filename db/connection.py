@@ -59,7 +59,7 @@ def get_new_client() -> Client:
     from config import SUPABASE_URL, SUPABASE_KEY
 
     get_client.cache_clear()
-    log.info("Building fresh Supabase client (cache cleared) → %s", SUPABASE_URL)
+    log.info("Building fresh Supabase client (cache cleared) -> %s", SUPABASE_URL)
     client = create_client(SUPABASE_URL, SUPABASE_KEY)
     return client
 

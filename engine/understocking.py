@@ -96,6 +96,28 @@ TOP_N_PER_LOCATION: int = 20
 TRANSFER_REC_LOOKBACK_DAYS: int = 30
 """Window for counting transfer-IN recommendations as confirmation signal."""
 
+# Network-level buying trigger
+NETWORK_THRESHOLD: int = 5
+"""Minimum number of locations simultaneously understocked to fire a DC bulk buy."""
+
+NETWORK_SHORT_PCT_MIN: float = 0.50
+"""A location counts toward the network threshold when short_pct exceeds this."""
+
+NETWORK_SAFETY_BUFFER: float = 1.50
+"""qty_to_order for the DC rec = sum(location shortfalls) × this multiplier."""
+
+DC_LOCATION_ID: str = "LOC-025"
+"""Reorder recommendation destination for network-triggered bulk purchases."""
+
+# GP fetch for financial_severity
+GP_TRAN_CODES: list[str] = ["SL", "SL-I"]
+GP_LOOKBACK_DAYS: int = 90   # same as LOOKBACK_DAYS, kept separate for clarity
+
+# v2 schema columns — stripped from inserts when migration 050 is not applied yet.
+_UNDERSTOCK_V2_COLS: frozenset[str] = frozenset(
+    {"financial_severity", "avg_gp_pct", "network_flag", "double_confirmed"}
+)
+
 # Same set as dashboard/server.py.EXCLUDED_DISPLAY_LOCATIONS plus
 # LOC-025 MAIN DC (warehouse, not a buyer-facing branch).
 EXCLUDED_LOCATIONS: list[str] = [
@@ -399,6 +421,162 @@ def _fetch_transfer_counts(
 
 
 # ---------------------------------------------------------------------------
+# Step 3a — avg GP per unit from sales_detail_transactions.
+# ---------------------------------------------------------------------------
+
+def _fetch_gp_per_unit(
+    client_holder: list, sku_ids: list[str], cutoff: date,
+) -> dict[str, float]:
+    """Return {sku_id: avg_gp_per_unit} using prod_line_pn as the sku_id proxy.
+
+    avg_gp_per_unit = sum(gross_profit) / sum(qty_ship) over the last
+    GP_LOOKBACK_DAYS days, tran_code IN GP_TRAN_CODES, per prod_line_pn.
+    Returns 0.0 for any sku_id with no matching sales detail rows.
+    """
+    gp_sum:  dict[str, float] = defaultdict(float)
+    qty_sum: dict[str, float] = defaultdict(float)
+
+    for i in range(0, max(len(sku_ids), 1), SKU_LOOKUP_CHUNK):
+        chunk = sku_ids[i : i + SKU_LOOKUP_CHUNK]
+        for attempt in range(1, _MAX_RETRIES + 1):
+            try:
+                rows = (
+                    client_holder[0]
+                    .table("sales_detail_transactions")
+                    .select("prod_line_pn,gross_profit,qty_ship")
+                    .in_("prod_line_pn", chunk)
+                    .in_("tran_code", GP_TRAN_CODES)
+                    .gte("tran_date", cutoff.isoformat())
+                    .execute().data or []
+                )
+                break
+            except Exception as exc:
+                if _is_retryable(exc) and attempt < _MAX_RETRIES:
+                    time.sleep(_RETRY_DELAY)
+                    client_holder[0] = _fresh_client()
+                    continue
+                raise
+        for r in rows:
+            pn = r.get("prod_line_pn") or ""
+            if not pn:
+                continue
+            gp_sum[pn]  += float(r.get("gross_profit") or 0)
+            qty_sum[pn] += float(r.get("qty_ship") or 0)
+
+    return {
+        pn: (gp_sum[pn] / qty_sum[pn]) if qty_sum.get(pn, 0) > 0 else 0.0
+        for pn in gp_sum
+    }
+
+
+# ---------------------------------------------------------------------------
+# Step 4a — OPSL flags cross-reference.
+# ---------------------------------------------------------------------------
+
+def _fetch_opsl_flags(client_holder: list) -> set[tuple[str, str]]:
+    """Return {(prod_line_pn, location_id)} for HIGH and MEDIUM OPSL flags."""
+    out: set[tuple[str, str]] = set()
+    offset = 0
+    while True:
+        for attempt in range(1, _MAX_RETRIES + 1):
+            try:
+                rows = (
+                    client_holder[0]
+                    .table("opsl_flags")
+                    .select("prod_line_pn,location_id")
+                    .in_("flag", ["HIGH", "MEDIUM"])
+                    .range(offset, offset + PAGE_SIZE - 1)
+                    .execute().data or []
+                )
+                break
+            except Exception as exc:
+                if _is_retryable(exc) and attempt < _MAX_RETRIES:
+                    time.sleep(_RETRY_DELAY)
+                    client_holder[0] = _fresh_client()
+                    continue
+                raise
+        for r in rows:
+            pn  = r.get("prod_line_pn") or ""
+            loc = r.get("location_id") or ""
+            if pn and loc:
+                out.add((pn, loc))
+        if len(rows) < PAGE_SIZE:
+            break
+        offset += PAGE_SIZE
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Network trigger — write DC bulk-purchase recs to reorder_recommendations.
+# ---------------------------------------------------------------------------
+
+def _write_network_recs(
+    client_holder: list, today: date, triggers: list[dict],
+) -> int:
+    """Upsert one DC bulk-purchase rec per triggered SKU.  Returns count written."""
+    if not triggers:
+        return 0
+
+    recs = [
+        {
+            "sku_id":              t["sku_id"],
+            "location_id":         DC_LOCATION_ID,
+            "recommendation_date": today.isoformat(),
+            "qty_to_order":        round(t["qty_to_order"], 2),
+            "recommendation_type": "po",
+            "urgency":             "critical",
+            "forecast_model_used": "NETWORK_UNDERSTOCK",   # VARCHAR(20) — 18 chars, fits
+            "source":              "NETWORK_UNDERSTOCK",   # VARCHAR(20) until 050 widened to 50
+            "notes":               t["notes"][:2000],
+            "is_approved":         False,
+        }
+        for t in triggers
+    ]
+
+    _v2_stripped = False
+    written = 0
+    for i in range(0, len(recs), WRITE_BATCH_SIZE):
+        batch = recs[i : i + WRITE_BATCH_SIZE]
+        for attempt in range(1, _MAX_RETRIES + 1):
+            try:
+                client_holder[0].table("reorder_recommendations").upsert(
+                    batch,
+                    on_conflict="sku_id,location_id,recommendation_date",
+                ).execute()
+                written += len(batch)
+                break
+            except Exception as exc:
+                err = str(exc)
+                if "23505" in err:
+                    # Today's rec already exists — approval state preserved, count as ok.
+                    written += len(batch)
+                    break
+                if not _v2_stripped and (
+                    "source" in err or "notes" in err or "column" in err.lower()
+                ):
+                    _v2_stripped = True
+                    log.warning(
+                        "  network_recs: source/notes columns absent "
+                        "(migration 050 not applied) — retrying without them."
+                    )
+                    for row in batch:
+                        row.pop("source", None)
+                        row.pop("notes", None)
+                    # retry this batch without v2 cols (attempt loop continues)
+                    continue
+                if _is_retryable(exc) and attempt < _MAX_RETRIES:
+                    time.sleep(_RETRY_DELAY)
+                    client_holder[0] = _fresh_client()
+                    continue
+                log.error(
+                    "  network_recs write failed (batch %d): %s — %s",
+                    i, exc.__class__.__name__, err[:200],
+                )
+                break
+    return written
+
+
+# ---------------------------------------------------------------------------
 # Step 7 — write today's rows (idempotent: delete-then-insert).
 # ---------------------------------------------------------------------------
 
@@ -490,19 +668,21 @@ def run_understocking(dry_run: bool = False) -> int:
     t0 = time.monotonic()
     today = date.today()
     cutoff = today - timedelta(days=LOOKBACK_DAYS)
+    gp_cutoff = today - timedelta(days=GP_LOOKBACK_DAYS)
     transfer_since = today - timedelta(days=TRANSFER_REC_LOOKBACK_DAYS)
 
-    log.info("=" * 60)
-    log.info("CHRONIC UNDERSTOCKING REPORT  (target lookback %d days, "
-             "threshold %.0f%%, top %d per location)%s",
+    log.info("=" * 64)
+    log.info("CHRONIC UNDERSTOCKING REPORT  (lookback %d days, "
+             "threshold %.0f%%, top %d/loc, network >=%d locs)%s",
              LOOKBACK_DAYS, STOCKOUT_PCT_THRESHOLD * 100,
-             TOP_N_PER_LOCATION, "  [DRY RUN]" if dry_run else "")
-    log.info("=" * 60)
+             TOP_N_PER_LOCATION, NETWORK_THRESHOLD,
+             "  [DRY RUN]" if dry_run else "")
+    log.info("=" * 64)
 
     client_holder: list = [_fresh_client()]
 
     # ---------- Step 1: snapshot accumulation ----------
-    log.info("Step 1 — SKU-batched inventory_snapshots fetch since %s …", cutoff)
+    log.info("Step 1 — SKU-batched inventory_snapshots fetch since %s ...", cutoff)
     try:
         stats = _accumulate_snapshot_stats(client_holder, cutoff)
     except Exception:
@@ -534,22 +714,44 @@ def run_understocking(dry_run: bool = False) -> int:
     if not chronic:
         log.warning("No chronic-understocking SKUs found.")
         if not dry_run:
-            # Still clear today's stale rows for idempotency.
             _write_today(client_holder, today, [])
         return 0
 
     # ---------- Step 3: sku_master enrichment ----------
     sku_ids = sorted({k[0] for k, _, _ in chronic})
-    log.info("Step 3 — fetching sku_master for %d SKUs (chunks of %d) …",
+    log.info("Step 3 — fetching sku_master for %d SKUs (chunks of %d) ...",
              len(sku_ids), SKU_LOOKUP_CHUNK)
     sku_master = _fetch_sku_master(client_holder, sku_ids)
     log.info("  resolved %d/%d SKUs from sku_master", len(sku_master), len(sku_ids))
 
+    # ---------- Step 3a: avg GP per unit from sales_detail_transactions ----------
+    log.info("Step 3a — fetching avg GP/unit from sales_detail_transactions "
+             "since %s (%d SKUs) ...", gp_cutoff, len(sku_ids))
+    try:
+        gp_map = _fetch_gp_per_unit(client_holder, sku_ids, gp_cutoff)
+    except Exception:
+        log.warning("  avg GP fetch failed — financial_severity will be 0 for all rows.",
+                    exc_info=True)
+        gp_map = {}
+    gp_hits = sum(1 for v in gp_map.values() if v > 0)
+    log.info("  avg GP/unit: %d SKUs with positive GP (of %d fetched)",
+             gp_hits, len(gp_map))
+
     # ---------- Step 4: transfer-rec confirmation counts ----------
-    log.info("Step 4 — fetching transfer recommendations since %s …", transfer_since)
+    log.info("Step 4 — fetching transfer recommendations since %s ...", transfer_since)
     transfer_counts = _fetch_transfer_counts(client_holder, transfer_since)
     log.info("  %d (location, sku) pairs have transfer recs in last %dd",
              len(transfer_counts), TRANSFER_REC_LOOKBACK_DAYS)
+
+    # ---------- Step 4a: OPSL cross-reference ----------
+    log.info("Step 4a — fetching OPSL flags (HIGH + MEDIUM) ...")
+    try:
+        opsl_set = _fetch_opsl_flags(client_holder)
+    except Exception:
+        log.warning("  OPSL fetch failed — double_confirmed will be FALSE for all rows.",
+                    exc_info=True)
+        opsl_set = set()
+    log.info("  OPSL HIGH/MEDIUM flags: %d (sku, location) pairs", len(opsl_set))
 
     # ---------- Step 5: compute metrics ----------
     enriched: list[dict] = []
@@ -557,11 +759,9 @@ def run_understocking(dry_run: bool = False) -> int:
         sm = sku_master.get(sku_id) or {}
         avg_weekly = float(sm.get("avg_weekly_units") or 0.0)
         if avg_weekly <= 0:
-            # No demand signal → priority would be 0 → skip.
             continue
         avg_daily = avg_weekly / 7.0
 
-        # unit_cost: prefer snapshot's latest non-null, fallback to sku_master.
         unit_cost = s.latest_unit_cost
         if unit_cost is None:
             uc = sm.get("unit_cost")
@@ -569,11 +769,18 @@ def run_understocking(dry_run: bool = False) -> int:
         if unit_cost <= 0:
             continue
 
-        suggested_min = avg_daily * LEAD_BUFFER_DAYS
-        value_at_risk = avg_daily * unit_cost * LEAD_BUFFER_DAYS
-        priority      = pct * avg_daily * unit_cost
+        suggested_min      = avg_daily * LEAD_BUFFER_DAYS
+        value_at_risk      = avg_daily * unit_cost * LEAD_BUFFER_DAYS
+        priority           = pct * avg_daily * unit_cost
         if priority <= 0:
             continue
+
+        # GP-weighted severity (improvement 1)
+        gp_per_unit        = gp_map.get(sku_id, 0.0)
+        fin_severity       = round(pct * gp_per_unit * avg_daily, 2)
+
+        # OPSL cross-reference (improvement 3) — use sku_id as prod_line_pn proxy
+        is_double          = (sku_id, location_id) in opsl_set
 
         enriched.append({
             "report_date":                today.isoformat(),
@@ -592,62 +799,163 @@ def run_understocking(dry_run: bool = False) -> int:
             "inventory_value_at_risk":    round(value_at_risk, 2),
             "transfer_recommended_count": transfer_counts.get((location_id, sku_id), 0),
             "priority_score":             round(priority, 4),
+            # v2 columns
+            "financial_severity":         fin_severity,
+            "avg_gp_pct":                 round(min(gp_per_unit, 99.9999), 4),
+            "network_flag":               False,   # set below after trigger detection
+            "double_confirmed":           is_double,
         })
 
     log.info("Step 5 — enriched rows with positive priority: %d", len(enriched))
+    log.info("  double_confirmed (understocked + OPSL HIGH/MED): %d",
+             sum(1 for r in enriched if r["double_confirmed"]))
 
-    # ---------- Step 6: top N per location ----------
+    # ---------- Step 6a: network-level trigger detection (improvement 2) ----------
+    log.info("Step 6a — network trigger detection "
+             "(>=%d locs, short_pct > %.0f%%) ...",
+             NETWORK_THRESHOLD, NETWORK_SHORT_PCT_MIN * 100)
+
+    # Group all chronic rows (not just top-N) by sku_id where short_pct is severe
+    sku_severe: dict[str, list[dict]] = defaultdict(list)
+    for r in enriched:
+        if r["stockout_days_pct"] > NETWORK_SHORT_PCT_MIN:
+            sku_severe[r["sku_id"]].append(r)
+
+    network_triggers: list[dict] = []
+    network_sku_ids:  set[str]   = set()
+
+    for sku_id, rows_for_sku in sku_severe.items():
+        if len(rows_for_sku) < NETWORK_THRESHOLD:
+            continue
+        total_shortfall = sum(r["min_qty_gap"] for r in rows_for_sku)
+        qty_to_order    = max(total_shortfall * NETWORK_SAFETY_BUFFER, 1.0)
+        affected_parts  = sorted(rows_for_sku,
+                                 key=lambda x: x["stockout_days_pct"], reverse=True)
+        affected_str    = ", ".join(
+            f"{r['location_id']} ({r['stockout_days_pct'] * 100:.0f}%)"
+            for r in affected_parts
+        )
+        notes = f"Network understocking trigger: {affected_str}"
+        network_triggers.append({
+            "sku_id":        sku_id,
+            "qty_to_order":  round(qty_to_order, 2),
+            "notes":         notes,
+        })
+        network_sku_ids.add(sku_id)
+        log.info(
+            "  NETWORK TRIGGER: %-20s  %d locs  qty=%.0f  [%s]",
+            sku_id, len(rows_for_sku), qty_to_order, affected_str[:100],
+        )
+
+    # Mark network_flag on all enriched rows for triggered SKUs
+    for r in enriched:
+        if r["sku_id"] in network_sku_ids:
+            r["network_flag"] = True
+
+    log.info("  Network triggers: %d SKUs", len(network_triggers))
+
+    # ---------- Step 6: top N per location — sort double_confirmed first, ----------
+    #            then financial_severity (improvements 1 & 3 combined sort)
     by_loc: dict[str, list[dict]] = defaultdict(list)
     for r in enriched:
         by_loc[r["location_id"]].append(r)
 
     final: list[dict] = []
     for loc, items in by_loc.items():
-        items.sort(key=lambda r: r["priority_score"], reverse=True)
+        items.sort(
+            key=lambda r: (r["double_confirmed"], r["financial_severity"]),
+            reverse=True,
+        )
         final.extend(items[:TOP_N_PER_LOCATION])
 
-    # Per-location summary log
-    log.info("-" * 60)
-    log.info("Per-location summary (sorted by total value at risk):")
-    loc_value: dict[str, float] = defaultdict(float)
+    # ---------- Dry-run summary ----------
+    if dry_run:
+        log.info("-" * 64)
+        log.info("DRY RUN SUMMARY")
+        log.info("  Rows that would be persisted:   %d", len(final))
+        log.info("  Network triggers:               %d SKUs", len(network_triggers))
+        if network_triggers:
+            for t in network_triggers:
+                log.info("    %s — qty=%.0f", t["sku_id"], t["qty_to_order"])
+        log.info("  Double-confirmed (understock+OPSL): %d",
+                 sum(1 for r in final if r["double_confirmed"]))
+        log.info("  Top 10 by financial_severity:")
+        top10 = sorted(final, key=lambda r: r["financial_severity"], reverse=True)[:10]
+        for r in top10:
+            log.info(
+                "    %-20s  %-10s  sev=$%8.2f  gp/unit=$%6.2f  "
+                "short=%.0f%%  dc=%s  net=%s",
+                r["sku_id"], r["location_id"],
+                r["financial_severity"], r["avg_gp_pct"],
+                r["stockout_days_pct"] * 100,
+                "Y" if r["double_confirmed"] else "N",
+                "Y" if r["network_flag"] else "N",
+            )
+        log.info("-" * 64)
+        log.info("=" * 64)
+        log.info("Understocking report complete  (%.1fs)", time.monotonic() - t0)
+        log.info("=" * 64)
+        return 0
+
+    # Per-location summary (live run)
+    log.info("-" * 64)
+    log.info("Per-location summary (sorted by financial severity):")
+    loc_sev:   dict[str, float] = defaultdict(float)
     loc_count: dict[str, int]   = defaultdict(int)
     loc_top:   dict[str, dict]  = {}
     for r in final:
-        loc_value[r["location_id"]] += r["inventory_value_at_risk"]
+        loc_sev[r["location_id"]] += r["financial_severity"]
         loc_count[r["location_id"]] += 1
         if r["location_id"] not in loc_top \
-                or r["priority_score"] > loc_top[r["location_id"]]["priority_score"]:
+                or r["financial_severity"] > loc_top[r["location_id"]]["financial_severity"]:
             loc_top[r["location_id"]] = r
-    for loc, val in sorted(loc_value.items(), key=lambda kv: kv[1], reverse=True):
+    for loc, sev in sorted(loc_sev.items(), key=lambda kv: kv[1], reverse=True):
         top = loc_top[loc]
         log.info(
-            "  %-22s %s — %2d SKUs, $%10.0f at risk  "
-            "top: %s (%.0f%% short, min %.0f→%.0f)",
-            LOCATION_NAMES.get(loc, "?"), loc, loc_count[loc], val,
-            top["sku_id"], top["stockout_days_pct"] * 100,
-            top["current_min_qty"], top["suggested_min_qty"],
+            "  %-22s %s — %2d SKUs  sev=$%.0f  "
+            "top: %s (%.0f%% short, gp/unit=$%.2f)",
+            LOCATION_NAMES.get(loc, "?"), loc, loc_count[loc], sev,
+            top["sku_id"], top["stockout_days_pct"] * 100, top["avg_gp_pct"],
         )
-    log.info("-" * 60)
+    log.info("-" * 64)
 
-    # ---------- Step 7: persist (delete-then-insert for idempotency) ----------
-    if dry_run:
-        log.info("DRY RUN — skipping write.  %d rows would be persisted.",
-                 len(final))
-        log.info("=" * 60)
-        log.info("Understocking report complete  (%.1fs)  rows=%d",
-                 time.monotonic() - t0, len(final))
-        log.info("=" * 60)
-        return 0
-
+    # ---------- Step 7: persist (delete-then-insert, v2 schema fallback) ----------
     log.info("Step 7 — clearing today's existing rows then writing %d "
-             "new rows (batches of %d, run_completed_at=NULL) …",
-             len(final), WRITE_BATCH_SIZE)
+             "new rows (batches of %d) ...", len(final), WRITE_BATCH_SIZE)
     try:
         written = _write_today(client_holder, today, final)
-    except Exception:
-        log.exception("Persist failed.")
-        return 1
+    except Exception as exc:
+        err = str(exc)
+        v2_keywords = list(_UNDERSTOCK_V2_COLS) + ["column"]
+        if any(kw in err.lower() for kw in [k.lower() for k in v2_keywords]):
+            log.warning(
+                "  v2 columns absent (migration 050 not applied) — "
+                "retrying without them."
+            )
+            stripped = [
+                {k: v for k, v in r.items() if k not in _UNDERSTOCK_V2_COLS}
+                for r in final
+            ]
+            try:
+                written = _write_today(client_holder, today, stripped)
+            except Exception:
+                log.exception("Persist failed even after stripping v2 columns.")
+                return 1
+        else:
+            log.exception("Persist failed.")
+            return 1
     log.info("  wrote %d rows.", written)
+
+    # ---------- Step 7b: write network-trigger DC recs ----------
+    if network_triggers:
+        log.info("Step 7b — writing %d network DC bulk-purchase recs ...",
+                 len(network_triggers))
+        try:
+            net_written = _write_network_recs(client_holder, today, network_triggers)
+            log.info("  wrote %d network recs to reorder_recommendations.", net_written)
+        except Exception:
+            log.warning("  network rec write failed — understocking report still published.",
+                        exc_info=True)
 
     # ---------- Step 8: post-write integrity check ----------
     try:
@@ -667,20 +975,13 @@ def run_understocking(dry_run: bool = False) -> int:
     if persisted != len(final):
         log.error(
             "Post-write integrity check FAILED: built=%d persisted=%d "
-            "(report_date=%s).  Possible stale-row leak or write loss. "
-            "Run NOT marked complete — dashboard will continue showing "
-            "the previous run.",
+            "(report_date=%s).  Run NOT marked complete.",
             len(final), persisted, today,
         )
         return 1
 
-    log.info("Post-write integrity OK: %d rows in table for %s.",
-             persisted, today)
+    log.info("Post-write integrity OK: %d rows in table for %s.", persisted, today)
 
-    # ---------- Publish: stamp run_completed_at = NOW() ----------
-    # Only after the integrity check passes.  Until this update runs,
-    # dashboard reads filter run_completed_at IS NOT NULL and continue
-    # to show the most-recent previously-completed report.
     try:
         _mark_run_complete(client_holder, today)
         log.info("Run marked complete — dashboard will now show this report.")
@@ -690,10 +991,14 @@ def run_understocking(dry_run: bool = False) -> int:
             "but invisible to the dashboard until next successful run."
         )
         return 1
-    log.info("=" * 60)
-    log.info("Understocking report complete  (%.1fs)",
-             time.monotonic() - t0)
-    log.info("=" * 60)
+
+    log.info("=" * 64)
+    log.info("Understocking report complete  (%.1fs)", time.monotonic() - t0)
+    log.info("  Rows persisted:          %d", written)
+    log.info("  Network DC recs:         %d", len(network_triggers))
+    log.info("  Double-confirmed:        %d",
+             sum(1 for r in final if r["double_confirmed"]))
+    log.info("=" * 64)
     return 0
 
 

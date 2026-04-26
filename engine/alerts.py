@@ -114,7 +114,8 @@ FREEZE_SENSITIVE_SUBCATEGORIES: frozenset[str] = frozenset({
 })
 
 # DEAD_STOCK
-DEAD_STOCK_DAYS: int = 180
+DEAD_STOCK_DAYS:    int   = 180
+MIN_ALERT_VALUE:    float = 500.0   # min total_inv_value ($) to emit a DEAD_STOCK alert
 
 # FORECAST_ACCURACY_DROP
 MAPE_THRESHOLD_PCT: float = 25.0
@@ -522,25 +523,102 @@ def _alert_supplier_risk(
 
 
 def _alert_dead_stock(client: Any, today: date) -> list[dict]:
-    """DEAD_STOCK — SKUs with is_dead_stock = TRUE, no sale in DEAD_STOCK_DAYS."""
+    """DEAD_STOCK — items in dead_stock_recommendations with total_inv_value >= MIN_ALERT_VALUE.
+
+    Primary path: query dead_stock_recommendations for the latest report, aggregate
+    total_inv_value per SKU across locations, filter by MIN_ALERT_VALUE, exclude
+    data_conflict items.  financial_impact is set to the per-SKU total so alerts
+    rank by capital at stake.
+
+    Fallback (if no recommendations exist): uses sku_master.is_dead_stock with no
+    value filter, same as the pre-v2 behaviour.
+    """
+    alerts: list[dict] = []
+
+    # ── Primary path: dead_stock_recommendations ──────────────────────
+    try:
+        latest = (
+            client.table("dead_stock_recommendations")
+            .select("report_date")
+            .order("report_date", desc=True)
+            .limit(1)
+            .execute()
+        )
+        if latest.data:
+            report_date = latest.data[0]["report_date"]
+            rec_rows = _paginate(
+                client, "dead_stock_recommendations",
+                "sku_id,total_inv_value,days_since_sale,classification,data_conflict",
+                filters={"report_date": report_date},
+            )
+
+            # Aggregate by sku_id: sum value across locations, min days_since_sale
+            by_sku: dict[str, dict] = {}
+            for r in rec_rows:
+                sid = r.get("sku_id")
+                if not sid:
+                    continue
+                # data_conflict column may not exist yet (pre-migration 048)
+                if r.get("data_conflict") is True:
+                    continue
+                val = float(r.get("total_inv_value") or 0)
+                if sid not in by_sku:
+                    by_sku[sid] = {"total_inv_value": 0.0, "days_since_sale": None,
+                                   "classification": r.get("classification")}
+                by_sku[sid]["total_inv_value"] += val
+                d = r.get("days_since_sale")
+                if d is not None:
+                    prev = by_sku[sid]["days_since_sale"]
+                    by_sku[sid]["days_since_sale"] = d if prev is None else max(prev, d)
+
+            for sku_id, agg in by_sku.items():
+                total_val = agg["total_inv_value"]
+                if total_val < MIN_ALERT_VALUE:
+                    continue
+                days = agg.get("days_since_sale")
+                days_str = f"{days} days idle" if days is not None else "idle"
+                alerts.append(_make_alert(
+                    alert_date=today,
+                    alert_type="DEAD_STOCK",
+                    severity="info",
+                    sku_id=sku_id,
+                    message=(
+                        f"{sku_id} dead stock: ${total_val:,.0f} tied up, {days_str}.  "
+                        f"Consider liquidation, transfer, or de-listing."
+                    ),
+                    alert_key=f"DEAD_STOCK|{sku_id}",
+                    financial_impact=total_val,
+                ))
+            if alerts:
+                return alerts
+            # If recommendations exist but all filtered out, fall through to log
+            if rec_rows:
+                log.info(
+                    "DEAD_STOCK: %d recommendation row(s) found but all below "
+                    "$%.0f threshold or flagged data_conflict — no alerts.",
+                    len(rec_rows), MIN_ALERT_VALUE,
+                )
+                return []
+    except Exception as exc:
+        log.warning(
+            "dead_stock_recommendations query failed (%s) — "
+            "falling back to sku_master.is_dead_stock.",
+            exc.__class__.__name__,
+        )
+
+    # ── Fallback: sku_master.is_dead_stock (no value filter) ─────────
     sku_rows = _paginate(
         client, "sku_master",
         "sku_id,part_category,sub_category,last_sale_date,is_dead_stock",
         eq_bool={"is_dead_stock": True},
     )
-
     dead_cutoff = (today - timedelta(days=DEAD_STOCK_DAYS)).isoformat()
-    alerts: list[dict] = []
     for r in sku_rows:
         last_sale = r.get("last_sale_date")
         if last_sale and last_sale >= dead_cutoff:
             continue
-
         sku_id   = r["sku_id"]
-        days_ago = (
-            (today - date.fromisoformat(last_sale)).days
-            if last_sale else None
-        )
+        days_ago = (today - date.fromisoformat(last_sale)).days if last_sale else None
         days_str = f"{days_ago} days ago" if days_ago is not None else "never sold"
         alerts.append(_make_alert(
             alert_date=today,

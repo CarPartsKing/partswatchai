@@ -59,6 +59,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
 import time
 from collections import defaultdict
@@ -83,16 +84,25 @@ console = Console()
 # ---------------------------------------------------------------------------
 
 LOOKBACK_DAYS:          int   = 365    # window for sale_frequency count
-LIQUIDATE_DAYS:         int   = 180    # days without sale → LIQUIDATE candidate
-MARKDOWN_DAYS:          int   = 90     # days without sale → MARKDOWN
-MONITOR_DAYS:           int   = 60     # days without sale → MONITOR
+LIQUIDATE_DAYS:         int   = 180    # kept for backward-compat; scoring uses urgency_score
+MARKDOWN_DAYS:          int   = 90     # kept for backward-compat
+MONITOR_DAYS:           int   = 60     # days_since_sale below this → HEALTHY regardless of score
 
 LOW_FREQ_THRESHOLD:     int   = 2      # ≤ this many sales/year = low frequency
 HIGH_FREQ_OVERRIDE:     int   = 12     # ≥ this many sales/year = always HEALTHY
-LIQUIDATE_MIN_VALUE:    float = 50.0   # minimum inv value ($) to flag LIQUIDATE
+LIQUIDATE_MIN_VALUE:    float = 50.0   # minimum inv value ($) to flag LIQUIDATE (legacy)
 WRITE_OFF_THRESHOLD:    float = 25.0   # below this ($) with no vendor → write off
 HIGH_VELOCITY_UNITS:    float = 1.0    # avg_weekly_units above which → markdown
 DEFAULT_UNIT_COST:      float = 10.0   # fallback when no PO cost found
+
+# Urgency-score thresholds (v2 scoring)
+# urgency_score = (days_since_sale / 365) × log10(total_inv_value + 1)
+URGENCY_SCORE_LIQUIDATE: float = 2.0   # score ≥ this → LIQUIDATE
+URGENCY_SCORE_MARKDOWN:  float = 1.0   # score ≥ this → MARKDOWN; below → MONITOR
+
+# Alert and conflict thresholds
+MIN_ALERT_VALUE:         float = 500.0  # min total_inv_value ($) to emit DEAD_STOCK alert
+SALES_DETAIL_LOOKBACK:   int   = 365    # days window for data_conflict check
 
 PAGE_SIZE: int = 1_000
 
@@ -214,6 +224,7 @@ class ScoredPosition:
     classification:   str
     action:           str
     dead_stock_score: float
+    urgency_score:    float
     total_inv_value:  float
     qty_on_hand:      float
     unit_cost:        float
@@ -224,6 +235,10 @@ class ScoredPosition:
     supplier_id:      str | None
     part_category:    str
     sub_category:     str
+    # v2 enrichment fields (populated after initial scoring)
+    action_type:                 str       = ""
+    transfer_candidate_location: str|None  = None
+    data_conflict:               bool      = False
 
 
 # ---------------------------------------------------------------------------
@@ -612,39 +627,181 @@ def _fetch_location_sales(
 # Scoring and classification
 # ---------------------------------------------------------------------------
 
-def _classify(pos: InventoryPosition) -> tuple[str, str]:
-    """Return (classification, action) for one inventory position."""
-    days  = pos.days_since_sale
-    freq  = pos.sale_frequency
-    value = pos.total_inv_value
+def _urgency_score(pos: InventoryPosition) -> float:
+    """Combined value-age score: (days_idle/365) × log10(total_inv_value + 1).
 
-    # Fast movers are always healthy regardless of date gap
-    if freq >= HIGH_FREQ_OVERRIDE:
-        return CLASS_HEALTHY, ""
+    High days_idle × high dollar value → highest urgency regardless of the
+    arbitrary LIQUIDATE_DAYS threshold.  Items with low value or short idle
+    time score near zero.
+    """
+    return (pos.days_since_sale / 365.0) * math.log10(pos.total_inv_value + 1)
 
-    if days < MONITOR_DAYS:
-        return CLASS_HEALTHY, ""
 
-    if days < MARKDOWN_DAYS:
-        return CLASS_MONITOR, ""
+def _classify(pos: InventoryPosition) -> tuple[str, str, float]:
+    """Return (classification, action, urgency_score) for one inventory position.
 
-    if days < LIQUIDATE_DAYS:
-        return CLASS_MARKDOWN, ACTION_MARKDOWN
+    Classification is driven by the urgency_score formula rather than fixed
+    day-count thresholds.  Fast movers and recently-sold items remain HEALTHY.
 
-    # LIQUIDATE candidates — determine recommended action
-    # Low total value → write off immediately
-    if value < WRITE_OFF_THRESHOLD:
-        return CLASS_LIQUIDATE, ACTION_WRITEOFF
+    Thresholds:
+        urgency_score >= URGENCY_SCORE_LIQUIDATE  → LIQUIDATE
+        urgency_score >= URGENCY_SCORE_MARKDOWN   → MARKDOWN
+        urgency_score <  URGENCY_SCORE_MARKDOWN   → MONITOR
+        days_since_sale < MONITOR_DAYS            → HEALTHY (overrides score)
+        sale_frequency  >= HIGH_FREQ_OVERRIDE     → HEALTHY (overrides score)
+    """
+    # Fast movers are always healthy regardless of idle gap
+    if pos.sale_frequency >= HIGH_FREQ_OVERRIDE:
+        return CLASS_HEALTHY, "", 0.0
 
-    # Supplier exists → return to vendor first choice
-    if pos.supplier_id:
-        return CLASS_LIQUIDATE, ACTION_RETURN
+    # Items sold recently are always healthy
+    if pos.days_since_sale < MONITOR_DAYS:
+        return CLASS_HEALTHY, "", 0.0
 
-    # High velocity SKU (was fast before, now slow) → markdown
-    if pos.avg_weekly_units >= HIGH_VELOCITY_UNITS or pos.abc_class in ("A", "B"):
-        return CLASS_LIQUIDATE, ACTION_MARKDOWN
+    score = _urgency_score(pos)
 
-    return CLASS_LIQUIDATE, ACTION_LIQUIDATE
+    if score >= URGENCY_SCORE_LIQUIDATE:
+        # Determine recommended action for LIQUIDATE
+        if pos.total_inv_value < WRITE_OFF_THRESHOLD:
+            return CLASS_LIQUIDATE, ACTION_WRITEOFF, score
+        if pos.supplier_id:
+            return CLASS_LIQUIDATE, ACTION_RETURN, score
+        if pos.avg_weekly_units >= HIGH_VELOCITY_UNITS or pos.abc_class in ("A", "B"):
+            return CLASS_LIQUIDATE, ACTION_MARKDOWN, score
+        return CLASS_LIQUIDATE, ACTION_LIQUIDATE, score
+
+    if score >= URGENCY_SCORE_MARKDOWN:
+        return CLASS_MARKDOWN, ACTION_MARKDOWN, score
+
+    return CLASS_MONITOR, "", score
+
+
+def _fetch_transfer_candidates(
+    client_holder: list,
+    dead_sku_ids:  list[str],
+    today:         date,
+) -> dict[str, str]:
+    """Return sku_id → first needing location for dead-stock SKUs.
+
+    Checks reorder_recommendations (today's date, qty_to_order > 0) then
+    understocking_report.  Fetched in bulk before the main scoring loop so
+    the logic runs in O(batches) not O(SKUs).
+    """
+    if not dead_sku_ids:
+        return {}
+
+    result: dict[str, str] = {}
+    today_iso = today.isoformat()
+    _BATCH = 200
+
+    # ── reorder_recommendations ───────────────────────────────────────
+    for start in range(0, len(dead_sku_ids), _BATCH):
+        batch = dead_sku_ids[start:start + _BATCH]
+        for attempt in range(1, _MAX_RETRIES + 1):
+            try:
+                rows = (
+                    client_holder[0].table("reorder_recommendations")
+                    .select("sku_id,location_id")
+                    .in_("sku_id", batch)
+                    .eq("recommendation_date", today_iso)
+                    .gt("qty_to_order", 0)
+                    .execute()
+                    .data or []
+                )
+                for r in rows:
+                    sid, lid = r.get("sku_id"), r.get("location_id")
+                    if sid and lid and sid not in result:
+                        result[sid] = lid
+                break
+            except Exception as exc:
+                if _is_retryable_error(exc) and attempt < _MAX_RETRIES:
+                    time.sleep(_RETRY_DELAY)
+                    client_holder[0] = _get_fresh_client()
+                    continue
+                log.warning(
+                    "  reorder_recommendations transfer check failed (%s) — "
+                    "skipping batch.", exc.__class__.__name__,
+                )
+                break
+
+    # ── understocking_report (fills gaps not covered by reorder recs) ─
+    still_needed = [s for s in dead_sku_ids if s not in result]
+    for start in range(0, len(still_needed), _BATCH):
+        batch = still_needed[start:start + _BATCH]
+        try:
+            rows = (
+                client_holder[0].table("understocking_report")
+                .select("sku_id,location_id")
+                .in_("sku_id", batch)
+                .execute()
+                .data or []
+            )
+            for r in rows:
+                sid, lid = r.get("sku_id"), r.get("location_id")
+                if sid and lid and sid not in result:
+                    result[sid] = lid
+        except Exception as exc:
+            log.warning(
+                "  understocking_report transfer check failed (%s) — "
+                "skipping batch.", exc.__class__.__name__,
+            )
+
+    log.info(
+        "  Transfer candidates: %d dead-stock SKU(s) needed at another location.",
+        len(result),
+    )
+    return result
+
+
+def _fetch_sales_detail_active(
+    client_holder: list,
+    dead_sku_ids:  list[str],
+    today:         date,
+) -> set[str]:
+    """Return set of sku_ids with any sales_detail_transactions in last 365 days.
+
+    Uses prod_line_pn = sku_id.  A hit means the is_dead_stock flag may be
+    stale — these items are tagged data_conflict=TRUE and excluded from alerts
+    and the liquidation total.  Fetched in bulk (not per-SKU).
+    """
+    if not dead_sku_ids:
+        return set()
+
+    cutoff = (today - timedelta(days=SALES_DETAIL_LOOKBACK)).isoformat()
+    active: set[str] = set()
+    _BATCH = 100  # smaller batch — prod_line_pn IN clause on a wide table
+
+    for start in range(0, len(dead_sku_ids), _BATCH):
+        batch = dead_sku_ids[start:start + _BATCH]
+        for attempt in range(1, _MAX_RETRIES + 1):
+            try:
+                rows = (
+                    client_holder[0].table("sales_detail_transactions")
+                    .select("prod_line_pn")
+                    .in_("prod_line_pn", batch)
+                    .gte("tran_date", cutoff)
+                    .execute()
+                    .data or []
+                )
+                active.update(r["prod_line_pn"] for r in rows if r.get("prod_line_pn"))
+                break
+            except Exception as exc:
+                if _is_retryable_error(exc) and attempt < _MAX_RETRIES:
+                    time.sleep(_RETRY_DELAY)
+                    client_holder[0] = _get_fresh_client()
+                    continue
+                log.warning(
+                    "  sales_detail_transactions conflict check failed (%s) — "
+                    "skipping batch.", exc.__class__.__name__,
+                )
+                break
+
+    log.info(
+        "  Data conflicts: %d dead-stock SKU(s) have sales_detail activity "
+        "in the last %d days.",
+        len(active), SALES_DETAIL_LOOKBACK,
+    )
+    return active
 
 
 def score_positions(
@@ -655,8 +812,12 @@ def score_positions(
     last_sale_map: dict[tuple[str, str], date],
     freq_map:      dict[tuple[str, str], int],
     today:         date,
+    transfer_map:  dict[str, str]   | None = None,
+    conflict_skus: set[str]         | None = None,
 ) -> list[ScoredPosition]:
     """Build and score every inventory position.  Returns all positions."""
+    _transfer = transfer_map  or {}
+    _conflicts = conflict_skus or set()
     results: list[ScoredPosition] = []
 
     for (sku_id, loc_id), snap in inventory.items():
@@ -667,7 +828,6 @@ def score_positions(
 
         unit_cost = unit_costs.get(sku_id, DEFAULT_UNIT_COST)
         last_sale = last_sale_map.get((sku_id, loc_id))
-        # Fall back to global last_sale_date if no location-level transaction
         if last_sale is None:
             global_ls = sku.get("last_sale_date")
             last_sale = date.fromisoformat(global_ls) if global_ls else None
@@ -688,7 +848,15 @@ def score_positions(
             part_category    = sku.get("part_category") or "",
             sub_category     = sku.get("sub_category") or "",
         )
-        cls, action = _classify(pos)
+        cls, action, u_score = _classify(pos)
+
+        # v2 enrichment: TRANSFER override and data_conflict flag
+        xfer_loc   = _transfer.get(sku_id)
+        is_conflict = sku_id in _conflicts
+        if xfer_loc and cls in (CLASS_LIQUIDATE, CLASS_MARKDOWN):
+            action_type = "TRANSFER"
+        else:
+            action_type = cls  # LIQUIDATE / MARKDOWN / MONITOR / HEALTHY
 
         results.append(ScoredPosition(
             sku_id           = sku_id,
@@ -696,6 +864,7 @@ def score_positions(
             classification   = cls,
             action           = action,
             dead_stock_score = pos.dead_stock_score,
+            urgency_score    = round(u_score, 4),
             total_inv_value  = pos.total_inv_value,
             qty_on_hand      = qty,
             unit_cost        = unit_cost,
@@ -706,10 +875,13 @@ def score_positions(
             supplier_id      = pos.supplier_id,
             part_category    = pos.part_category,
             sub_category     = pos.sub_category,
+            action_type                  = action_type,
+            transfer_candidate_location  = xfer_loc,
+            data_conflict                = is_conflict,
         ))
 
-    # Ranked: highest dead_stock_score first
-    results.sort(key=lambda r: r.dead_stock_score, reverse=True)
+    # Ranked: highest urgency_score first (v2); ties broken by dead_stock_score
+    results.sort(key=lambda r: (r.urgency_score, r.dead_stock_score), reverse=True)
     return results
 
 
@@ -836,31 +1008,56 @@ def _persist_recommendations(
         return
 
     rows = [{
-        "report_date":      report_date.isoformat(),
-        "sku_id":           p.sku_id,
-        "location_id":      p.location_id,
-        "classification":   p.classification,
-        "action":           _ACTION_CODE.get(p.action, p.action),
-        "dead_stock_score": round(p.dead_stock_score, 2),
-        "total_inv_value":  round(p.total_inv_value, 2),
-        "qty_on_hand":      p.qty_on_hand,
-        "unit_cost":        round(p.unit_cost, 4) if p.unit_cost else None,
-        "days_since_sale":  p.days_since_sale,
-        "sale_frequency":   round(p.sale_frequency, 2),
-        "abc_class":        p.abc_class,
-        "supplier_id":      p.supplier_id,
-        "part_category":    p.part_category or None,
-        "sub_category":     p.sub_category or None,
+        "report_date":                report_date.isoformat(),
+        "sku_id":                     p.sku_id,
+        "location_id":                p.location_id,
+        "classification":             p.classification,
+        "action":                     _ACTION_CODE.get(p.action, p.action),
+        "dead_stock_score":           round(p.dead_stock_score, 2),
+        "total_inv_value":            round(p.total_inv_value, 2),
+        "qty_on_hand":                p.qty_on_hand,
+        "unit_cost":                  round(p.unit_cost, 4) if p.unit_cost else None,
+        "days_since_sale":            p.days_since_sale,
+        "sale_frequency":             round(p.sale_frequency, 2),
+        "abc_class":                  p.abc_class,
+        "supplier_id":                p.supplier_id,
+        "part_category":              p.part_category or None,
+        "sub_category":               p.sub_category or None,
+        # v2 columns (migration 048) — stripped gracefully if not yet applied
+        "action_type":                p.action_type or None,
+        "transfer_candidate_location": p.transfer_candidate_location,
+        "data_conflict":              p.data_conflict,
     } for p in actionable]
 
     BATCH = 500
     for i in range(0, len(rows), BATCH):
-        _upsert_with_retry(
-            client_holder,
-            "dead_stock_recommendations",
-            rows[i : i + BATCH],
-            on_conflict="report_date,sku_id,location_id",
-        )
+        chunk = rows[i : i + BATCH]
+        try:
+            _upsert_with_retry(
+                client_holder,
+                "dead_stock_recommendations",
+                chunk,
+                on_conflict="report_date,sku_id,location_id",
+            )
+        except Exception as exc:
+            # Schema fallback: strip v2 columns if migration 048 not applied.
+            if not _v2_stripped and any(c in str(exc) for c in _v2_cols):
+                log.warning(
+                    "migration 048 columns missing — stripping action_type, "
+                    "transfer_candidate_location, data_conflict and retrying. "
+                    "Apply 048_dead_stock_v2.sql to enable v2 features."
+                )
+                _v2_stripped = True
+                rows = [{k: v for k, v in r.items() if k not in _v2_cols}
+                        for r in rows]
+                chunk = rows[i : i + BATCH]
+                _upsert_with_retry(
+                    client_holder, "dead_stock_recommendations",
+                    chunk, on_conflict="report_date,sku_id,location_id",
+                )
+            else:
+                raise
+
     log.info("Persisted %d row(s) to dead_stock_recommendations for %s.",
              len(rows), report_date.isoformat())
 
@@ -925,43 +1122,58 @@ def _build_report(
     markdown  = by_class[CLASS_MARKDOWN]
     monitor   = by_class[CLASS_MONITOR]
 
-    total_at_risk = sum(p.total_inv_value for p in liquidate + markdown)
-    liquidate_val = sum(p.total_inv_value for p in liquidate)
-    markdown_val  = sum(p.total_inv_value for p in markdown)
+    # v2 stats: conflict and transfer enrichment
+    transfer_count  = sum(1 for p in liquidate + markdown if p.action_type == "TRANSFER")
+    conflict_count  = sum(1 for p in liquidate + markdown if p.data_conflict)
+    clean_positions = [p for p in liquidate + markdown if not p.data_conflict]
+    alert_eligible  = [p for p in clean_positions if p.total_inv_value >= MIN_ALERT_VALUE]
+
+    total_at_risk       = sum(p.total_inv_value for p in liquidate + markdown)
+    clean_at_risk       = sum(p.total_inv_value for p in clean_positions)
+    liquidate_val       = sum(p.total_inv_value for p in liquidate)
+    markdown_val        = sum(p.total_inv_value for p in markdown)
 
     action_counts: dict[str, int] = defaultdict(int)
     for p in liquidate:
         action_counts[p.action] += 1
 
     return {
-        "report_date":     today.isoformat(),
-        "generated_at":    __import__("datetime").datetime.now().isoformat(),
-        "dry_run":         dry_run,
-        "elapsed_s":       round(elapsed_s, 2),
+        "report_date":  today.isoformat(),
+        "generated_at": __import__("datetime").datetime.now().isoformat(),
+        "dry_run":      dry_run,
+        "elapsed_s":    round(elapsed_s, 2),
         "summary": {
-            "total_positions_scored": len(scored),
-            "liquidate_count":   len(liquidate),
-            "markdown_count":    len(markdown),
-            "monitor_count":     len(monitor),
-            "healthy_count":     len(by_class[CLASS_HEALTHY]),
-            "capital_at_risk":   round(total_at_risk, 2),
-            "liquidate_value":   round(liquidate_val, 2),
-            "markdown_value":    round(markdown_val, 2),
-            "is_dead_stock_set": set_true,
-            "is_dead_stock_cleared": set_false,
+            "total_positions_scored":  len(scored),
+            "liquidate_count":         len(liquidate),
+            "markdown_count":          len(markdown),
+            "monitor_count":           len(monitor),
+            "healthy_count":           len(by_class[CLASS_HEALTHY]),
+            "capital_at_risk":         round(total_at_risk, 2),
+            "clean_capital_at_risk":   round(clean_at_risk, 2),
+            "liquidate_value":         round(liquidate_val, 2),
+            "markdown_value":          round(markdown_val, 2),
+            "transfer_count":          transfer_count,
+            "data_conflict_count":     conflict_count,
+            "alert_eligible_count":    len(alert_eligible),
+            "min_alert_value":         MIN_ALERT_VALUE,
+            "is_dead_stock_set":       set_true,
+            "is_dead_stock_cleared":   set_false,
         },
         "action_breakdown": dict(action_counts),
         "top_liquidate": [
             {
-                "sku_id":         p.sku_id,
-                "location_id":    p.location_id,
-                "total_inv_value": round(p.total_inv_value, 2),
-                "days_since_sale": p.days_since_sale,
-                "sale_frequency":  p.sale_frequency,
-                "action":          p.action,
-                "dead_stock_score": round(p.dead_stock_score, 2),
+                "sku_id":                    p.sku_id,
+                "location_id":               p.location_id,
+                "total_inv_value":           round(p.total_inv_value, 2),
+                "urgency_score":             round(p.urgency_score, 3),
+                "days_since_sale":           p.days_since_sale,
+                "sale_frequency":            p.sale_frequency,
+                "action":                    p.action,
+                "action_type":               p.action_type,
+                "transfer_candidate_location": p.transfer_candidate_location,
+                "data_conflict":             p.data_conflict,
             }
-            for p in sorted(liquidate, key=lambda x: x.total_inv_value, reverse=True)[:20]
+            for p in sorted(liquidate, key=lambda x: x.urgency_score, reverse=True)[:20]
         ],
     }
 
@@ -975,16 +1187,24 @@ def _render_summary_panel(report: dict, dry_run: bool) -> None:
     tbl.add_column("Value",   justify="right", width=16)
 
     rows = [
-        ("Positions scored",      str(s["total_positions_scored"])),
-        ("LIQUIDATE",             f"[red]{s['liquidate_count']}[/red]"),
-        ("MARKDOWN",              f"[yellow]{s['markdown_count']}[/yellow]"),
-        ("MONITOR",               f"[cyan]{s['monitor_count']}[/cyan]"),
-        ("HEALTHY",               f"[green]{s['healthy_count']}[/green]"),
-        ("Capital at risk (total)", f"[red]${s['capital_at_risk']:,.2f}[/red]"),
-        ("  — Liquidate value",   f"${s['liquidate_value']:,.2f}"),
-        ("  — Markdown value",    f"${s['markdown_value']:,.2f}"),
-        ("is_dead_stock set TRUE", str(s["is_dead_stock_set"])),
-        ("is_dead_stock cleared",  str(s["is_dead_stock_cleared"])),
+        ("Positions scored",           str(s["total_positions_scored"])),
+        ("LIQUIDATE",                  f"[red]{s['liquidate_count']}[/red]"),
+        ("MARKDOWN",                   f"[yellow]{s['markdown_count']}[/yellow]"),
+        ("MONITOR",                    f"[cyan]{s['monitor_count']}[/cyan]"),
+        ("HEALTHY",                    f"[green]{s['healthy_count']}[/green]"),
+        ("",                           ""),
+        ("Capital at risk (total)",    f"[red]${s['capital_at_risk']:,.2f}[/red]"),
+        ("  — Liquidate value",        f"${s['liquidate_value']:,.2f}"),
+        ("  — Markdown value",         f"${s['markdown_value']:,.2f}"),
+        ("Clean capital at risk",      f"[yellow]${s['clean_capital_at_risk']:,.2f}[/yellow]"),
+        ("",                           ""),
+        ("TRANSFER candidates",        f"[cyan]{s['transfer_count']}[/cyan]"),
+        ("Data conflicts (excluded)",  f"[dim]{s['data_conflict_count']}[/dim]"),
+        (f"Alert-eligible (>=${s['min_alert_value']:,.0f})",
+                                       f"[bold]{s['alert_eligible_count']}[/bold]"),
+        ("",                           ""),
+        ("is_dead_stock set TRUE",     str(s["is_dead_stock_set"])),
+        ("is_dead_stock cleared",      str(s["is_dead_stock_cleared"])),
     ]
     for label, val in rows:
         tbl.add_row(label, val)
@@ -1020,12 +1240,12 @@ def run_dead_stock(
     t0  = time.monotonic()
     banner = "=" * 64
     log.info(banner)
-    log.info("partswatch-ai — ml.dead_stock")
+    log.info("partswatch-ai — ml.dead_stock  (v2: urgency-score + transfer + conflict)")
     log.info(
-        "  liquidate_days=%d  markdown_days=%d  monitor_days=%d  "
-        "low_freq=%d  write_off=$%.0f",
-        LIQUIDATE_DAYS, MARKDOWN_DAYS, MONITOR_DAYS,
-        LOW_FREQ_THRESHOLD, WRITE_OFF_THRESHOLD,
+        "  monitor_days=%d  urgency_liquidate=%.1f  urgency_markdown=%.1f  "
+        "min_alert=$%.0f  write_off=$%.0f",
+        MONITOR_DAYS, URGENCY_SCORE_LIQUIDATE, URGENCY_SCORE_MARKDOWN,
+        MIN_ALERT_VALUE, WRITE_OFF_THRESHOLD,
     )
     log.info(banner)
 
@@ -1051,9 +1271,6 @@ def run_dead_stock(
         sku_master   = _fetch_sku_master(client_holder)
         unit_costs   = _fetch_unit_costs(client_holder)
         suppliers    = _fetch_supplier_map(client_holder)
-        # Reuse the SKU IDs already fetched into sku_master so we don't make
-        # a second pass over the catalog just to get the id list.  Sorted
-        # for deterministic batch boundaries across runs.
         last_sale_map, freq_map = _fetch_location_sales(
             client_holder, today, sorted(sku_master.keys()),
         )
@@ -1065,47 +1282,81 @@ def run_dead_stock(
     log.info("  SKUs in master:                     %d", len(sku_master))
     log.info("  SKUs with known unit cost:          %d", len(unit_costs))
     log.info("  SKUs with known supplier:           %d", len(suppliers))
-    log.info("  SKU×location pairs with sales data: %d", len(freq_map))
+    log.info("  SKU x location pairs with sales data: %d", len(freq_map))
 
     if not inventory:
         log.warning("No inventory positions found — nothing to score.")
         return 0
 
-    # ── Score and classify ────────────────────────────────────────────
+    # ── Score and classify (v2: urgency score) ────────────────────────
     log.info("Scoring %d inventory position(s) …", len(inventory))
+    # First pass: score without enrichment to identify dead-stock SKUs.
     scored = score_positions(
         inventory, sku_master, unit_costs, suppliers,
         last_sale_map, freq_map, today,
+    )
+
+    # ── v2: Bulk-fetch transfer candidates + data conflicts ───────────
+    actionable_skus = list({
+        p.sku_id for p in scored
+        if p.classification in (CLASS_LIQUIDATE, CLASS_MARKDOWN)
+    })
+    log.info("Fetching v2 enrichment for %d actionable SKU(s) …", len(actionable_skus))
+    try:
+        transfer_map  = _fetch_transfer_candidates(client_holder, actionable_skus, today)
+        conflict_skus = _fetch_sales_detail_active(client_holder, actionable_skus, today)
+    except Exception:
+        log.exception("v2 enrichment fetch failed (non-fatal) — continuing without enrichment.")
+        transfer_map  = {}
+        conflict_skus = set()
+
+    # Second pass: re-score with enrichment (same data, adds action_type + flags).
+    scored = score_positions(
+        inventory, sku_master, unit_costs, suppliers,
+        last_sale_map, freq_map, today,
+        transfer_map=transfer_map,
+        conflict_skus=conflict_skus,
     )
 
     by_class: dict[str, list[ScoredPosition]] = defaultdict(list)
     for p in scored:
         by_class[p.classification].append(p)
 
-    log.info("Classification results:")
+    log.info("Classification results (v2 urgency score):")
     for cls in (CLASS_LIQUIDATE, CLASS_MARKDOWN, CLASS_MONITOR, CLASS_HEALTHY):
         log.info("  %-12s  %d", cls, len(by_class[cls]))
 
-    liquidate_value = sum(p.total_inv_value for p in by_class[CLASS_LIQUIDATE])
-    markdown_value  = sum(p.total_inv_value for p in by_class[CLASS_MARKDOWN])
-    log.info("Capital at risk:  LIQUIDATE $%.2f  MARKDOWN $%.2f",
-             liquidate_value, markdown_value)
-
-    # ── Log top candidates ────────────────────────────────────────────
-    liquidate_sorted = sorted(
-        by_class[CLASS_LIQUIDATE],
-        key=lambda p: p.total_inv_value,
-        reverse=True,
+    liquidate      = by_class[CLASS_LIQUIDATE]
+    markdown       = by_class[CLASS_MARKDOWN]
+    liquidate_value = sum(p.total_inv_value for p in liquidate)
+    markdown_value  = sum(p.total_inv_value for p in markdown)
+    transfer_count  = sum(1 for p in liquidate + markdown if p.action_type == "TRANSFER")
+    conflict_count  = sum(1 for p in liquidate + markdown if p.data_conflict)
+    clean_value     = sum(p.total_inv_value for p in liquidate + markdown if not p.data_conflict)
+    alert_count     = sum(
+        1 for p in {p.sku_id for p in liquidate + markdown
+                    if not p.data_conflict and p.total_inv_value >= MIN_ALERT_VALUE}
     )
+
+    log.info("Capital at risk:  LIQUIDATE $%.2f  MARKDOWN $%.2f", liquidate_value, markdown_value)
+    log.info(
+        "v2 enrichment:  TRANSFER=%d  data_conflict=%d  "
+        "clean_at_risk=$%.2f  alert_eligible_skus=%d (>=$%.0f)",
+        transfer_count, conflict_count, clean_value, alert_count, MIN_ALERT_VALUE,
+    )
+
+    # ── Log top candidates (by urgency score) ─────────────────────────
+    liquidate_sorted = sorted(liquidate, key=lambda p: p.urgency_score, reverse=True)
     if liquidate_sorted:
         log.info("-" * 64)
-        log.info("Top LIQUIDATE candidates (by inventory value):")
+        log.info("Top LIQUIDATE candidates (by urgency score):")
         for i, p in enumerate(liquidate_sorted[:10], 1):
+            xfer = f" -> TRANSFER:{p.transfer_candidate_location}" if p.action_type == "TRANSFER" else ""
+            conflict = " [CONFLICT]" if p.data_conflict else ""
             log.info(
-                "  %2d. %-14s @%-8s  $%8.2f  %3d days  %2d sales/yr  → %s",
-                i, p.sku_id, p.location_id,
-                p.total_inv_value, p.days_since_sale,
-                p.sale_frequency, p.action,
+                f"  {i:2d}. {p.sku_id:<14s} @{p.location_id:<8s}"
+                f"  ${p.total_inv_value:>9,.2f}  {p.days_since_sale:4d}d"
+                f"  score={p.urgency_score:.3f}{xfer}{conflict}"
             )
         log.info("-" * 64)
 

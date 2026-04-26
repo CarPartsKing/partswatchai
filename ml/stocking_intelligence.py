@@ -45,7 +45,7 @@ import time
 from collections import defaultdict
 from datetime import date, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -94,6 +94,9 @@ PROGRESS_LOG_EVERY: int       = 5_000
 """Log a progress line after processing this many SKUs."""
 
 PAGE_SIZE: int                = 1_000
+
+NORMAL_GP_PCT: float          = 0.35
+"""Fallback GP% when a location has no SL/SL-I history in get_location_gp_baselines."""
 
 # ---------------------------------------------------------------------------
 # Location name lookup (matches all other modules)
@@ -475,6 +478,160 @@ def _fetch_reorder_points(
 
 
 # ---------------------------------------------------------------------------
+# OPSL cross-reference helpers
+# ---------------------------------------------------------------------------
+
+def _fetch_gp_baselines(client_holder: list, cutoff: date) -> dict[str, float]:
+    """Call get_location_gp_baselines RPC; returns {location_id: avg_gp_pct}.
+
+    Falls back to {} with a warning if the RPC is unavailable — callers use
+    NORMAL_GP_PCT as the default in that case.
+    """
+    try:
+        resp = client_holder[0].rpc(
+            "get_location_gp_baselines",
+            {"p_start_date": cutoff.isoformat()},
+        ).execute()
+        baselines: dict[str, float] = {}
+        for row in resp.data or []:
+            loc = row.get("location_id")
+            pct = row.get("avg_gp_pct")
+            if loc and pct is not None:
+                try:
+                    baselines[loc] = float(pct)
+                except (TypeError, ValueError):
+                    pass
+        log.info("  GP baselines fetched: %d locations", len(baselines))
+        return baselines
+    except Exception:
+        log.warning(
+            "  get_location_gp_baselines RPC failed — using %.2f fallback.",
+            NORMAL_GP_PCT,
+        )
+        return {}
+
+
+def _fetch_opsl_flags(client_holder: list) -> set[tuple[str, str]]:
+    """Return set of (prod_line_pn, location_id) for HIGH/MEDIUM opsl_flags rows.
+
+    These are used to mark stocking gaps as double_confirmed when the same
+    SKU+location pair shows up in both the transfer-pattern analysis and the
+    OPSL outside-purchase analysis.
+    """
+    try:
+        rows = _paginate(
+            client_holder,
+            "opsl_flags",
+            "prod_line_pn,location_id,flag",
+            in_filters={"flag": ["HIGH", "MEDIUM"]},
+        )
+        result: set[tuple[str, str]] = set()
+        for r in rows:
+            pn  = r.get("prod_line_pn")
+            loc = r.get("location_id")
+            if pn and loc:
+                result.add((pn, loc))
+        log.info(
+            "  OPSL flags (HIGH/MEDIUM): %d (sku, location) pairs",
+            len(result),
+        )
+        return result
+    except Exception:
+        log.warning("  opsl_flags fetch failed — skipping OPSL cross-reference.")
+        return set()
+
+
+def _fetch_opsl_savings(
+    client_holder: list,
+    cutoff: date,
+    gp_baselines: dict[str, float],
+) -> dict[tuple[str, str], float]:
+    """Compute annualised margin-recovery savings from OPSL events in sales_detail_transactions.
+
+    OPSL event: stock_flag='N', tran_code='SL' — a sale fulfilled as an outside
+    purchase because the item wasn't in stock locally.
+
+    For each (prod_line_pn, location_id) pair the margin loss per 90-day window is:
+        sum(baseline_gp_pct × sales − gross_profit)
+    Annualised by × 4 (90d × 4 ≈ 365d).
+
+    Returns {(prod_line_pn, location_id): annualised_savings_dollars}.
+    Only pairs where margin_loss > 0 are included.
+    """
+    try:
+        rows = _paginate(
+            client_holder,
+            "sales_detail_transactions",
+            "prod_line_pn,location_id,sales,gross_profit",
+            filters={
+                "tran_code":  "SL",
+                "stock_flag": "N",
+            },
+            gte_filters={"tran_date": cutoff.isoformat()},
+        )
+
+        # Accumulate total_sales and total_gross_profit per (pn, loc)
+        acc: dict[tuple[str, str], list[float]] = defaultdict(lambda: [0.0, 0.0])
+        for r in rows:
+            pn  = r.get("prod_line_pn")
+            loc = r.get("location_id")
+            if not pn or not loc:
+                continue
+            try:
+                acc[(pn, loc)][0] += float(r.get("sales") or 0)
+                acc[(pn, loc)][1] += float(r.get("gross_profit") or 0)
+            except (TypeError, ValueError):
+                pass
+
+        savings: dict[tuple[str, str], float] = {}
+        for (pn, loc), (total_sales, total_gp) in acc.items():
+            if total_sales <= 0:
+                continue
+            normal_gp_pct  = gp_baselines.get(loc, NORMAL_GP_PCT)
+            margin_loss_90d = normal_gp_pct * total_sales - total_gp
+            if margin_loss_90d > 0:
+                savings[(pn, loc)] = round(margin_loss_90d * 4, 2)
+
+        log.info(
+            "  OPSL savings data: %d (sku, location) pairs with recoverable margin",
+            len(savings),
+        )
+        return savings
+    except Exception:
+        log.warning(
+            "  sales_detail_transactions OPSL savings fetch failed — "
+            "falling back to transfer estimates for all gaps."
+        )
+        return {}
+
+
+def _enrich_with_opsl(
+    records: list[dict],
+    opsl_flags: set[tuple[str, str]],
+    opsl_savings: dict[tuple[str, str], float],
+) -> None:
+    """Mutate records in-place: add double_confirmed, confidence, savings_source.
+
+    Applies to all classification tiers.  OPSL_ACTUAL savings only replace the
+    transfer-cost estimate for CHRONIC gaps (the only tier that had savings before).
+    """
+    for rec in records:
+        key = (rec["sku_id"], rec["location_id"])
+
+        rec["double_confirmed"] = key in opsl_flags
+        rec["confidence"]       = "HIGH" if rec["double_confirmed"] else "MEDIUM"
+
+        if rec["gap_classification"] == "CHRONIC":
+            if key in opsl_savings:
+                rec["annual_cost_savings"] = opsl_savings[key]
+                rec["savings_source"]      = "OPSL_ACTUAL"
+            else:
+                rec["savings_source"] = "TRANSFER_ESTIMATE"
+        else:
+            rec["savings_source"] = None
+
+
+# ---------------------------------------------------------------------------
 # DB write
 # ---------------------------------------------------------------------------
 
@@ -610,27 +767,76 @@ def run_stocking_intelligence(dry_run: bool = False) -> int:
         log.exception("Gap score computation failed.")
         return 1
 
-    chronic   = [r for r in records if r["gap_classification"] == "CHRONIC"]
-    recurring = [r for r in records if r["gap_classification"] == "RECURRING"]
-    occasional= [r for r in records if r["gap_classification"] == "OCCASIONAL"]
+    chronic    = [r for r in records if r["gap_classification"] == "CHRONIC"]
+    recurring  = [r for r in records if r["gap_classification"] == "RECURRING"]
+    occasional = [r for r in records if r["gap_classification"] == "OCCASIONAL"]
 
     log.info("  CHRONIC:    %d pairs  (score > 0.7)", len(chronic))
     log.info("  RECURRING:  %d pairs  (0.4–0.7)", len(recurring))
     log.info("  OCCASIONAL: %d pairs  (< 0.4)", len(occasional))
 
+    # ── Step 4: OPSL cross-reference and improved savings ─────────────
+    log.info("Step 5 — OPSL cross-reference and savings enrichment …")
+    try:
+        gp_baselines = _fetch_gp_baselines(client_holder, cutoff)
+        opsl_flags   = _fetch_opsl_flags(client_holder)
+        opsl_savings = _fetch_opsl_savings(client_holder, cutoff, gp_baselines)
+        _enrich_with_opsl(records, opsl_flags, opsl_savings)
+    except Exception:
+        log.exception("OPSL enrichment failed (non-fatal — proceeding without it).")
+        for rec in records:
+            rec.setdefault("double_confirmed", False)
+            rec.setdefault("confidence", "MEDIUM")
+            if rec["gap_classification"] == "CHRONIC":
+                rec.setdefault("savings_source", "TRANSFER_ESTIMATE")
+            else:
+                rec.setdefault("savings_source", None)
+
+    # Re-compute chronic list after enrichment (savings may have changed)
+    chronic = [r for r in records if r["gap_classification"] == "CHRONIC"]
+
+    double_confirmed = [r for r in records if r.get("double_confirmed")]
+    opsl_actual      = [r for r in chronic  if r.get("savings_source") == "OPSL_ACTUAL"]
+
     total_savings = sum(
         r["annual_cost_savings"] for r in chronic
-        if r["annual_cost_savings"] is not None
+        if r.get("annual_cost_savings") is not None
     )
-    log.info("  Total potential annual savings (CHRONIC): $%.0f", total_savings)
 
-    # Log top 10 chronic gaps
-    top_chronic = sorted(chronic,
-                         key=lambda r: r.get("annual_cost_savings") or 0,
-                         reverse=True)[:10]
-    if top_chronic:
+    log.info("  Double-confirmed gaps (transfer + OPSL): %d", len(double_confirmed))
+    log.info("  CHRONIC savings source — OPSL_ACTUAL: %d  TRANSFER_ESTIMATE: %d",
+             len(opsl_actual), len(chronic) - len(opsl_actual))
+    log.info("  Revised total annual savings (CHRONIC): $%.0f", total_savings)
+
+    # Top 10 double-confirmed chronic gaps by savings
+    top_dc = sorted(
+        [r for r in double_confirmed if r["gap_classification"] == "CHRONIC"],
+        key=lambda r: r.get("annual_cost_savings") or 0,
+        reverse=True,
+    )[:10]
+
+    if top_dc:
         log.info("-" * 64)
-        log.info("Top CHRONIC stocking gaps (by annual savings):")
+        log.info("Top double-confirmed CHRONIC gaps (by annual savings):")
+        for i, r in enumerate(top_dc, 1):
+            src = r.get("savings_source", "?")[:4]
+            log.info(
+                "  %2d. %-14s @ %-12s  freq=%2d  streak=%2d  "
+                "avg_qty=%.1f  savings=$%.0f/yr  src=%s  trend=%s",
+                i, r["sku_id"], r["location_id"],
+                r["transfer_frequency"], r["transfer_streak"],
+                r["avg_qty_recommended"],
+                r.get("annual_cost_savings") or 0,
+                src, r["trend_direction"],
+            )
+        log.info("-" * 64)
+    elif chronic:
+        # Fall back to top 10 chronic by savings (no double-confirmed this run)
+        top_chronic = sorted(chronic,
+                             key=lambda r: r.get("annual_cost_savings") or 0,
+                             reverse=True)[:10]
+        log.info("-" * 64)
+        log.info("Top CHRONIC stocking gaps (by annual savings) — no double-confirmed:")
         for i, r in enumerate(top_chronic, 1):
             log.info(
                 "  %2d. %-14s @ %-12s  freq=%2d  streak=%2d  "
@@ -643,8 +849,8 @@ def run_stocking_intelligence(dry_run: bool = False) -> int:
             )
         log.info("-" * 64)
 
-    # ── Step 4: write to stocking_gaps ────────────────────────────────
-    log.info("Step 5 — upserting %d rows to stocking_gaps …", len(records))
+    # ── Step 5: write to stocking_gaps ────────────────────────────────
+    log.info("Step 6 — upserting %d rows to stocking_gaps …", len(records))
     try:
         written = _upsert_gaps(client_holder, records, dry_run)
     except Exception:
@@ -656,13 +862,14 @@ def run_stocking_intelligence(dry_run: bool = False) -> int:
     log.info(
         "Stocking intelligence complete  (%.1fs)  "
         "pairs=%d  chronic=%d  recurring=%d  occasional=%d  "
-        "written=%d%s",
+        "double_confirmed=%d  written=%d%s",
         elapsed, len(records),
         len(chronic), len(recurring), len(occasional),
+        len(double_confirmed),
         written,
         "  (DRY RUN)" if dry_run else "",
     )
-    log.info("  Potential annual transfer savings (CHRONIC): $%.0f", total_savings)
+    log.info("  Revised annual savings (CHRONIC): $%.0f", total_savings)
     log.info(banner)
     return 0
 

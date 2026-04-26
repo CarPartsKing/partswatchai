@@ -15,6 +15,7 @@ CUBE FIELDS
     [Sales Detail].[Ship To].[Ship To]            -> ship_to
     [Sales Detail].[Stock Flag].[Stock Flag]      -> stock_flag  ('Y'=stocked, 'N'=outside)
     [Product].[Prod Line PN].[Prod Line PN]       -> prod_line_pn
+    [Counterman].[Counterman].[Counterman]        -> salesman_id
     [Measures].[Qty Ship]                         -> qty_ship
     [Measures].[Sales]                            -> sales
     [Measures].[Gross Profit]                     -> gross_profit
@@ -129,7 +130,10 @@ SELECT
           [Sales Detail].[Ship To].[Ship To].MEMBERS,
           CROSSJOIN(
             [Sales Detail].[Stock Flag].[Stock Flag].MEMBERS,
-            [Product].[Prod Code].[Prod Code].MEMBERS
+            CROSSJOIN(
+              [Product].[Prod Code].[Prod Code].MEMBERS,
+              [Counterman].[Counterman].[Counterman].MEMBERS
+            )
           )
         )
       )
@@ -195,6 +199,8 @@ def _clean_row(r: dict[str, Any]) -> dict[str, Any] | None:
     ship_to      = (r.get("[Sales Detail].[Ship To].[Ship To]")       or "").strip()
     stock_flag   = (r.get("[Sales Detail].[Stock Flag].[Stock Flag]") or "").strip().upper()
     prod_line_pn = (r.get("[Product].[Prod Code].[Prod Code]")        or "").strip()
+    salesman_raw = (r.get("[Counterman].[Counterman].[Counterman]")   or "").strip()
+    salesman_id  = salesman_raw[:20] if salesman_raw else None
 
     qty_ship      = clean_numeric(r.get("[Measures].[Qty Ship]"))
     sales         = clean_numeric(r.get("[Measures].[Ext Price]"))
@@ -209,6 +215,7 @@ def _clean_row(r: dict[str, Any]) -> dict[str, Any] | None:
         "ship_to":        ship_to             or None,
         "stock_flag":     stock_flag[:1]      if stock_flag else None,
         "prod_line_pn":   prod_line_pn        or None,
+        "salesman_id":    salesman_id,
         "qty_ship":       round(float(qty_ship),      4) if qty_ship      is not None else None,
         "sales":          round(float(sales),          4) if sales         is not None else None,
         "gross_profit":   round(float(gross_profit),   4) if gross_profit  is not None else None,

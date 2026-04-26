@@ -13,13 +13,15 @@ Comparison period = last COMPARISON_DAYS days  (default 90)
 
 FLAG logic
 ----------
-CHURNED   — baseline_tx_count >= MIN_BASELINE_PURCHASES
-            AND last_90_days_spend == 0
-DECLINING — last_90_days_spend < expected_90d * (1 - DECLINING_THRESHOLD)
+AT_RISK   — zero spend in comparison period; last purchase 90–180 days ago
+CHURNED   — zero spend in comparison period; last purchase 181–365 days ago
+LOST      — zero spend in comparison period; last purchase > 365 days ago
+DECLINING — comparison spend < expected by DECLINING_THRESHOLD
 STABLE    — everything else
 
-Only customers with at least MIN_BASELINE_PURCHASES transactions and at least
-MIN_BASELINE_SPEND in the baseline window are written to the output table.
+Only customers with at least MIN_BASELINE_PURCHASES transactions,
+MIN_BASELINE_SPEND/month average, and MIN_ACTIVE_MONTHS distinct calendar
+months active in the baseline window are written to the output table.
 
 Performance
 -----------
@@ -55,7 +57,8 @@ BASELINE_MONTHS: int = 18
 COMPARISON_DAYS: int = 90
 
 MIN_BASELINE_PURCHASES: int = 3
-MIN_BASELINE_SPEND: float = 1.0
+MIN_BASELINE_SPEND: float = 333.0   # $/month; ~$1,000/quarter
+MIN_ACTIVE_MONTHS: int = 3          # distinct calendar months in baseline window
 
 DECLINING_THRESHOLD: float = 0.30
 
@@ -261,7 +264,8 @@ def _rpc_churn_buckets(
     All heavy GROUP-BY work runs inside Postgres against the
     idx_sdt_loc_date composite index — no raw row transfer to Python.
     Returns list of dicts with keys:
-        customer_id, baseline_sales, baseline_tx, comparison_sales, last_purchase_date
+        customer_id, is_commercial, baseline_sales, baseline_tx, baseline_months,
+        comparison_sales, last_purchase_date
     """
     params = {
         "p_location_id":      location_id,
@@ -284,26 +288,18 @@ def _classify(
     baseline_monthly: float,
     comparison_sales: float,
     baseline_tx: int,
-    last_purchase_date: date | None,
-    comparison_start: date,
 ) -> tuple[str, float]:
     """Return (flag, pct_change).
 
-    CHURNED requires the customer to have been active within the 12 months
-    before comparison_start — prevents customers who naturally dropped off at
-    the very start of the baseline window from being mislabelled as freshly
-    churned.
+    Returns CHURNED for any customer with zero comparison-period spend —
+    _build_row segments CHURNED into AT_RISK / CHURNED / LOST based on
+    days_since_last_purchase.
     """
     if baseline_tx < MIN_BASELINE_PURCHASES or baseline_monthly < MIN_BASELINE_SPEND:
         return "STABLE", 0.0
 
-    recently_active = (
-        last_purchase_date is not None
-        and last_purchase_date >= comparison_start - timedelta(days=365)
-    )
-
     if comparison_sales == 0.0:
-        return ("CHURNED", -100.0) if recently_active else ("STABLE", 0.0)
+        return "CHURNED", -100.0
 
     expected_90d = baseline_monthly * (COMPARISON_DAYS / 30.0)
     if expected_90d > 0:
@@ -321,45 +317,67 @@ def _build_row(
     rpc_row: dict,
     loc: str,
     effective_today: date,
-    comparison_start: date,
 ) -> dict | None:
     """Classify one RPC result row and return an output row, or None to skip.
 
-    rpc_row keys: customer_id, baseline_sales, baseline_tx,
-                  comparison_sales, last_purchase_date
+    rpc_row keys: customer_id, is_commercial, baseline_sales, baseline_tx,
+                  baseline_months, comparison_sales, last_purchase_date
+
+    salesman_id is populated via sales_detail_transactions.salesman_id
+    (migration 041 + extract update) and will be non-NULL once that column
+    is backfilled.  For now it is always None.
     """
-    cust           = (rpc_row.get("customer_id") or "").strip()
-    baseline_sales = float(rpc_row.get("baseline_sales") or 0.0)
-    baseline_tx    = int(rpc_row.get("baseline_tx") or 0)
-    comp_sales     = float(rpc_row.get("comparison_sales") or 0.0)
-    lpd_raw        = rpc_row.get("last_purchase_date")
-    last_purchase  = date.fromisoformat(lpd_raw) if lpd_raw else None
+    cust             = (rpc_row.get("customer_id") or "").strip()
+    baseline_sales   = float(rpc_row.get("baseline_sales") or 0.0)
+    baseline_tx      = int(rpc_row.get("baseline_tx") or 0)
+    baseline_months  = int(rpc_row.get("baseline_months") or 0)
+    comp_sales       = float(rpc_row.get("comparison_sales") or 0.0)
+    lpd_raw          = rpc_row.get("last_purchase_date")
+    last_purchase    = date.fromisoformat(lpd_raw) if lpd_raw else None
+    is_commercial    = bool(rpc_row.get("is_commercial") or False)
+    salesman_id: str | None = None   # populated after migration 041 backfill
 
     if not cust:
         return None
 
     baseline_monthly = baseline_sales / BASELINE_MONTHS
 
-    if baseline_tx < MIN_BASELINE_PURCHASES and baseline_sales < MIN_BASELINE_SPEND:
+    # Quality gates: skip unless all three thresholds are met
+    if (
+        baseline_tx < MIN_BASELINE_PURCHASES
+        or baseline_monthly < MIN_BASELINE_SPEND
+        or baseline_months < MIN_ACTIVE_MONTHS
+    ):
         return None
 
-    flag, pct_change = _classify(
-        baseline_monthly,
-        comp_sales,
-        baseline_tx,
-        last_purchase,
-        comparison_start,
+    flag, pct_change = _classify(baseline_monthly, comp_sales, baseline_tx)
+
+    # Segment zero-spend customers by recency of last purchase
+    days_since: int | None = (
+        (effective_today - last_purchase).days if last_purchase else None
     )
+    risk_segment: str | None = None
+    if flag == "CHURNED":
+        if days_since is None or days_since > 365:
+            flag, risk_segment = "LOST", "LOST"
+        elif days_since > 180:
+            flag, risk_segment = "CHURNED", "CHURNED"
+        else:
+            flag, risk_segment = "AT_RISK", "AT_RISK"
 
     return {
-        "customer_id":            cust,
-        "location_id":            loc,
-        "baseline_monthly_spend": round(baseline_monthly, 4),
-        "last_90_days_spend":     round(comp_sales, 4),
-        "pct_change":             pct_change,
-        "flag":                   flag,
-        "last_purchase_date":     last_purchase.isoformat() if last_purchase else None,
-        "run_date":               effective_today.isoformat(),
+        "customer_id":              cust,
+        "location_id":              loc,
+        "is_commercial":            is_commercial,
+        "salesman_id":              salesman_id,
+        "baseline_monthly_spend":   round(baseline_monthly, 4),
+        "last_90_days_spend":       round(comp_sales, 4),
+        "pct_change":               pct_change,
+        "flag":                     flag,
+        "risk_segment":             risk_segment,
+        "days_since_last_purchase": days_since,
+        "last_purchase_date":       last_purchase.isoformat() if last_purchase else None,
+        "run_date":                 effective_today.isoformat(),
     }
 
 
@@ -395,7 +413,7 @@ def run_churn_detection(dry_run: bool = False) -> int:
         log.warning("No locations found — nothing to process.")
         return 0
 
-    counts = {"CHURNED": 0, "DECLINING": 0, "STABLE": 0, "skipped": 0}
+    counts = {"AT_RISK": 0, "CHURNED": 0, "LOST": 0, "DECLINING": 0, "STABLE": 0, "skipped": 0}
     total_written = 0
     write_buffer: list[dict] = []
 
@@ -423,7 +441,7 @@ def run_churn_detection(dry_run: bool = False) -> int:
         log.info("  %d customers returned by RPC", len(rpc_rows))
 
         for rpc_row in rpc_rows:
-            row = _build_row(rpc_row, loc, effective_today, comparison_start)
+            row = _build_row(rpc_row, loc, effective_today)
             if row is None:
                 counts["skipped"] += 1
                 continue
@@ -435,15 +453,16 @@ def run_churn_detection(dry_run: bool = False) -> int:
     _flush(force=True)
 
     log.info(
-        "Classified: CHURNED=%d  DECLINING=%d  STABLE=%d  skipped=%d",
-        counts["CHURNED"], counts["DECLINING"], counts["STABLE"], counts["skipped"],
+        "Classified: AT_RISK=%d  CHURNED=%d  LOST=%d  DECLINING=%d  STABLE=%d  skipped=%d",
+        counts["AT_RISK"], counts["CHURNED"], counts["LOST"],
+        counts["DECLINING"], counts["STABLE"], counts["skipped"],
     )
     if dry_run:
         log.info("[DRY RUN] %d rows computed, no DB writes.", total_written)
     else:
         log.info("Churn detection complete. %d rows written to %s.", total_written, _TARGET_TABLE)
 
-    return counts["CHURNED"] + counts["DECLINING"]
+    return counts["AT_RISK"] + counts["CHURNED"] + counts["LOST"] + counts["DECLINING"]
 
 
 # ---------------------------------------------------------------------------

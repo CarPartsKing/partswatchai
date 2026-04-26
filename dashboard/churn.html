@@ -95,9 +95,9 @@
   .card-body { padding: 16px 18px; }
   .section { margin-bottom: 20px; }
 
-  /* ── Alert summary cards (3-up row) ── */
+  /* ── Alert summary cards (5-up row) ── */
   .alert-summary-row {
-    display: grid; grid-template-columns: repeat(3, 1fr);
+    display: grid; grid-template-columns: repeat(5, 1fr);
     gap: 12px; margin-bottom: 20px;
   }
   .alert-card {
@@ -105,11 +105,15 @@
     border-radius: var(--radius-lg); padding: 16px 20px;
     display: flex; align-items: center; gap: 16px;
   }
+  .alert-card.amber    { border-left: 3px solid var(--amber); }
   .alert-card.critical { border-left: 3px solid var(--critical); }
+  .alert-card.lost     { border-left: 3px solid #c46360; }
   .alert-card.warning  { border-left: 3px solid var(--warning); }
   .alert-card.success  { border-left: 3px solid var(--success); }
   .alert-count { font-size: 32px; font-weight: 700; line-height: 1; }
+  .alert-card.amber    .alert-count { color: var(--amber); }
   .alert-card.critical .alert-count { color: var(--critical); }
+  .alert-card.lost     .alert-count { color: #c46360; }
   .alert-card.warning  .alert-count { color: var(--warning); }
   .alert-card.success  .alert-count { color: var(--success); }
   .alert-label { font-size: 13px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.4px; }
@@ -120,9 +124,11 @@
     display: inline-block; padding: 2px 8px; border-radius: 12px;
     font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.3px;
   }
-  .badge-critical { background: var(--critical-bg); color: var(--critical); border: 1px solid rgba(248,81,73,0.3); }
-  .badge-warning  { background: var(--warning-bg);  color: var(--warning);  border: 1px solid rgba(210,153,34,0.3); }
-  .badge-success  { background: var(--success-bg);  color: var(--success);  border: 1px solid rgba(63,185,80,0.3); }
+  .badge-amber    { background: rgba(227,179,65,0.12); color: var(--amber);    border: 1px solid rgba(227,179,65,0.3); }
+  .badge-critical { background: var(--critical-bg);    color: var(--critical); border: 1px solid rgba(248,81,73,0.3); }
+  .badge-lost     { background: rgba(196,99,96,0.14);  color: #c46360;         border: 1px solid rgba(196,99,96,0.35); }
+  .badge-warning  { background: var(--warning-bg);     color: var(--warning);  border: 1px solid rgba(210,153,34,0.3); }
+  .badge-success  { background: var(--success-bg);     color: var(--success);  border: 1px solid rgba(63,185,80,0.3); }
 
   /* ── Data table ── */
   .data-table { width: 100%; border-collapse: collapse; }
@@ -169,11 +175,14 @@
     background-size: 200% 100%; animation: shimmer 1.5s infinite; border-radius: 4px;
   }
 
+  @media (max-width: 900px) {
+    .alert-summary-row { grid-template-columns: repeat(3, 1fr); }
+  }
   @media (max-width: 768px) {
     .header { flex-direction: column; align-items: flex-start; gap: 10px; padding: 12px 16px; }
     .header-right { width: 100%; justify-content: space-between; flex-wrap: wrap; }
     .main { padding: 12px 12px 40px; }
-    .alert-summary-row { grid-template-columns: 1fr; gap: 8px; }
+    .alert-summary-row { grid-template-columns: repeat(2, 1fr); gap: 8px; }
     .data-table { font-size: 12px; }
     .data-table th, .data-table td { padding: 8px; }
   }
@@ -206,11 +215,25 @@
 
   <!-- ── Summary cards ── -->
   <div class="alert-summary-row">
+    <div class="alert-card amber">
+      <div class="alert-count" id="count-at-risk"><div class="skeleton" style="width:48px;height:36px"></div></div>
+      <div>
+        <div class="alert-label">At Risk</div>
+        <div class="alert-sublabel">90&ndash;180 days inactive</div>
+      </div>
+    </div>
     <div class="alert-card critical">
       <div class="alert-count" id="count-churned"><div class="skeleton" style="width:48px;height:36px"></div></div>
       <div>
         <div class="alert-label">Churned</div>
-        <div class="alert-sublabel">Zero spend last 90 days</div>
+        <div class="alert-sublabel">181&ndash;365 days inactive</div>
+      </div>
+    </div>
+    <div class="alert-card lost">
+      <div class="alert-count" id="count-lost"><div class="skeleton" style="width:48px;height:36px"></div></div>
+      <div>
+        <div class="alert-label">Lost</div>
+        <div class="alert-sublabel">365+ days inactive</div>
       </div>
     </div>
     <div class="alert-card warning">
@@ -232,7 +255,7 @@
   <!-- ── At-risk accounts table ── -->
   <div class="section card">
     <div class="card-header">
-      <span class="card-title">At-Risk Accounts &mdash; Churned &amp; Declining</span>
+      <span class="card-title">At-Risk Accounts &mdash; AT_RISK / CHURNED / LOST / DECLINING</span>
       <div style="display:flex;align-items:center;gap:12px">
         <span class="card-updated" id="run-date-badge"></span>
       </div>
@@ -256,13 +279,14 @@
             <th class="sortable right" data-col="last_90_days_spend">Last 90 Days</th>
             <th class="sortable right" data-col="pct_change">% Change</th>
             <th class="sortable" data-col="flag">Flag</th>
+            <th class="sortable right" data-col="days_since_last_purchase">Days Inactive</th>
             <th class="sortable" data-col="last_purchase_date">Last Purchase</th>
           </tr>
         </thead>
         <tbody id="churn-tbody">
-          <tr><td colspan="7"><div class="skeleton" style="height:36px;margin:6px 0;border-radius:4px"></div></td></tr>
-          <tr><td colspan="7"><div class="skeleton" style="height:36px;margin:6px 0;border-radius:4px"></div></td></tr>
-          <tr><td colspan="7"><div class="skeleton" style="height:36px;margin:6px 0;border-radius:4px"></div></td></tr>
+          <tr><td colspan="8"><div class="skeleton" style="height:36px;margin:6px 0;border-radius:4px"></div></td></tr>
+          <tr><td colspan="8"><div class="skeleton" style="height:36px;margin:6px 0;border-radius:4px"></div></td></tr>
+          <tr><td colspan="8"><div class="skeleton" style="height:36px;margin:6px 0;border-radius:4px"></div></td></tr>
         </tbody>
       </table>
     </div>
@@ -307,7 +331,9 @@
   }
 
   function flagBadge(flag) {
+    if (flag === 'AT_RISK')   return '<span class="badge badge-amber">At Risk</span>';
     if (flag === 'CHURNED')   return '<span class="badge badge-critical">Churned</span>';
+    if (flag === 'LOST')      return '<span class="badge badge-lost">Lost</span>';
     if (flag === 'DECLINING') return '<span class="badge badge-warning">Declining</span>';
     return '<span class="badge badge-success">Stable</span>';
   }
@@ -365,9 +391,14 @@
   function renderSummary() {
     if (!_data || !_data.summary) return;
     var s = _data.summary;
-    document.getElementById('count-churned').textContent  = (s.churned  || 0).toLocaleString();
+    document.getElementById('count-at-risk').textContent  = (s.at_risk   || 0).toLocaleString();
+    document.getElementById('count-churned').textContent  = (s.churned   || 0).toLocaleString();
+    document.getElementById('count-lost').textContent     = (s.lost      || 0).toLocaleString();
     document.getElementById('count-declining').textContent = (s.declining || 0).toLocaleString();
-    document.getElementById('count-stable').textContent   = (s.stable   || 0).toLocaleString();
+    document.getElementById('count-stable').textContent   = (s.stable    || 0).toLocaleString();
+    if (_data.run_date) {
+      document.getElementById('run-date-label').textContent = 'Run ' + fmtDate(_data.run_date);
+    }
   }
 
   // ── Populate location dropdown ───────────────────────────────────────────
@@ -429,7 +460,7 @@
 
     if (rows.length === 0) {
       tbody.innerHTML =
-        '<tr><td colspan="7" style="text-align:center;padding:32px 12px;' +
+        '<tr><td colspan="8" style="text-align:center;padding:32px 12px;' +
         'color:var(--muted);font-size:13px">No at-risk accounts' +
         (locFilter ? ' for this location' : '') + '</td></tr>';
       return;
@@ -439,6 +470,9 @@
       var locLabel = r.location_name
         ? escHtml(r.location_name) + '&nbsp;<span class="loc-id">' + escHtml(r.location_id) + '</span>'
         : '<span class="loc-id">' + escHtml(r.location_id || '\u2014') + '</span>';
+      var daysInactive = r.days_since_last_purchase != null
+        ? r.days_since_last_purchase.toLocaleString()
+        : '\u2014';
 
       return '<tr>' +
         '<td>' + escHtml(r.customer_id || '\u2014') + '</td>' +
@@ -447,6 +481,7 @@
         '<td class="right">' + fmtMoney(r.last_90_days_spend) + '</td>' +
         '<td class="right" style="' + pctStyle(r.pct_change) + '">' + fmtPct(r.pct_change) + '</td>' +
         '<td>' + flagBadge(r.flag) + '</td>' +
+        '<td class="right" style="color:var(--muted)">' + daysInactive + '</td>' +
         '<td>' + fmtDate(r.last_purchase_date) + '</td>' +
         '</tr>';
     }).join('');
@@ -455,7 +490,7 @@
   // ── Sort on header click ─────────────────────────────────────────────────
 
   document.addEventListener('DOMContentLoaded', function() {
-    var NUMERIC_COLS = { baseline_monthly_spend: true, last_90_days_spend: true, pct_change: true };
+    var NUMERIC_COLS = { baseline_monthly_spend: true, last_90_days_spend: true, pct_change: true, days_since_last_purchase: true };
 
     document.querySelectorAll('#churn-table th.sortable').forEach(function(th) {
       th.addEventListener('click', function() {

@@ -1766,25 +1766,33 @@ function renderChurnSummary(data) {
     return;
   }
   var runLabel = data.run_date ? '<span style="font-size:11px;color:var(--muted)">Run: ' + escHtml(data.run_date) + '</span>' : '';
+  var revAtRisk = data.annual_revenue_at_risk
+    ? '<div style="margin-top:10px;padding-top:10px;border-top:1px solid var(--border2);font-size:12px;color:var(--muted)">' +
+      'Annual revenue at risk &nbsp;<span style="color:var(--critical);font-weight:700;font-size:14px">' +
+      fmtMoney(data.annual_revenue_at_risk) + '</span>' +
+      '&nbsp;<span style="color:var(--muted);font-size:11px">(AT_RISK + CHURNED + LOST + DECLINING)</span></div>'
+    : '';
+  var card = function(bg, bdr, labelColor, label, count) {
+    return '<div style="background:' + bg + ';border:1px solid ' + bdr + ';border-radius:8px;padding:12px 16px;min-width:80px;text-align:center">' +
+      '<div style="font-size:10px;color:' + labelColor + ';text-transform:uppercase;letter-spacing:0.5px;font-weight:600">' + label + '</div>' +
+      '<div style="font-size:26px;font-weight:700;color:' + labelColor + '">' + fmtNum(count) + '</div>' +
+      '</div>';
+  };
   body.innerHTML =
-    '<div style="display:flex;align-items:center;gap:24px;flex-wrap:wrap">' +
-    '<div style="display:flex;gap:16px;flex:1;flex-wrap:wrap">' +
-    '<div style="background:var(--critical-bg);border:1px solid rgba(248,81,73,0.3);border-radius:8px;padding:12px 20px;min-width:100px;text-align:center">' +
-      '<div style="font-size:11px;color:var(--critical);text-transform:uppercase;letter-spacing:0.5px;font-weight:600">Churned</div>' +
-      '<div style="font-size:28px;font-weight:700;color:var(--critical)">' + fmtNum(data.churned) + '</div>' +
-    '</div>' +
-    '<div style="background:var(--warning-bg);border:1px solid rgba(210,153,34,0.3);border-radius:8px;padding:12px 20px;min-width:100px;text-align:center">' +
-      '<div style="font-size:11px;color:var(--warning);text-transform:uppercase;letter-spacing:0.5px;font-weight:600">Declining</div>' +
-      '<div style="font-size:28px;font-weight:700;color:var(--warning)">' + fmtNum(data.declining) + '</div>' +
-    '</div>' +
-    '<div style="background:var(--success-bg);border:1px solid rgba(63,185,80,0.3);border-radius:8px;padding:12px 20px;min-width:100px;text-align:center">' +
-      '<div style="font-size:11px;color:var(--success);text-transform:uppercase;letter-spacing:0.5px;font-weight:600">Stable</div>' +
-      '<div style="font-size:28px;font-weight:700;color:var(--success)">' + fmtNum(data.stable) + '</div>' +
-    '</div>' +
+    '<div style="display:flex;flex-direction:column;gap:0">' +
+    '<div style="display:flex;align-items:center;gap:16px;flex-wrap:wrap">' +
+    '<div style="display:flex;gap:10px;flex:1;flex-wrap:wrap">' +
+    card('rgba(227,179,65,0.12)', 'rgba(227,179,65,0.35)', 'var(--amber)',    'At Risk', data.at_risk)  +
+    card('var(--critical-bg)',    'rgba(248,81,73,0.3)',   'var(--critical)', 'Churned', data.churned)  +
+    card('rgba(160,60,58,0.14)',  'rgba(160,60,58,0.35)', '#c46360',         'Lost',    data.lost)      +
+    card('var(--warning-bg)',     'rgba(210,153,34,0.3)', 'var(--warning)',   'Declining', data.declining) +
+    card('var(--success-bg)',     'rgba(63,185,80,0.3)',  'var(--success)',   'Stable',  data.stable)    +
     '</div>' +
     '<div style="display:flex;flex-direction:column;align-items:flex-end;gap:8px">' + runLabel +
     '<a href="/churn" style="background:var(--surface2);color:var(--blue);border:1px solid var(--border);border-radius:6px;padding:8px 16px;font-size:12px;font-weight:600;text-decoration:none;white-space:nowrap">View Full Report &rarr;</a>' +
     '</div>' +
+    '</div>' +
+    revAtRisk +
     '</div>';
 }
 

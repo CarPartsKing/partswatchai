@@ -1422,25 +1422,35 @@ def _build_understocking(client: Any, today: date) -> dict:
 
 
 def _build_churn_summary(client: Any, today: date) -> dict:
-    """Lightweight CHURNED/DECLINING/STABLE counts for the dashboard teaser card."""
+    """AT_RISK/CHURNED/LOST/DECLINING/STABLE counts + annual revenue at risk for dashboard card."""
+    _empty = {
+        "at_risk": 0, "churned": 0, "lost": 0, "declining": 0, "stable": 0,
+        "total": 0, "annual_revenue_at_risk": 0.0, "run_date": None,
+    }
     try:
-        rows = _paginate(client, "customer_churn_flags", "flag,run_date")
+        rows = _paginate(client, "customer_churn_flags", "flag,baseline_monthly_spend,run_date")
     except Exception:
-        return {"churned": 0, "declining": 0, "stable": 0, "total": 0, "run_date": None}
-    counts: dict[str, int] = {"CHURNED": 0, "DECLINING": 0, "STABLE": 0}
+        return _empty
+    counts: dict[str, int] = {"AT_RISK": 0, "CHURNED": 0, "LOST": 0, "DECLINING": 0, "STABLE": 0}
+    annual_at_risk = 0.0
     run_date = None
     for r in rows:
         flag = r.get("flag") or "STABLE"
         counts[flag] = counts.get(flag, 0) + 1
+        if flag in ("AT_RISK", "CHURNED", "LOST", "DECLINING"):
+            annual_at_risk += float(r.get("baseline_monthly_spend") or 0) * 12
         rd = r.get("run_date")
         if rd and (run_date is None or rd > run_date):
             run_date = rd
     return {
-        "churned":  counts.get("CHURNED",  0),
-        "declining": counts.get("DECLINING", 0),
-        "stable":   counts.get("STABLE",   0),
-        "total":    sum(counts.values()),
-        "run_date": run_date,
+        "at_risk":               counts.get("AT_RISK",   0),
+        "churned":               counts.get("CHURNED",   0),
+        "lost":                  counts.get("LOST",      0),
+        "declining":             counts.get("DECLINING", 0),
+        "stable":                counts.get("STABLE",    0),
+        "total":                 sum(counts.values()),
+        "annual_revenue_at_risk": round(annual_at_risk, 0),
+        "run_date":              run_date,
     }
 
 
@@ -2014,43 +2024,49 @@ def chat():
 def _build_churn(client: Any) -> dict:
     rows = _paginate(
         client, "customer_churn_flags",
-        "customer_id,location_id,baseline_monthly_spend,last_90_days_spend,"
-        "pct_change,flag,last_purchase_date,run_date",
+        "customer_id,location_id,is_commercial,salesman_id,baseline_monthly_spend,"
+        "last_90_days_spend,pct_change,flag,risk_segment,days_since_last_purchase,"
+        "last_purchase_date,run_date",
         order_col="baseline_monthly_spend",
         order_desc=True,
     )
 
-    summary: dict[str, int] = {"CHURNED": 0, "DECLINING": 0, "STABLE": 0}
+    summary: dict[str, int] = {"AT_RISK": 0, "CHURNED": 0, "LOST": 0, "DECLINING": 0, "STABLE": 0}
+    annual_at_risk = 0.0
     locations_seen: set[str] = set()
     for r in rows:
-        f = r.get("flag", "STABLE")
-        if f in summary:
-            summary[f] += 1
+        f = r.get("flag") or "STABLE"
+        summary[f] = summary.get(f, 0) + 1
+        if f in ("AT_RISK", "CHURNED", "LOST", "DECLINING"):
+            annual_at_risk += float(r.get("baseline_monthly_spend") or 0) * 12
         loc = r.get("location_id")
         if loc:
             locations_seen.add(loc)
 
-    at_risk = []
+    flagged_rows = []
     for r in rows:
-        if r.get("flag") not in ("CHURNED", "DECLINING"):
+        if r.get("flag") == "STABLE":
             continue
         loc = r.get("location_id", "")
         r["location_name"] = LOCATION_NAMES.get(loc, "")
-        at_risk.append(r)
+        flagged_rows.append(r)
 
     run_date = rows[0].get("run_date") if rows else None
 
     return {
-        "run_date":      run_date,
+        "run_date": run_date,
         "summary": {
-            "churned":   summary["CHURNED"],
-            "declining": summary["DECLINING"],
-            "stable":    summary["STABLE"],
-            "total":     len(rows),
+            "at_risk":               summary["AT_RISK"],
+            "churned":               summary["CHURNED"],
+            "lost":                  summary["LOST"],
+            "declining":             summary["DECLINING"],
+            "stable":                summary["STABLE"],
+            "total":                 len(rows),
+            "annual_revenue_at_risk": round(annual_at_risk, 0),
         },
         "locations":      sorted(locations_seen),
         "location_names": {loc: LOCATION_NAMES.get(loc, loc) for loc in locations_seen},
-        "rows":           at_risk,
+        "rows":           flagged_rows,
     }
 
 

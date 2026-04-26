@@ -79,6 +79,8 @@ PROPHET_WEIGHT: float = 0.60
 # rolling-avg network fallback in ml/forecast_rolling.py.  Set to 0 to
 # disable the cap (full A-class run) — primarily for backfills.
 PROPHET_TOP_N: int = 500
+GP_SELECTION_LOOKBACK_DAYS: int = 90   # window for GP-based SKU ranking
+GP_MIN_SKUS: int = 100                 # fall back to volume if fewer GP-ranked SKUs
 XGBOOST_WEIGHT: float = 0.40
 MIN_HISTORY_DAYS: int = 90
 BATCH_SIZE: int = 50
@@ -200,17 +202,69 @@ def _fetch_chunked_by_date(
     return all_rows
 
 
-def _fetch_a_class_skus(client: Any, top_n: int = 0) -> list[dict]:
-    """Return active A-class SKUs, optionally capped to the top-N by revenue.
+def _fetch_gp_contributions(client: Any, lookback_days: int = GP_SELECTION_LOOKBACK_DAYS) -> dict[str, float]:
+    """Fetch sum(gross_profit) per prod_line_pn from sales_detail_transactions.
 
-    When ``top_n > 0``, SKUs are ranked by ``avg_weekly_units * unit_cost``
-    (revenue proxy) descending; when ``unit_cost`` is missing the rank
-    falls back to ``avg_weekly_units`` alone.  This caps the per-night
-    Prophet training cost while keeping coverage of the highest-dollar-
-    volume parts.  Set ``top_n=0`` to disable (full A-class run).
+    Covers tran_code IN ('SL', 'SL-I') over the last ``lookback_days`` days.
+    Returns only SKUs with positive net GP (negatives cancel margin from returns).
     """
-    # Try to pull ranking columns; fall back gracefully if a column is
-    # missing in this environment (e.g. unit_cost not yet populated).
+    cutoff = (date.today() - timedelta(days=lookback_days)).isoformat()
+    select = "prod_line_pn,gross_profit"
+    acc: dict[str, float] = defaultdict(float)
+    total_rows = 0
+    for tran_code in ("SL", "SL-I"):
+        rows = _fetch_chunked_by_date(
+            client, "sales_detail_transactions", select,
+            date_col="tran_date", since=cutoff,
+            extra_eq={"tran_code": tran_code},
+        )
+        total_rows += len(rows)
+        for r in rows:
+            pn = r.get("prod_line_pn")
+            gp = r.get("gross_profit")
+            if pn and gp is not None:
+                try:
+                    acc[pn] += float(gp)
+                except (TypeError, ValueError):
+                    pass
+    positive = {pn: gp for pn, gp in acc.items() if gp > 0}
+    log.info(
+        "  GP fetch: %d transaction rows → %d SKUs with positive 90d GP",
+        total_rows, len(positive),
+    )
+    return positive
+
+
+def _rank_by_volume(active: list[dict]) -> list[dict]:
+    """Sort A-class SKU rows by avg_weekly_units × unit_cost descending."""
+    def _proxy(r: dict) -> float:
+        try:
+            wkly = float(r.get("avg_weekly_units") or 0.0)
+        except (TypeError, ValueError):
+            wkly = 0.0
+        try:
+            cost = float(r.get("unit_cost") or 0.0)
+        except (TypeError, ValueError):
+            cost = 0.0
+        return wkly * cost if cost > 0 else wkly
+
+    return sorted(active, key=_proxy, reverse=True)
+
+
+def _fetch_a_class_skus(
+    client: Any,
+    top_n: int = 0,
+    gp_contribs: dict[str, float] | None = None,
+) -> list[dict]:
+    """Return active A-class SKUs ranked by 90d GP contribution.
+
+    When ``gp_contribs`` is provided and covers >= GP_MIN_SKUS SKUs, ranking
+    uses sum(gross_profit) descending.  Otherwise falls back to the volume
+    proxy (avg_weekly_units × unit_cost).
+
+    Set ``top_n=0`` to disable the cap (full A-class run, used for backfills
+    and single-SKU debugging).
+    """
     select_attempts = [
         "sku_id,abc_class,abc_xyz_class,avg_weekly_units,unit_cost",
         "sku_id,abc_class,abc_xyz_class,avg_weekly_units",
@@ -232,29 +286,86 @@ def _fetch_a_class_skus(client: Any, top_n: int = 0) -> list[dict]:
     active = [r for r in rows if r.get("sku_id")]
     log.info("  A-class SKUs found in sku_master: %d", len(active))
 
-    if top_n and len(active) > top_n:
-        def _revenue_proxy(r: dict) -> float:
-            try:
-                wkly = float(r.get("avg_weekly_units") or 0.0)
-            except (TypeError, ValueError):
-                wkly = 0.0
-            try:
-                cost = float(r.get("unit_cost") or 0.0)
-            except (TypeError, ValueError):
-                cost = 0.0
-            # Use weekly × cost when both available; otherwise weekly
-            # alone keeps high-velocity SKUs at the top even if cost is
-            # null in source (see Product cube unit_cost gap, P1).
-            return wkly * cost if cost > 0 else wkly
+    if not top_n or len(active) <= top_n:
+        return active
 
-        active.sort(key=_revenue_proxy, reverse=True)
+    gp_hits = {sku_id for sku_id in (r["sku_id"] for r in active)
+               if gp_contribs and sku_id in gp_contribs}
+
+    if gp_contribs and len(gp_hits) >= GP_MIN_SKUS:
+        active.sort(key=lambda r: gp_contribs.get(r["sku_id"], 0.0), reverse=True)
         active = active[:top_n]
         log.info(
-            "  Capped to top %d A-class SKUs by revenue proxy "
+            "  Capped to top %d A-class SKUs by 90d GP contribution "
+            "(GP_MIN_SKUS=%d met; %d SKUs had GP data). "
+            "Lowest-ranked included: %s",
+            top_n, GP_MIN_SKUS, len(gp_hits), active[-1].get("sku_id"),
+        )
+    else:
+        if gp_contribs is not None:
+            log.warning(
+                "  GP method produced only %d matching SKUs (need >= %d); "
+                "falling back to volume proxy.", len(gp_hits), GP_MIN_SKUS,
+            )
+        ranked = _rank_by_volume(active)
+        active = ranked[:top_n]
+        log.info(
+            "  Capped to top %d A-class SKUs by volume proxy "
             "(avg_weekly_units × unit_cost). Lowest-ranked included: %s",
             top_n, active[-1].get("sku_id"),
         )
     return active
+
+
+def _log_selection_comparison(
+    active: list[dict],
+    gp_contribs: dict[str, float],
+    top_n: int,
+) -> None:
+    """Log side-by-side top-10 comparison: GP method vs volume method."""
+    # GP ranking
+    gp_ranked = sorted(
+        [r for r in active if r["sku_id"] in gp_contribs],
+        key=lambda r: gp_contribs[r["sku_id"]], reverse=True,
+    )[:top_n]
+    gp_top10 = gp_ranked[:10]
+
+    # Volume ranking
+    vol_ranked = _rank_by_volume(active)[:top_n]
+    vol_top10 = vol_ranked[:10]
+
+    gp_set = {r["sku_id"] for r in gp_ranked}
+    vol_set = {r["sku_id"] for r in vol_ranked}
+    only_gp = gp_set - vol_set
+    only_vol = vol_set - gp_set
+
+    log.info("─" * 70)
+    log.info("SKU SELECTION DRY RUN — top %d from %d A-class SKUs", top_n, len(active))
+    log.info("  GP-ranked SKUs with data: %d  (need >= %d to use GP method)",
+             len(gp_ranked), GP_MIN_SKUS)
+    log.info("")
+    log.info("  TOP 10 — GP contribution method (sum gross_profit, 90d):")
+    for i, r in enumerate(gp_top10, 1):
+        gp_val = gp_contribs.get(r["sku_id"], 0.0)
+        log.info(f"    {i:2d}. {r['sku_id']:<20s}  GP=${gp_val:,.0f}")
+    log.info("")
+    log.info("  TOP 10 — Volume proxy method (avg_weekly_units × unit_cost):")
+    for i, r in enumerate(vol_top10, 1):
+        try:
+            wkly = float(r.get("avg_weekly_units") or 0)
+            cost = float(r.get("unit_cost") or 0)
+            proxy = wkly * cost if cost > 0 else wkly
+        except (TypeError, ValueError):
+            proxy = 0.0
+        log.info("    %2d. %-20s  proxy=%.1f", i, r["sku_id"], proxy)
+    log.info("")
+    log.info("  In GP top-%d but NOT volume top-%d: %d SKUs", top_n, top_n, len(only_gp))
+    for sku in sorted(only_gp)[:10]:
+        log.info(f"    + {sku}  (90d GP=${gp_contribs.get(sku, 0):,.0f})")
+    log.info("  In volume top-%d but NOT GP top-%d: %d SKUs", top_n, top_n, len(only_vol))
+    for sku in sorted(only_vol)[:10]:
+        log.info("    - %s", sku)
+    log.info("─" * 70)
 
 
 def _fetch_transactions(client: Any, cutoff: str) -> list[dict]:
@@ -808,6 +919,7 @@ def run_forecast(
     mode: str = "full",
     dry_run: bool = False,
     single_sku: str | None = None,
+    selection_dry_run: bool = False,
 ) -> int:
     t_start = time.perf_counter()
     today = date.today()
@@ -852,12 +964,35 @@ def run_forecast(
                 exc.__class__.__name__,
             )
 
+    log.info("Fetching 90d GP contributions for SKU selection …")
+    try:
+        gp_contribs = _fetch_gp_contributions(client)
+    except Exception as exc:
+        log.warning(
+            "GP contribution fetch failed (%s); will fall back to volume proxy.",
+            exc.__class__.__name__,
+        )
+        gp_contribs = {}
+
     log.info("Fetching A-class SKUs …")
     # Cap to PROPHET_TOP_N for full nightly runs; load all A-class for
     # explicit single-SKU debugging so the requested SKU is always
     # discoverable regardless of revenue rank.
     top_n_for_run = 0 if single_sku else PROPHET_TOP_N
-    a_class_rows = _fetch_a_class_skus(client, top_n=top_n_for_run)
+    a_class_rows = _fetch_a_class_skus(
+        client, top_n=top_n_for_run,
+        gp_contribs=gp_contribs if not single_sku else None,
+    )
+
+    if selection_dry_run:
+        all_active = _fetch_all(client, "sku_master",
+                                "sku_id,abc_class,abc_xyz_class,avg_weekly_units,unit_cost",
+                                filters={"abc_class": "A"})
+        all_active = [r for r in all_active if r.get("sku_id")]
+        _log_selection_comparison(all_active, gp_contribs, PROPHET_TOP_N)
+        log.info("Selection dry-run complete — no forecast was run.")
+        return 0
+
     if single_sku:
         a_class_rows = [r for r in a_class_rows if r["sku_id"] == single_sku]
         if not a_class_rows:
@@ -1143,6 +1278,13 @@ def _parse_args() -> argparse.Namespace:
         "--dry-run", action="store_true", default=False,
         help="Compute forecasts but do not write to the database.",
     )
+    parser.add_argument(
+        "--dry-run-selection", action="store_true", default=False,
+        help=(
+            "Fetch GP contributions and A-class SKUs, then log top-10 comparison "
+            "of GP method vs volume method — exits before running any forecasts."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -1158,6 +1300,7 @@ def main() -> int:
         mode=args.mode,
         dry_run=args.dry_run,
         single_sku=args.sku,
+        selection_dry_run=args.dry_run_selection,
     )
 
 

@@ -751,7 +751,7 @@ def _build_location_performance(client: Any, today: date) -> dict:
     except Exception:
         log.debug("sku_location_class count fetch failed — abc mix will be absent.")
 
-    tier3_locs = [l["location_id"] for l in tiers.get(3, [])]
+    tier3_locs = {l["location_id"] for l in tiers.get(3, [])}
     tier3_critical: list[str] = []
     if tier3_locs:
         alert_rows = _paginate(
@@ -759,11 +759,10 @@ def _build_location_performance(client: Any, today: date) -> dict:
             "location_id,severity",
             filters={"alert_date": today.isoformat()},
             eq_bool={"is_acknowledged": False},
-            in_filters={"location_id": tier3_locs},
         )
         tier3_critical = sorted({
             r["location_id"] for r in alert_rows
-            if r.get("severity") == "critical"
+            if r.get("severity") == "critical" and r.get("location_id") in tier3_locs
         })
 
     return {

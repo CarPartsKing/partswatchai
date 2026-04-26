@@ -1654,8 +1654,17 @@ function renderAnomalySummary(data) {
   document.getElementById('anomaly-updated').textContent = 'Updated ' + nowStr();
   if (!data) return;
 
+  var volCount = (data.top_high ? data.top_high.length : 0) + (data.top_low ? data.top_low.length : 0);
   var statsHtml = '<div style="display:flex;gap:24px;margin-bottom:16px;flex-wrap:wrap">' +
-    '<div><div style="font-size:11px;color:var(--muted);text-transform:uppercase">Total Flagged</div><div style="font-size:24px;font-weight:700;color:var(--warning)">' + fmtNum(data.total_flagged) + '</div></div>';
+    '<div><div style="font-size:11px;color:var(--muted);text-transform:uppercase">Total Flagged</div>' +
+      '<div style="font-size:24px;font-weight:700;color:var(--warning)">' + fmtNum(data.total_flagged) + '</div>' +
+      '<div style="font-size:11px;color:var(--muted)">Last 30 days</div></div>' +
+    '<div><div style="font-size:11px;color:var(--muted);text-transform:uppercase">Volume Anomalies</div>' +
+      '<div style="font-size:24px;font-weight:700;color:var(--warning)">' + fmtNum(volCount) + '</div>' +
+      '<div style="font-size:11px;color:var(--muted)">HIGH + LOW qty</div></div>' +
+    '<div><div style="font-size:11px;color:var(--muted);text-transform:uppercase">GP Anomalies</div>' +
+      '<div style="font-size:24px;font-weight:700;color:var(--critical)">' + fmtNum(data.gp_count || 0) + '</div>' +
+      '<div style="font-size:11px;color:var(--muted)">Margin erosion</div></div>';
 
   if (data.location_distribution) {
     var locHtml = Object.keys(data.location_distribution).map(function(loc) {
@@ -1668,35 +1677,38 @@ function renderAnomalySummary(data) {
   }
   statsHtml += '</div>';
 
+  function anomalyRow(r) {
+    return '<tr><td><span class="sku-id">' + escHtml(r.sku_id) + '</span></td>' +
+      '<td><span class="loc-id">' + escHtml(r.location_display || r.location_id) + '</span></td>' +
+      '<td style="font-size:12px">' + (r.date || '\u2014') + '</td>' +
+      '<td style="font-size:12px;color:var(--muted);max-width:420px;white-space:normal">' + escHtml(r.message || '') + '</td></tr>';
+  }
+
   var highRows = '';
   if (data.top_high && data.top_high.length) {
-    highRows = '<div style="margin-bottom:12px"><div style="font-size:11px;color:var(--muted);text-transform:uppercase;margin-bottom:6px">Highest Quantity Anomalies</div>' +
-      '<table class="data-table"><thead><tr><th>SKU</th><th>Location</th><th>Date</th><th class="right">Qty</th><th class="right">Revenue</th></tr></thead><tbody>' +
-      data.top_high.slice(0, 6).map(function(r) {
-        return '<tr><td><span class="sku-id">' + escHtml(r.sku_id) + '</span></td>' +
-          '<td><span class="loc-id">' + escHtml(r.location_display || r.location_id) + '</span></td>' +
-          '<td style="font-size:12px">' + (r.date || '\u2014') + '</td>' +
-          '<td class="right anomaly-high" style="font-weight:600">' + fmtNum(r.qty) + '</td>' +
-          '<td class="right">' + fmtMoney(r.revenue) + '</td></tr>';
-      }).join('') +
+    highRows = '<div style="margin-bottom:12px"><div style="font-size:11px;color:var(--muted);text-transform:uppercase;margin-bottom:6px">HIGH Volume Anomalies</div>' +
+      '<table class="data-table"><thead><tr><th>SKU</th><th>Location</th><th>Date</th><th>Details &amp; Action</th></tr></thead><tbody>' +
+      data.top_high.slice(0, 6).map(anomalyRow).join('') +
       '</tbody></table></div>';
   }
 
   var lowRows = '';
   if (data.top_low && data.top_low.length) {
-    lowRows = '<div><div style="font-size:11px;color:var(--muted);text-transform:uppercase;margin-bottom:6px">Negative Qty Anomalies (Returns/Credits)</div>' +
-      '<table class="data-table"><thead><tr><th>SKU</th><th>Location</th><th>Date</th><th class="right">Qty</th><th class="right">Revenue</th></tr></thead><tbody>' +
-      data.top_low.slice(0, 5).map(function(r) {
-        return '<tr><td><span class="sku-id">' + escHtml(r.sku_id) + '</span></td>' +
-          '<td><span class="loc-id">' + escHtml(r.location_display || r.location_id) + '</span></td>' +
-          '<td style="font-size:12px">' + (r.date || '\u2014') + '</td>' +
-          '<td class="right anomaly-neg" style="font-weight:600">' + fmtNum(r.qty) + '</td>' +
-          '<td class="right">' + fmtMoney(r.revenue) + '</td></tr>';
-      }).join('') +
+    lowRows = '<div style="margin-bottom:12px"><div style="font-size:11px;color:var(--muted);text-transform:uppercase;margin-bottom:6px">LOW Volume Anomalies</div>' +
+      '<table class="data-table"><thead><tr><th>SKU</th><th>Location</th><th>Date</th><th>Details &amp; Action</th></tr></thead><tbody>' +
+      data.top_low.slice(0, 5).map(anomalyRow).join('') +
       '</tbody></table></div>';
   }
 
-  document.getElementById('anomaly-body').innerHTML = statsHtml + highRows + lowRows;
+  var gpRows = '';
+  if (data.top_gp && data.top_gp.length) {
+    gpRows = '<div><div style="font-size:11px;color:var(--muted);text-transform:uppercase;margin-bottom:6px">GP% Anomalies \u2014 Margin Erosion</div>' +
+      '<table class="data-table"><thead><tr><th>SKU</th><th>Location</th><th>Date</th><th>Details &amp; Action</th></tr></thead><tbody>' +
+      data.top_gp.slice(0, 8).map(anomalyRow).join('') +
+      '</tbody></table></div>';
+  }
+
+  document.getElementById('anomaly-body').innerHTML = statsHtml + highRows + lowRows + gpRows;
 }
 
 function renderLocations(data) {

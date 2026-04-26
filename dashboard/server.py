@@ -754,7 +754,15 @@ def _build_network_kpis(client: Any, today: date) -> dict:
             abc_counts[cls] = 0
 
     try:
-        anom_r = client.table("sales_transactions").select("transaction_id", count="exact").eq("is_anomaly", True).limit(1).execute()
+        cutoff_30 = (today - timedelta(days=30)).isoformat()
+        anom_r = (
+            client.table("alerts")
+            .select("id", count="exact")
+            .in_("alert_type", ["volume_anomaly", "gp_anomaly"])
+            .gte("alert_date", cutoff_30)
+            .limit(1)
+            .execute()
+        )
         anomaly_count = anom_r.count or 0
     except Exception:
         anomaly_count = 0
@@ -810,73 +818,51 @@ def _build_top_skus(client: Any, today: date) -> list[dict]:
 
 
 def _build_anomaly_summary(client: Any, today: date) -> dict:
-    try:
-        anom_r = client.table("sales_transactions").select("transaction_id", count="exact").eq("is_anomaly", True).limit(1).execute()
-        total_flagged = anom_r.count or 0
-    except Exception:
-        total_flagged = 0
-
-    # Tight 30-day window (was 90) and order by transaction_date (indexed)
-    # instead of qty_sold (not indexed) so Postgres can use the
-    # is_anomaly+transaction_date composite index and stop after 1000 rows.
+    # Source from alerts table — volume_anomaly (Isolation Forest) and
+    # gp_anomaly (GP% drop detection) written by ml/anomaly.py each night.
     cutoff = (today - timedelta(days=30)).isoformat()
-    recent_anom: list[dict] = []
+    alert_rows: list[dict] = []
     try:
-        recent_anom = (
-            client.table("sales_transactions")
-            .select("sku_id,location_id,transaction_date,qty_sold,unit_price,total_revenue")
-            .eq("is_anomaly", True)
-            .gte("transaction_date", cutoff)
-            .order("transaction_date", desc=True)
-            .limit(1000)
-            .execute()
-            .data or []
+        alert_rows = _paginate(
+            client, "alerts",
+            "alert_type,severity,sku_id,location_id,message,alert_date",
+            in_filters={"alert_type": ["volume_anomaly", "gp_anomaly"]},
+            gte_filters={"alert_date": cutoff},
         )
     except Exception:
-        recent_anom = []
+        alert_rows = []
 
-    sorted_by_qty = sorted(
-        recent_anom,
-        key=lambda r: float(r.get("qty_sold") or 0),
-        reverse=True,
-    )
-    top_high = sorted_by_qty[:8]
-    top_low  = sorted_by_qty[-5:][::-1] if len(sorted_by_qty) >= 5 else []
+    vol_high = [r for r in alert_rows
+                if r.get("alert_type") == "volume_anomaly" and r.get("severity") == "warning"]
+    vol_low  = [r for r in alert_rows
+                if r.get("alert_type") == "volume_anomaly" and r.get("severity") == "info"]
+    gp_list  = [r for r in alert_rows if r.get("alert_type") == "gp_anomaly"]
 
-    loc_dist: dict[str, dict] = {}
+    def _fmt(r: dict) -> dict:
+        return {
+            "sku_id":           r.get("sku_id") or "—",
+            "location_id":      r.get("location_id") or "—",
+            "location_display": _loc_display(r.get("location_id") or ""),
+            "date":             r.get("alert_date") or "",
+            "message":          (r.get("message") or "")[:220],
+        }
+
+    # Location distribution — count anomaly alerts per location in sample set
     sample_locs = ["LOC-008", "LOC-025", "LOC-004", "LOC-001", "LOC-005"]
-    for loc in sample_locs:
-        try:
-            r = client.table("sales_transactions").select("transaction_id", count="exact").eq("is_anomaly", True).eq("location_id", loc).gte("transaction_date", cutoff).limit(1).execute()
-            loc_dist[loc] = {"count": r.count or 0, "display": _loc_display(loc)}
-        except Exception:
-            loc_dist[loc] = {"count": 0, "display": _loc_display(loc)}
+    loc_dist: dict[str, dict] = {
+        loc: {
+            "count":   sum(1 for r in alert_rows if r.get("location_id") == loc),
+            "display": _loc_display(loc),
+        }
+        for loc in sample_locs
+    }
 
     return {
-        "total_flagged": total_flagged,
-        "top_high": [
-            {
-                "sku_id": r["sku_id"],
-                "location_id": r["location_id"],
-                "location_display": _loc_display(r["location_id"]),
-                "date": r.get("transaction_date", ""),
-                "qty": float(r.get("qty_sold") or 0),
-                "price": float(r.get("unit_price") or 0),
-                "revenue": float(r.get("total_revenue") or 0),
-            }
-            for r in top_high
-        ],
-        "top_low": [
-            {
-                "sku_id": r["sku_id"],
-                "location_id": r["location_id"],
-                "location_display": _loc_display(r["location_id"]),
-                "date": r.get("transaction_date", ""),
-                "qty": float(r.get("qty_sold") or 0),
-                "revenue": float(r.get("total_revenue") or 0),
-            }
-            for r in top_low
-        ],
+        "total_flagged":         len(alert_rows),
+        "top_high":              [_fmt(r) for r in vol_high[:8]],
+        "top_low":               [_fmt(r) for r in vol_low[:5]],
+        "top_gp":                [_fmt(r) for r in gp_list[:8]],
+        "gp_count":              len(gp_list),
         "location_distribution": loc_dist,
     }
 

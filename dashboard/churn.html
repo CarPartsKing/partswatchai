@@ -473,9 +473,12 @@
       var daysInactive = r.days_since_last_purchase != null
         ? r.days_since_last_purchase.toLocaleString()
         : '\u2014';
+      var commercialBadge = r.is_commercial
+        ? ' <span style="background:rgba(56,139,253,0.1);color:#58a6ff;border:1px solid rgba(88,166,255,0.25);border-radius:10px;padding:1px 6px;font-size:10px;font-weight:600;letter-spacing:0.3px;text-transform:uppercase">COM</span>'
+        : '';
 
       return '<tr>' +
-        '<td>' + escHtml(r.customer_id || '\u2014') + '</td>' +
+        '<td>' + escHtml(r.customer_id || '\u2014') + commercialBadge + '</td>' +
         '<td>' + locLabel + '</td>' +
         '<td class="right">' + fmtMoney(r.baseline_monthly_spend) + '</td>' +
         '<td class="right">' + fmtMoney(r.last_90_days_spend) + '</td>' +

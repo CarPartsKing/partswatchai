@@ -1018,9 +1018,12 @@ function renderCriticalActions(items) {
     var sup = a.supplier_id ? '<span class="loc-id">' + escHtml(a.supplier_id) + '</span>' : '';
     var ctx = [sku, loc, sup].filter(Boolean).join(' &middot; ');
     var actionLabel = a.action || 'Acknowledge';
+    var fi = a.financial_impact > 0
+      ? '<span style="color:var(--critical);font-weight:700;font-size:12px;margin-left:8px">' + fmtMoney(a.financial_impact) + '</span>'
+      : '';
     return '<div class="crit-action-item">' +
       '<div>' + sev + '</div>' +
-      '<div><div class="desc"><strong>' + escHtml(a.title || '') + '</strong> &mdash; ' + escHtml(a.description || '') + '</div>' +
+      '<div><div class="desc"><strong>' + escHtml(a.title || '') + '</strong>' + fi + ' &mdash; ' + escHtml(a.description || '') + '</div>' +
       (ctx ? '<div class="meta">' + ctx + '</div>' : '') +
       '</div>' +
       '<button class="ack-btn" onclick="this.disabled=true;this.textContent=\'Acknowledged\'">' + escHtml(actionLabel) + '</button>' +
@@ -1230,12 +1233,17 @@ function renderDeadStock(payload) {
     if (!kpis.total_positions) {
       kpisEl.innerHTML = '';
     } else {
+      var cleanLabel = kpis.data_conflict_count > 0
+        ? fmtMoney(kpis.clean_capital) + ' <span style="font-size:11px;color:var(--muted)">(' + kpis.data_conflict_count + ' conflict rows excluded)</span>'
+        : fmtMoney(kpis.clean_capital);
       kpisEl.innerHTML =
-        '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:1px;background:var(--border);border-bottom:1px solid var(--border)">' +
-          '<div style="background:var(--surface);padding:14px 16px"><div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:0.5px">Total Capital at Risk</div><div style="font-size:28px;font-weight:700;color:var(--critical)">' + fmtMoney(kpis.capital_at_risk) + '</div></div>' +
+        '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:1px;background:var(--border);border-bottom:1px solid var(--border)">' +
+          '<div style="background:var(--surface);padding:14px 16px"><div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:0.5px">Total Capital at Risk</div><div style="font-size:26px;font-weight:700;color:var(--critical)">' + fmtMoney(kpis.capital_at_risk) + '</div></div>' +
+          '<div style="background:var(--surface);padding:14px 16px"><div style="font-size:11px;color:var(--success);text-transform:uppercase;letter-spacing:0.5px">Clean Capital at Risk</div><div style="font-size:22px;font-weight:600;color:var(--text)">' + cleanLabel + '</div></div>' +
           '<div style="background:var(--surface);padding:14px 16px"><div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:0.5px">Liquidate Candidates</div><div style="font-size:22px;font-weight:600;color:var(--critical)">' + fmtNum(kpis.liquidate_count) + '</div><div style="font-size:11px;color:var(--muted);margin-top:2px">' + fmtMoney(kpis.liquidate_value) + '</div></div>' +
           '<div style="background:var(--surface);padding:14px 16px"><div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:0.5px">Markdown Candidates</div><div style="font-size:22px;font-weight:600;color:var(--amber)">' + fmtNum(kpis.markdown_count) + '</div><div style="font-size:11px;color:var(--muted);margin-top:2px">' + fmtMoney(kpis.markdown_value) + '</div></div>' +
-          '<div style="background:var(--surface);padding:14px 16px"><div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:0.5px">Total Positions</div><div style="font-size:22px;font-weight:600;color:var(--text)">' + fmtNum(kpis.total_positions) + '</div></div>' +
+          '<div style="background:var(--surface);padding:14px 16px"><div style="font-size:11px;color:var(--blue);text-transform:uppercase;letter-spacing:0.5px">Transfer Candidates</div><div style="font-size:22px;font-weight:600;color:var(--blue)">' + fmtNum(kpis.transfer_count || 0) + '</div></div>' +
+          '<div style="background:var(--surface);padding:14px 16px"><div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:0.5px">Data Conflicts Excluded</div><div style="font-size:22px;font-weight:600;color:var(--muted)">' + fmtNum(kpis.data_conflict_count || 0) + '</div></div>' +
         '</div>';
     }
   }
@@ -1354,20 +1362,30 @@ function renderUnderstockingForSelected() {
                 : pct >= 50 ? badge('high',     pct + '% short')
                             : badge('medium',   pct + '% short');
     var transferTag = r.transfer_recommended_count > 0
-      ? ' <span class="badge medium" title="Transfer recommended ' +
+      ? ' <span class="badge badge-medium" title="Transfer recommended ' +
         r.transfer_recommended_count + 'x in last 30d (confirms chronic shortage)">' +
         '&#8644; ' + r.transfer_recommended_count + 'x</span>'
       : '';
+    var networkTag = r.network_flag
+      ? ' <span class="badge badge-info" title="Network-wide shortage — DC bulk buy triggered">&#127760; Network Buy</span>'
+      : '';
+    var dcTag = r.double_confirmed
+      ? ' <span class="badge badge-warning" title="Also flagged in OPSL Intelligence">&#9889; Double Confirmed</span>'
+      : '';
     var gapColor = r.min_qty_gap > 0 ? 'var(--critical)' : 'var(--muted)';
     var gapStr   = (r.min_qty_gap > 0 ? '+' : '') + fmtNum(Math.round(r.min_qty_gap));
+    var finSev   = r.financial_severity > 0
+      ? '<span style="color:var(--warning);font-weight:600">' + fmtMoney(r.financial_severity) + '</span>'
+      : '<span style="color:var(--muted)">—</span>';
     return '<tr>' +
-      '<td><span class="sku-id">' + escHtml(r.sku_id) + '</span>' + transferTag + '</td>' +
+      '<td><span class="sku-id">' + escHtml(r.sku_id) + '</span>' + transferTag + networkTag + dcTag + '</td>' +
       '<td style="color:var(--muted);font-size:12px">' + escHtml(r.sku_description || '') + '</td>' +
       '<td>' + pctBadge + '</td>' +
       '<td style="text-align:right">' + fmtNum(Math.round(r.current_min_qty)) + '</td>' +
       '<td style="text-align:right;font-weight:600">' + fmtNum(Math.round(r.suggested_min_qty)) + '</td>' +
       '<td style="text-align:right;color:' + gapColor + ';font-weight:600">' + gapStr + '</td>' +
       '<td style="text-align:right;color:var(--critical);font-weight:600">' + fmtMoney(r.inventory_value_at_risk) + '</td>' +
+      '<td style="text-align:right">' + finSev + '</td>' +
       '</tr>';
   }).join('');
 
@@ -1380,6 +1398,7 @@ function renderUnderstockingForSelected() {
       '<th style="text-align:right">Suggested Min</th>' +
       '<th style="text-align:right">Gap</th>' +
       '<th style="text-align:right">Value at Risk</th>' +
+      '<th style="text-align:right">GP Severity</th>' +
     '</tr></thead><tbody>' + rows + '</tbody></table>';
 }
 
@@ -1464,6 +1483,9 @@ function renderStockingGapsForSelected() {
     var clsBadge = cls === 'CHRONIC'   ? badge('critical', 'CHRONIC')
                  : cls === 'RECURRING' ? badge('high',     'RECURRING')
                                        : badge('medium',   'OCCASIONAL');
+    var dcTag = r.double_confirmed
+      ? ' <span class="badge badge-warning" title="Also flagged in OPSL Intelligence">&#9889; Double Confirmed</span>'
+      : '';
     var trendIcon = r.trend_direction === 'INCREASING' ? ' &#9650;'
                   : r.trend_direction === 'DECREASING' ? ' &#9660;' : '';
     var trendColor= r.trend_direction === 'INCREASING' ? 'var(--critical)'
@@ -1480,8 +1502,11 @@ function renderStockingGapsForSelected() {
     var savingsStr = r.annual_cost_savings != null
       ? '<span style="color:var(--success);font-weight:600">' + fmtMoney(r.annual_cost_savings) + '</span>'
       : '<span style="color:var(--muted)">—</span>';
+    var confStr = r.confidence != null
+      ? '<span style="color:var(--muted);font-size:11px">' + (parseFloat(r.confidence) * 100).toFixed(0) + '%</span>'
+      : '<span style="color:var(--muted)">—</span>';
     return '<tr>' +
-      '<td><span class="sku-id">' + escHtml(r.sku_id) + '</span><br>' + fromStr + '</td>' +
+      '<td><span class="sku-id">' + escHtml(r.sku_id) + '</span>' + dcTag + '<br>' + fromStr + '</td>' +
       '<td>' + clsBadge + '</td>' +
       '<td style="text-align:right">' + r.transfer_frequency + 'x</td>' +
       '<td style="text-align:right">' + r.transfer_streak + 'd</td>' +
@@ -1489,6 +1514,7 @@ function renderStockingGapsForSelected() {
       '<td style="text-align:right">' + curRop + '</td>' +
       '<td style="text-align:right;font-weight:600;color:var(--warning)">' + suggestStr + '</td>' +
       '<td style="text-align:right">' + savingsStr + '</td>' +
+      '<td style="text-align:right">' + confStr + '</td>' +
       '<td style="color:' + trendColor + '">' + escHtml(r.trend_direction) + trendIcon + '</td>' +
       '</tr>';
   }).join('');
@@ -1503,6 +1529,7 @@ function renderStockingGapsForSelected() {
       '<th style="text-align:right">Curr Min</th>' +
       '<th style="text-align:right">Suggest Stock</th>' +
       '<th style="text-align:right">Annual Savings</th>' +
+      '<th style="text-align:right">Confidence</th>' +
       '<th>Trend</th>' +
     '</tr></thead><tbody>' + rows + '</tbody></table>';
 }
@@ -1733,7 +1760,7 @@ function renderLocations(data) {
   tiers.forEach(function(t) {
     var locs = data[t.key] || [];
     if (!locs.length) return;
-    tableRows.push('<tr style="background:var(--surface2)"><td colspan="7" style="font-size:11px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:0.5px;padding:6px 10px">' + t.label + ' (' + locs.length + ')</td></tr>');
+    tableRows.push('<tr style="background:var(--surface2)"><td colspan="8" style="font-size:11px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:0.5px;padding:6px 10px">' + t.label + ' (' + locs.length + ')</td></tr>');
     locs.forEach(function(loc) {
       var l = typeof loc === 'string' ? { location_id: loc } : loc;
       var isCrit = critSet[l.location_id];
@@ -1746,6 +1773,9 @@ function renderLocations(data) {
         ? '<span style="background:var(--critical-bg);color:var(--critical);border:1px solid rgba(248,81,73,0.3);border-radius:4px;padding:1px 6px;font-size:11px;font-weight:600">' + l.churn_count + '</span>'
         : '<span style="color:var(--muted)">0</span>';
       var critBadge = isCrit ? '<span style="color:var(--critical);font-size:10px;margin-left:4px">\u26a0</span>' : '';
+      var aClassStr = l.a_class_count != null
+        ? '<span style="color:var(--blue);font-size:12px;font-weight:600">' + fmtNum(l.a_class_count) + '</span>'
+        : '<span style="color:var(--muted)">\u2014</span>';
       tableRows.push('<tr>' +
         '<td><span style="font-weight:500">' + escHtml(locLabel) + '</span>' + critBadge + '</td>' +
         '<td style="text-align:right">' + salesStr + '</td>' +
@@ -1753,6 +1783,7 @@ function renderLocations(data) {
         '<td style="text-align:right;color:' + gpColor + '">' + gpStr + '</td>' +
         '<td style="text-align:right">' + trendHtml(l.sales_trend_pct) + '</td>' +
         '<td style="text-align:right">' + churnBadge + '</td>' +
+        '<td style="text-align:right">' + aClassStr + '</td>' +
         '<td style="text-align:right;font-size:11px;color:var(--muted)">' + ((l.composite_tier_score || 0) * 100).toFixed(0) + '</td>' +
         '</tr>');
     });
@@ -1766,6 +1797,7 @@ function renderLocations(data) {
     '<th style="text-align:right">GP%</th>' +
     '<th style="text-align:right">vs Prior 90d</th>' +
     '<th style="text-align:right">At-Risk Accts</th>' +
+    '<th style="text-align:right">A-Class SKUs</th>' +
     '<th style="text-align:right">Score</th>' +
     '</tr></thead><tbody>' + tableRows.join('') + '</tbody></table>';
 }
@@ -1850,19 +1882,24 @@ function renderOPSLIntelligence(data) {
       '<th onclick="sortTableBy(\'opsl-table\',1)" style="cursor:pointer">Location</th>' +
       '<th onclick="sortTableBy(\'opsl-table\',2,true)" style="cursor:pointer;text-align:right">Outside Purchases</th>' +
       '<th onclick="sortTableBy(\'opsl-table\',3,true)" style="cursor:pointer;text-align:right">Total Sales</th>' +
-      '<th onclick="sortTableBy(\'opsl-table\',4,true)" style="cursor:pointer;text-align:right">Avg GP%</th>' +
-      '<th onclick="sortTableBy(\'opsl-table\',5,true)" style="cursor:pointer;text-align:right">Est. Recovery</th>' +
+      '<th onclick="sortTableBy(\'opsl-table\',4,true)" style="cursor:pointer;text-align:right">Baseline GP%</th>' +
+      '<th onclick="sortTableBy(\'opsl-table\',5,true)" style="cursor:pointer;text-align:right">Avg GP%</th>' +
+      '<th onclick="sortTableBy(\'opsl-table\',6,true)" style="cursor:pointer;text-align:right">Est. Recovery</th>' +
       '<th style="text-align:center">In Reorder Queue</th>' +
       '</tr></thead><tbody>' +
       rows.map(function(r) {
         var queueBadge = r.in_reorder_queue
           ? '<span style="color:var(--success);font-weight:600">&#10003; Yes</span>'
           : '<span style="color:var(--muted)">No</span>';
+        var baselineStr = r.baseline_gp_pct != null
+          ? fmtNum(r.baseline_gp_pct, 1) + '%'
+          : '<span style="color:var(--muted)">—</span>';
         return '<tr>' +
           '<td><span class="sku-id">' + escHtml(r.prod_line_pn) + '</span></td>' +
           '<td>' + escHtml(r.location_display) + '</td>' +
           '<td style="text-align:right;color:var(--critical);font-weight:600">' + fmtNum(r.opsl_count) + '</td>' +
           '<td style="text-align:right">$' + fmtNum(r.total_opsl_sales, 0) + '</td>' +
+          '<td style="text-align:right;color:var(--muted)">' + baselineStr + '</td>' +
           '<td style="text-align:right">' + fmtNum(r.avg_gp_pct, 1) + '%</td>' +
           '<td style="text-align:right;color:var(--blue);font-weight:600">$' + fmtNum(r.estimated_margin_recovery, 0) + '</td>' +
           '<td style="text-align:center">' + queueBadge + '</td>' +

@@ -296,8 +296,8 @@ def _build_dead_stock(client: Any, today: date) -> dict:
 
     rows = _paginate(
         client, "dead_stock_recommendations",
-        "sku_id,location_id,classification,action,total_inv_value,"
-        "qty_on_hand,days_since_sale,sale_frequency,abc_class,supplier_id",
+        "sku_id,location_id,classification,action,action_type,data_conflict,"
+        "total_inv_value,qty_on_hand,days_since_sale,sale_frequency,abc_class,supplier_id",
         filters={"report_date": report_date},
     )
 
@@ -306,6 +306,13 @@ def _build_dead_stock(client: Any, today: date) -> dict:
 
     liquidate_value = sum(float(r.get("total_inv_value") or 0) for r in liquidate)
     markdown_value  = sum(float(r.get("total_inv_value") or 0) for r in markdown)
+
+    # Data-conflict rows are suspect (qty/value may be wrong) — split out clean capital.
+    conflict_rows   = [r for r in rows if r.get("data_conflict") is True]
+    clean_rows      = [r for r in rows if r.get("data_conflict") is not True]
+    clean_capital   = sum(float(r.get("total_inv_value") or 0) for r in clean_rows
+                          if r.get("classification") in ("LIQUIDATE", "MARKDOWN"))
+    transfer_rows   = [r for r in rows if (r.get("action_type") or "").upper() == "TRANSFER"]
 
     top10 = sorted(
         liquidate,
@@ -318,12 +325,15 @@ def _build_dead_stock(client: Any, today: date) -> dict:
     return {
         "report_date": report_date,
         "kpis": {
-            "capital_at_risk":   round(liquidate_value + markdown_value, 2),
-            "liquidate_count":   len(liquidate),
-            "liquidate_value":   round(liquidate_value, 2),
-            "markdown_count":    len(markdown),
-            "markdown_value":    round(markdown_value, 2),
-            "total_positions":   len(rows),
+            "capital_at_risk":      round(liquidate_value + markdown_value, 2),
+            "clean_capital":        round(clean_capital, 2),
+            "liquidate_count":      len(liquidate),
+            "liquidate_value":      round(liquidate_value, 2),
+            "markdown_count":       len(markdown),
+            "markdown_value":       round(markdown_value, 2),
+            "transfer_count":       len(transfer_rows),
+            "data_conflict_count":  len(conflict_rows),
+            "total_positions":      len(rows),
         },
         "top10": top10,
     }
@@ -714,6 +724,33 @@ def _build_location_performance(client: Any, today: date) -> dict:
     except Exception:
         pass
 
+    # A-class SKU count per location from sku_location_class.
+    # Probe the table with a single row first; if empty skip the per-location counts.
+    try:
+        probe = (
+            client.table("sku_location_class")
+            .select("sku_id", count="exact")
+            .eq("abc_class", "A")
+            .limit(1)
+            .execute()
+        )
+        if (probe.count or 0) > 0:
+            a_class_by_loc: dict[str, int] = {}
+            for loc_id in list(loc_index.keys()):
+                resp = (
+                    client.table("sku_location_class")
+                    .select("sku_id", count="exact")
+                    .eq("abc_class", "A")
+                    .eq("location_id", loc_id)
+                    .limit(1)
+                    .execute()
+                )
+                a_class_by_loc[loc_id] = resp.count or 0
+            for loc_id, entry in loc_index.items():
+                entry["a_class_count"] = a_class_by_loc.get(loc_id, 0)
+    except Exception:
+        log.debug("sku_location_class count fetch failed — abc mix will be absent.")
+
     tier3_locs = [l["location_id"] for l in tiers.get(3, [])]
     tier3_critical: list[str] = []
     if tier3_locs:
@@ -847,6 +884,24 @@ def _build_anomaly_summary(client: Any, today: date) -> dict:
             "message":          (r.get("message") or "")[:220],
         }
 
+    import re as _re
+
+    def _fmt_gp(r: dict) -> dict:
+        base = _fmt(r)
+        msg = r.get("message") or ""
+        m = _re.search(r"(\d+\.?\d*)%\s+(?:to|->|→)\s+(\d+\.?\d*)%", msg)
+        if m:
+            base_pct = float(m.group(1))
+            curr_pct = float(m.group(2))
+            base["baseline_gp_pct"] = round(base_pct, 1)
+            base["current_gp_pct"]  = round(curr_pct, 1)
+            base["gp_drop"]         = round(base_pct - curr_pct, 1)
+        else:
+            base["baseline_gp_pct"] = None
+            base["current_gp_pct"]  = None
+            base["gp_drop"]         = None
+        return base
+
     # Location distribution — count anomaly alerts per location in sample set
     sample_locs = ["LOC-008", "LOC-025", "LOC-004", "LOC-001", "LOC-005"]
     loc_dist: dict[str, dict] = {
@@ -861,7 +916,7 @@ def _build_anomaly_summary(client: Any, today: date) -> dict:
         "total_flagged":         len(alert_rows),
         "top_high":              [_fmt(r) for r in vol_high[:8]],
         "top_low":               [_fmt(r) for r in vol_low[:5]],
-        "top_gp":                [_fmt(r) for r in gp_list[:8]],
+        "top_gp":                [_fmt_gp(r) for r in gp_list[:8]],
         "gp_count":              len(gp_list),
         "location_distribution": loc_dist,
     }
@@ -1006,30 +1061,50 @@ def _build_critical_actions(client: Any, today: date) -> list[dict]:
     today_iso = today.isoformat()
     actions: list[dict] = []
 
-    # --- 1. Today's critical alerts (any type — buyer triages) ---
+    # --- 1. Today's critical alerts + CHURN_RISK / OPSL_GAP (any severity) ---
     try:
         alerts = _paginate(
             client, "alerts",
-            "alert_type,severity,sku_id,location_id,supplier_id,message,alert_key",
+            "alert_type,severity,sku_id,location_id,supplier_id,message,alert_key,financial_impact",
             filters={"alert_date": today_iso, "severity": "critical"},
             eq_bool={"is_acknowledged": False},
         )
     except Exception:
         alerts = []
-    for a in alerts[:20]:
+    try:
+        extra_alerts = _paginate(
+            client, "alerts",
+            "alert_type,severity,sku_id,location_id,supplier_id,message,alert_key,financial_impact",
+            filters={"alert_date": today_iso},
+            in_filters={"alert_type": ["churn_risk", "opsl_gap"]},
+            eq_bool={"is_acknowledged": False},
+        )
+    except Exception:
+        extra_alerts = []
+    # Merge deduplicating by alert_key
+    seen_keys: set = set()
+    for a in alerts + extra_alerts:
+        k = a.get("alert_key") or id(a)
+        if k in seen_keys:
+            continue
+        seen_keys.add(k)
         loc = a.get("location_id") or ""
+        fi = float(a.get("financial_impact") or 0)
         actions.append({
-            "kind":        "alert",
-            "severity":    "critical",
-            "title":       (a.get("alert_type") or "alert").replace("_", " ").title(),
-            "description": (a.get("message") or "")[:200],
-            "sku_id":      a.get("sku_id"),
-            "location_id": loc,
+            "kind":             "alert",
+            "severity":         a.get("severity") or "critical",
+            "title":            (a.get("alert_type") or "alert").replace("_", " ").title(),
+            "description":      (a.get("message") or "")[:200],
+            "sku_id":           a.get("sku_id"),
+            "location_id":      loc,
             "location_display": _loc_display(loc) if loc else "",
-            "supplier_id": a.get("supplier_id"),
-            "alert_key":   a.get("alert_key"),
-            "action":      "Acknowledge",
+            "supplier_id":      a.get("supplier_id"),
+            "alert_key":        a.get("alert_key"),
+            "financial_impact": fi,
+            "action":           "Acknowledge",
         })
+        if len(actions) >= 20:
+            break
 
     # --- 2. Overdue open POs ---
     try:
@@ -1053,20 +1128,21 @@ def _build_critical_actions(client: Any, today: date) -> list[dict]:
         except Exception:
             value = 0.0
         actions.append({
-            "kind":        "overdue_po",
-            "severity":    "critical",
-            "title":       "Overdue PO",
-            "description": (
+            "kind":             "overdue_po",
+            "severity":         "critical",
+            "title":            "Overdue PO",
+            "description":      (
                 f"PO {p.get('po_number','')} for {p.get('sku_id','')} from "
                 f"{p.get('supplier_id','')} — expected "
                 f"{p.get('expected_delivery_date','')}, qty {p.get('qty_ordered',0)} "
                 f"(${value:,.0f})"
             ),
-            "sku_id":      p.get("sku_id"),
-            "supplier_id": p.get("supplier_id"),
-            "po_number":   p.get("po_number"),
-            "value":       round(value, 2),
-            "action":      "Chase supplier",
+            "sku_id":           p.get("sku_id"),
+            "supplier_id":      p.get("supplier_id"),
+            "po_number":        p.get("po_number"),
+            "financial_impact": round(value, 2),
+            "value":            round(value, 2),
+            "action":           "Chase supplier",
         })
 
     # --- 3. RED suppliers with any open PO ---
@@ -1092,21 +1168,25 @@ def _build_critical_actions(client: Any, today: date) -> list[dict]:
     for sid, s in latest_score.items():
         if (s.get("risk_flag") or "").lower() == "red" and open_po_by_sup.get(sid, 0) > 0:
             actions.append({
-                "kind":        "red_supplier",
-                "severity":    "warning",
-                "title":       "Red-flagged supplier with open POs",
-                "description": (
+                "kind":             "red_supplier",
+                "severity":         "warning",
+                "title":            "Red-flagged supplier with open POs",
+                "description":      (
                     f"{s.get('supplier_name') or sid} has "
                     f"{open_po_by_sup[sid]} open PO(s) — composite score "
                     f"{float(s.get('composite_score') or 0):.1f}"
                 ),
-                "supplier_id": sid,
-                "action":      "Review supplier",
+                "supplier_id":      sid,
+                "financial_impact": 0.0,
+                "action":           "Review supplier",
             })
 
-    # Cap final list and pin critical first.
+    # Sort by financial_impact desc, then severity.
     sev_rank = {"critical": 0, "warning": 1, "info": 2}
-    actions.sort(key=lambda a: sev_rank.get(a.get("severity", "info"), 9))
+    actions.sort(key=lambda a: (
+        -(float(a.get("financial_impact") or 0)),
+        sev_rank.get(a.get("severity", "info"), 9),
+    ))
     return actions[:30]
 
 
@@ -1237,7 +1317,7 @@ def _build_stocking_gaps(client: Any, today: date) -> dict:
         "transfer_frequency,transfer_streak,avg_qty_recommended,"
         "total_transfer_value,gap_score,gap_classification,"
         "suggested_stock_increase,current_reorder_point,"
-        "annual_cost_savings,trend_direction",
+        "annual_cost_savings,trend_direction,double_confirmed,confidence",
         filters={"analysis_date": analysis_date},
     )
 
@@ -1284,12 +1364,15 @@ def _build_stocking_gaps(client: Any, today: date) -> dict:
                                        if r.get("current_reorder_point") is not None else None,
             "annual_cost_savings":     savings if cls == "CHRONIC" else None,
             "trend_direction":         r.get("trend_direction") or "STABLE",
+            "double_confirmed":        bool(r.get("double_confirmed")),
+            "confidence":              r.get("confidence"),
         })
 
-    # Keep top 20 chronic-first per location, round totals
+    # Keep top 20: double_confirmed first, then chronic-first, then savings
     for b in by_loc.values():
         cls_rank = {"CHRONIC": 0, "RECURRING": 1, "OCCASIONAL": 2}
         b["rows"].sort(key=lambda r: (
+            0 if r.get("double_confirmed") else 1,
             cls_rank.get(r["gap_classification"], 9),
             -(r.get("annual_cost_savings") or 0),
             -r["transfer_frequency"],
@@ -1352,7 +1435,7 @@ def _build_understocking(client: Any, today: date) -> dict:
         "stockout_days_pct,days_observed,days_below_reorder,"
         "avg_daily_demand,current_min_qty,suggested_min_qty,min_qty_gap,"
         "unit_cost,inventory_value_at_risk,transfer_recommended_count,"
-        "priority_score",
+        "priority_score,financial_severity,network_flag,double_confirmed",
         filters={"report_date": report_date},
         not_null_cols=["run_completed_at"],
     )
@@ -1387,11 +1470,17 @@ def _build_understocking(client: Any, today: date) -> dict:
             "inventory_value_at_risk":    v,
             "transfer_recommended_count": int(r.get("transfer_recommended_count") or 0),
             "priority_score":             float(r.get("priority_score") or 0),
+            "financial_severity":         float(r.get("financial_severity") or 0),
+            "network_flag":               bool(r.get("network_flag")),
+            "double_confirmed":           bool(r.get("double_confirmed")),
         })
 
-    # Sort each location's rows by priority_score desc; round totals.
+    # Sort each location's rows: double_confirmed first, then by financial_severity desc.
     for b in by_loc.values():
-        b["rows"].sort(key=lambda r: r["priority_score"], reverse=True)
+        b["rows"].sort(key=lambda r: (
+            0 if r.get("double_confirmed") else 1,
+            -(r.get("financial_severity") or r.get("priority_score") or 0),
+        ))
         b["total_value_at_risk"] = round(b["total_value_at_risk"], 2)
 
     locations = sorted(by_loc.values(), key=lambda b: b["location_name"])
@@ -1446,7 +1535,7 @@ def _build_opsl_intelligence(client: Any, today: date) -> dict:
         rows = _paginate(
             client, "opsl_flags",
             "prod_line_pn,location_id,opsl_count,total_opsl_sales,"
-            "avg_gp_pct,estimated_margin_recovery,flag,last_opsl_date,in_reorder_queue,run_date",
+            "avg_gp_pct,baseline_gp_pct,estimated_margin_recovery,flag,last_opsl_date,in_reorder_queue,run_date",
         )
     except Exception:
         return {"high": 0, "medium": 0, "low": 0, "total_recovery": 0.0, "run_date": None, "high_rows": []}
@@ -1463,13 +1552,16 @@ def _build_opsl_intelligence(client: Any, today: date) -> dict:
             run_date = rd
         if flag == "HIGH":
             loc_id = r.get("location_id") or ""
+            raw_baseline = r.get("baseline_gp_pct")
+            raw_avg      = r.get("avg_gp_pct")
             high_rows.append({
                 "prod_line_pn":              r.get("prod_line_pn"),
                 "location_id":               loc_id,
                 "location_display":          _loc_display(loc_id),
                 "opsl_count":                int(r.get("opsl_count") or 0),
                 "total_opsl_sales":          round(float(r.get("total_opsl_sales") or 0), 2),
-                "avg_gp_pct":                round(float(r.get("avg_gp_pct") or 0) * 100, 1),
+                "avg_gp_pct":                round(float(raw_avg or 0) * 100, 1),
+                "baseline_gp_pct":           round(float(raw_baseline) * 100, 1) if raw_baseline is not None else None,
                 "estimated_margin_recovery": round(float(r.get("estimated_margin_recovery") or 0), 2),
                 "in_reorder_queue":          bool(r.get("in_reorder_queue")),
             })

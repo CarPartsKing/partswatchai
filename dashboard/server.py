@@ -272,15 +272,16 @@ def _build_reorder(client: Any, today: date) -> dict:
 
 
 def _build_dead_stock(client: Any, today: date) -> dict:
-    """Dead-stock summary for the most recent dead_stock pipeline run.
+    """Dead-stock summary via the get_dead_stock_summary RPC (migration 051).
+
+    Falls back to the full paginate path if the RPC is not yet deployed so
+    the dashboard stays functional before the migration is applied.
 
     Returns:
-        kpis:   capital-at-risk totals (LIQUIDATE + MARKDOWN)
-        top10:  top-10 LIQUIDATE candidates by inventory dollar value
+        kpis:        aggregated totals (capital, clean capital, counts by class)
+        top10:       top-10 LIQUIDATE rows by inventory dollar value
         report_date: the date of the report being shown
     """
-    # Latest report — same pattern as _build_reorder so a missed nightly
-    # run still shows the most recent valid data instead of an empty card.
     try:
         latest = (
             client.table("dead_stock_recommendations")
@@ -294,6 +295,45 @@ def _build_dead_stock(client: Any, today: date) -> dict:
     except Exception:
         report_date = today.isoformat()
 
+    # --- Fast path: single server-side aggregation RPC ---
+    try:
+        raw = client.rpc("get_dead_stock_summary", {"p_report_date": report_date}).execute()
+        payload = raw.data
+        # supabase-py returns a scalar json as the value itself (dict),
+        # but some versions wrap it in a single-element list.
+        if isinstance(payload, list):
+            payload = payload[0] if payload else {}
+        if not isinstance(payload, dict):
+            raise ValueError(f"unexpected RPC response type: {type(payload)}")
+
+        kpis_raw = payload.get("kpis") or {}
+        top10    = payload.get("top10") or []
+
+        for r in top10:
+            r["location_display"] = _loc_display(r.get("location_id") or "")
+
+        def _num(v: Any) -> float:
+            return round(float(v or 0), 2)
+
+        return {
+            "report_date": report_date,
+            "kpis": {
+                "capital_at_risk":     _num(kpis_raw.get("capital_at_risk")),
+                "clean_capital":       _num(kpis_raw.get("clean_capital")),
+                "liquidate_count":     int(kpis_raw.get("liquidate_count") or 0),
+                "liquidate_value":     _num(kpis_raw.get("liquidate_value")),
+                "markdown_count":      int(kpis_raw.get("markdown_count") or 0),
+                "markdown_value":      _num(kpis_raw.get("markdown_value")),
+                "transfer_count":      int(kpis_raw.get("transfer_count") or 0),
+                "data_conflict_count": int(kpis_raw.get("data_conflict_count") or 0),
+                "total_positions":     int(kpis_raw.get("total_positions") or 0),
+            },
+            "top10": top10,
+        }
+    except Exception as exc:
+        log.warning("get_dead_stock_summary RPC failed (%s) — falling back to paginate", exc)
+
+    # --- Fallback: full paginate (pre-migration 051) ---
     rows = _paginate(
         client, "dead_stock_recommendations",
         "sku_id,location_id,classification,action,action_type,data_conflict,"
@@ -307,33 +347,30 @@ def _build_dead_stock(client: Any, today: date) -> dict:
     liquidate_value = sum(float(r.get("total_inv_value") or 0) for r in liquidate)
     markdown_value  = sum(float(r.get("total_inv_value") or 0) for r in markdown)
 
-    # Data-conflict rows are suspect (qty/value may be wrong) — split out clean capital.
-    conflict_rows   = [r for r in rows if r.get("data_conflict") is True]
-    clean_rows      = [r for r in rows if r.get("data_conflict") is not True]
-    clean_capital   = sum(float(r.get("total_inv_value") or 0) for r in clean_rows
-                          if r.get("classification") in ("LIQUIDATE", "MARKDOWN"))
-    transfer_rows   = [r for r in rows if (r.get("action_type") or "").upper() == "TRANSFER"]
+    conflict_rows = [r for r in rows if r.get("data_conflict") is True]
+    clean_capital = sum(
+        float(r.get("total_inv_value") or 0) for r in rows
+        if r.get("data_conflict") is not True
+        and r.get("classification") in ("LIQUIDATE", "MARKDOWN")
+    )
+    transfer_rows = [r for r in rows if (r.get("action_type") or "").upper() == "TRANSFER"]
 
-    top10 = sorted(
-        liquidate,
-        key=lambda r: float(r.get("total_inv_value") or 0),
-        reverse=True,
-    )[:10]
+    top10 = sorted(liquidate, key=lambda r: float(r.get("total_inv_value") or 0), reverse=True)[:10]
     for r in top10:
         r["location_display"] = _loc_display(r.get("location_id", ""))
 
     return {
         "report_date": report_date,
         "kpis": {
-            "capital_at_risk":      round(liquidate_value + markdown_value, 2),
-            "clean_capital":        round(clean_capital, 2),
-            "liquidate_count":      len(liquidate),
-            "liquidate_value":      round(liquidate_value, 2),
-            "markdown_count":       len(markdown),
-            "markdown_value":       round(markdown_value, 2),
-            "transfer_count":       len(transfer_rows),
-            "data_conflict_count":  len(conflict_rows),
-            "total_positions":      len(rows),
+            "capital_at_risk":     round(liquidate_value + markdown_value, 2),
+            "clean_capital":       round(clean_capital, 2),
+            "liquidate_count":     len(liquidate),
+            "liquidate_value":     round(liquidate_value, 2),
+            "markdown_count":      len(markdown),
+            "markdown_value":      round(markdown_value, 2),
+            "transfer_count":      len(transfer_rows),
+            "data_conflict_count": len(conflict_rows),
+            "total_positions":     len(rows),
         },
         "top10": top10,
     }

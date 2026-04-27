@@ -46,6 +46,7 @@ _MAX_SESSIONS = 50          # prune oldest when limit reached
 
 _PAGE_SIZE = 1_000
 _LOW_SUPPLY_DAYS = 3.0
+_SECTION_TIMEOUT_S = 8   # per-section wall-clock limit; exceeded → None returned
 
 LOCATION_NAMES: dict[str, str] = {
     "LOC-001": "BROOKPARK",
@@ -315,6 +316,10 @@ def _build_dead_stock(client: Any, today: date) -> dict:
         def _num(v: Any) -> float:
             return round(float(v or 0), 2)
 
+        log.info(
+            "dead_stock: RPC fast path succeeded (report_date=%s, positions=%d)",
+            report_date, int(kpis_raw.get("total_positions") or 0),
+        )
         return {
             "report_date": report_date,
             "kpis": {
@@ -1682,11 +1687,26 @@ def dashboard_data():
             section_client = get_new_client()
         except Exception:
             section_client = client
+
+        # Each section runs in its own inner thread so we can enforce a
+        # hard wall-clock limit.  inner.shutdown(wait=False) lets _run_section
+        # return immediately on timeout; the stalled thread keeps running
+        # until its Supabase request eventually completes or the process exits.
+        data: Any = None
+        inner = ThreadPoolExecutor(max_workers=1)
+        inner_fut = inner.submit(fn, section_client, today)
         try:
-            data = fn(section_client, today)
+            data = inner_fut.result(timeout=_SECTION_TIMEOUT_S)
+        except TimeoutError:
+            log.warning(
+                "[section] %s TIMED OUT after %ds — returning None",
+                name, _SECTION_TIMEOUT_S,
+            )
         except Exception:
             log.exception("Dashboard section '%s' failed.", name)
-            data = None
+        finally:
+            inner.shutdown(wait=False)
+
         ms = int((time.perf_counter() - s_t0) * 1000)
         log.info("[section] %s DONE in %dms", name, ms)
         return name, data, ms

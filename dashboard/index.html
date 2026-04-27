@@ -1986,6 +1986,73 @@ function renderPipelineStatus(items) {
   document.getElementById('pipeline-body').innerHTML = '<div class="pipeline-grid">' + html + '</div>';
 }
 
+// ---------------------------------------------------------------------------
+// Deferred section loading — each slow panel fetches /api/section/<name>
+// independently so a slow query can never block the initial page render.
+// ---------------------------------------------------------------------------
+
+var DEFERRED_SECTIONS = [
+  // user-specified slow sections first
+  { name: 'dead_stock',           render: renderDeadStock,        bodyId: 'dead-stock-body',      updatedId: 'dead-stock-updated' },
+  { name: 'stocking_gaps',        render: renderStockingGaps,     bodyId: 'stocking-gaps-body',   updatedId: 'stocking-gaps-updated' },
+  { name: 'location_performance', render: renderLocations,         bodyId: 'location-body',        updatedId: 'location-updated' },
+  { name: 'anomaly_summary',      render: renderAnomalySummary,   bodyId: 'anomaly-body',         updatedId: 'anomaly-updated' },
+  // remaining non-fast sections
+  { name: 'opsl_intelligence',    render: renderOPSLIntelligence, bodyId: 'opsl-body',            updatedId: 'opsl-updated' },
+  { name: 'inventory_health',     render: renderInventoryHealth,  bodyId: 'inventory-body',       updatedId: 'inventory-updated' },
+  { name: 'understocking',        render: renderUnderstocking,    bodyId: 'understocking-body',   updatedId: 'understocking-updated' },
+  { name: 'transfers',            render: renderTransfers,         bodyId: 'transfers-body',       updatedId: 'transfers-updated' },
+  { name: 'top_skus',             render: renderTopSKUs,          bodyId: 'topsku-body',          updatedId: 'topsku-updated' },
+  { name: 'supplier_health',      render: renderSupplierHealth,   bodyId: 'supplier-health-body', updatedId: 'supplier-health-updated' },
+  { name: 'supplier_detail',      render: renderSupplierDetail,   bodyId: 'supplier-body',        updatedId: 'supplier-updated' },
+  { name: 'network_kpis',         render: renderKPIs,             bodyId: null,                   updatedId: null },
+  { name: 'pipeline_status',      render: renderPipelineStatus,   bodyId: 'pipeline-body',        updatedId: 'pipeline-updated' },
+];
+
+function _showSectionError(s) {
+  if (s.updatedId) {
+    var upd = document.getElementById(s.updatedId);
+    if (upd) upd.textContent = 'Data unavailable';
+  }
+  if (s.bodyId) {
+    var body = document.getElementById(s.bodyId);
+    if (body) {
+      var skel = body.querySelector('.skeleton');
+      if (skel) {
+        skel.style.background = 'none';
+        skel.style.height = 'auto';
+        skel.style.animation = 'none';
+        skel.innerHTML = '<div style="padding:16px;color:var(--muted);font-size:12px">Data unavailable — will retry on next refresh</div>';
+      }
+    }
+  }
+}
+
+function loadDeferredSections() {
+  DEFERRED_SECTIONS.forEach(function(s) {
+    // Mark as loading in the timestamp slot
+    if (s.updatedId) {
+      var upd = document.getElementById(s.updatedId);
+      if (upd) upd.textContent = 'Loading…';
+    }
+    fetch('/api/section/' + s.name)
+      .then(function(resp) {
+        if (!resp.ok) throw new Error('HTTP ' + resp.status);
+        return resp.json();
+      })
+      .then(function(json) {
+        if (json.data != null) {
+          s.render(json.data);
+        } else {
+          _showSectionError(s);
+        }
+      })
+      .catch(function() {
+        _showSectionError(s);
+      });
+  });
+}
+
 async function loadData() {
   setStatus('loading');
   document.getElementById('error-area').innerHTML = '';
@@ -1995,25 +2062,16 @@ async function loadData() {
     var data = await resp.json();
     if (data.error) throw new Error(data.error);
 
+    // Fast sections — always present in /api/dashboard response
     if (data.critical_actions != null) renderCriticalActions(data.critical_actions);
-    if (data.morning_brief)        renderMorningBrief(data.morning_brief);
-    if (data.alerts)               renderAlertSummary(data.alerts.summary || {});
-    if (data.alerts)               renderAlerts(data.alerts.items || []);
-    if (data.reorder != null)      renderReorder(data.reorder);
-    if (data.dead_stock != null)   renderDeadStock(data.dead_stock);
-    if (data.churn_summary != null)     renderChurnSummary(data.churn_summary);
-    if (data.opsl_intelligence != null) renderOPSLIntelligence(data.opsl_intelligence);
-    if (data.inventory_health)          renderInventoryHealth(data.inventory_health);
-    if (data.understocking != null)   renderUnderstocking(data.understocking);
-    if (data.stocking_gaps != null)   renderStockingGaps(data.stocking_gaps);
-    if (data.transfers != null)    renderTransfers(data.transfers);
-    if (data.location_performance) renderLocations(data.location_performance);
-    if (data.top_skus)             renderTopSKUs(data.top_skus);
-    if (data.supplier_health)      renderSupplierHealth(data.supplier_health);
-    if (data.supplier_detail)      renderSupplierDetail(data.supplier_detail);
-    if (data.anomaly_summary)      renderAnomalySummary(data.anomaly_summary);
-    if (data.network_kpis)         renderKPIs(data.network_kpis);
-    if (data.pipeline_status)      renderPipelineStatus(data.pipeline_status);
+    if (data.morning_brief)            renderMorningBrief(data.morning_brief);
+    if (data.alerts)                   renderAlertSummary(data.alerts.summary || {});
+    if (data.alerts)                   renderAlerts(data.alerts.items || []);
+    if (data.reorder != null)          renderReorder(data.reorder);
+    if (data.churn_summary != null)    renderChurnSummary(data.churn_summary);
+
+    // Slow sections — fire independent fetches; panels show skeleton until data arrives
+    loadDeferredSections();
 
     document.getElementById('last-updated').textContent =
       'Last updated ' + nowStr() + ' \u00B7 ' + data.query_ms + 'ms';

@@ -1638,9 +1638,47 @@ def _build_opsl_intelligence(client: Any, today: date) -> dict:
     }
 
 
+# ---------------------------------------------------------------------------
+# Section registry — every builder indexed by canonical name.
+# _FAST_SECTIONS are served by /api/dashboard immediately (target <4s).
+# All other sections are served by /api/section/<name> and loaded by the
+# browser asynchronously after the page renders, so a slow section can
+# never block the initial page load.
+# ---------------------------------------------------------------------------
+
+_SECTION_BUILDERS: dict[str, Any] = {
+    "critical_actions":     _build_critical_actions,
+    "morning_brief":        _build_morning_brief,
+    "alerts":               _build_alerts,
+    "reorder":              _build_reorder,
+    "dead_stock":           _build_dead_stock,
+    "churn_summary":        _build_churn_summary,
+    "opsl_intelligence":    _build_opsl_intelligence,
+    "inventory_health":     _build_inventory_health,
+    "understocking":        _build_understocking,
+    "stocking_gaps":        _build_stocking_gaps,
+    "transfers":            _build_transfer_activity,
+    "location_performance": _build_location_performance,
+    "top_skus":             _build_top_skus,
+    "supplier_health":      _build_supplier_health,
+    "supplier_detail":      _build_supplier_detail,
+    "anomaly_summary":      _build_anomaly_summary,
+    "network_kpis":         _build_network_kpis,
+    "pipeline_status":      _build_pipeline_status,
+}
+
+_FAST_SECTIONS = frozenset({
+    "critical_actions", "morning_brief", "alerts", "reorder", "churn_summary",
+})
+
+
 @app.route("/api/dashboard")
 def dashboard_data():
-    """Return all dashboard sections as a single JSON payload."""
+    """Return the 5 fast sections immediately (<4s target).
+
+    Slow sections (dead_stock, stocking_gaps, location_performance, etc.) are
+    served by /api/section/<name> and fetched independently by the browser.
+    """
     t0 = time.perf_counter()
     today = date.today()
     try:
@@ -1654,24 +1692,9 @@ def dashboard_data():
     }
 
     sections = [
-        ("critical_actions",     _build_critical_actions),
-        ("morning_brief",        _build_morning_brief),
-        ("alerts",               _build_alerts),
-        ("reorder",              _build_reorder),
-        ("dead_stock",           _build_dead_stock),
-        ("churn_summary",        _build_churn_summary),
-        ("opsl_intelligence",    _build_opsl_intelligence),
-        ("inventory_health",     _build_inventory_health),
-        ("understocking",        _build_understocking),
-        ("stocking_gaps",        _build_stocking_gaps),
-        ("transfers",            _build_transfer_activity),
-        ("location_performance", _build_location_performance),
-        ("top_skus",             _build_top_skus),
-        ("supplier_health",      _build_supplier_health),
-        ("supplier_detail",      _build_supplier_detail),
-        ("anomaly_summary",      _build_anomaly_summary),
-        ("network_kpis",         _build_network_kpis),
-        ("pipeline_status",      _build_pipeline_status),
+        (name, fn)
+        for name, fn in _SECTION_BUILDERS.items()
+        if name in _FAST_SECTIONS
     ]
 
     # Run all sections in parallel.  Each section gets its OWN Supabase
@@ -1728,6 +1751,43 @@ def dashboard_data():
         ", ".join(f"{n}={ms}ms" for n, ms in slowest),
     )
     return jsonify(payload)
+
+
+@app.route("/api/section/<name>")
+def section_data(name: str):
+    """Serve a single deferred section by canonical name.
+
+    Called by the browser after the fast /api/dashboard response renders,
+    one fetch per panel.  Returns {"name": ..., "data": ..., "query_ms": ...}.
+    data is null if the section timed out or raised an exception.
+    """
+    if name not in _SECTION_BUILDERS:
+        return jsonify({"error": f"unknown section '{name}'"}), 404
+
+    today = date.today()
+    t0 = time.perf_counter()
+    try:
+        section_client = get_new_client()
+    except Exception as exc:
+        log.exception("Supabase connection failed for section '%s'.", name)
+        return jsonify({"error": str(exc)}), 503
+
+    fn = _SECTION_BUILDERS[name]
+    inner = ThreadPoolExecutor(max_workers=1)
+    inner_fut = inner.submit(fn, section_client, today)
+    data: Any = None
+    try:
+        data = inner_fut.result(timeout=_SECTION_TIMEOUT_S)
+    except TimeoutError:
+        log.warning("[section] %s TIMED OUT after %ds", name, _SECTION_TIMEOUT_S)
+    except Exception:
+        log.exception("Section '%s' failed.", name)
+    finally:
+        inner.shutdown(wait=False)
+
+    ms = round((time.perf_counter() - t0) * 1000)
+    log.info("[section] %s served in %dms", name, ms)
+    return jsonify({"name": name, "data": data, "query_ms": ms})
 
 
 @app.route("/api/dead-stock/export.csv")

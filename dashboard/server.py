@@ -1303,6 +1303,27 @@ def _build_pipeline_status(client: Any, today: date) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
+# Security headers
+# ---------------------------------------------------------------------------
+
+@app.after_request
+def set_security_headers(response):
+    # The dashboard uses inline <script> and <style> blocks only — no CDN.
+    # This explicit CSP overrides any restrictive header Render's proxy might
+    # inject, which otherwise causes a black screen on eval/inline-script blocks.
+    response.headers["Content-Security-Policy"] = (
+        "default-src 'self'; "
+        "script-src 'self' 'unsafe-inline' 'unsafe-eval'; "
+        "style-src 'self' 'unsafe-inline'; "
+        "img-src 'self' data: blob:; "
+        "connect-src 'self'; "
+        "font-src 'self' data:; "
+        "frame-ancestors 'none';"
+    )
+    return response
+
+
+# ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
 

@@ -894,6 +894,25 @@
 </div>
 
 <script>
+// Global error handler — catches syntax errors and uncaught exceptions in the
+// main script block below. Must live in a separate <script> tag that parses
+// successfully before the main one runs.
+window._pwShowError = function(label, msg, stack) {
+  var div = document.createElement('div');
+  div.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:99999;background:#b00020;color:#fff;padding:16px 20px;font:bold 13px/1.5 monospace;white-space:pre-wrap;box-shadow:0 4px 16px rgba(0,0,0,.6)';
+  div.textContent = label + ': ' + msg + (stack ? '\n\n' + stack : '');
+  document.body.insertAdjacentElement('afterbegin', div);
+};
+window.onerror = function(msg, src, line, col, err) {
+  window._pwShowError('Uncaught JS Error (line ' + line + ')', msg, err && err.stack ? err.stack : '');
+};
+window.addEventListener('unhandledrejection', function(e) {
+  var r = e.reason || {};
+  window._pwShowError('Unhandled Promise Rejection', r.message || String(r), r.stack || '');
+});
+</script>
+
+<script>
 const REFRESH_INTERVAL_MS = 5 * 60 * 1000;
 let countdownTimer = null;
 let countdownSecs = REFRESH_INTERVAL_MS / 1000;
@@ -2002,6 +2021,9 @@ async function loadData() {
     startCountdown();
   } catch (err) {
     setStatus('error');
+    if (window._pwShowError) {
+      window._pwShowError('loadData() Error', err.message || String(err), err.stack || '');
+    }
     document.getElementById('error-area').innerHTML =
       '<div class="error-banner">Failed to load dashboard data: ' + escHtml(err.message) + '. Retrying in 30 seconds.</div>';
     setTimeout(loadData, 30000);
